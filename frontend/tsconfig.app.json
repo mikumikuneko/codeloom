@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* 路径别名：`@/xxx` → `src/xxx`。vite.config.ts 里那份是给打包器的，
+       这份是给 tsc 的 —— **两边都要写**，少一边就是"编辑器报红但能跑"或者反过来。
+
+       刻意**不写 baseUrl**：TS 6 起它被弃用（7.0 会失效），而 paths 在没有 baseUrl 时
+       按这个 tsconfig 所在的目录解析 —— 正是我们想要的（`./src/*` 就是相对它） */
+    "paths": { "@/*": ["./src/*"] },
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src"]
+}

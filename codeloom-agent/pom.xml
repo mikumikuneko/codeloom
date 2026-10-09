@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.codeloom</groupId>
+    <artifactId>codeloom</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>codeloom-agent</artifactId>
+  <name>codeloom-agent</name>
+  <description>
+    Agent 运行时：自建的 OpenAI 兼容 HTTP 客户端（含 SSE 增量解析与
+    tool_calls 分片拼接）、消息中间表示（IR）、agent 循环、工具集、验证闭环。
+
+    纯逻辑模块，不碰数据库、也不碰 git —— 要跑命令走 domain 的 CommandExecutor 端口，
+    要读写工作区直接用 java.nio.file。依赖只有 domain，所以它能被纯单测覆盖
+    （假 LLM + 临时目录 + 内存事件存储），那几个测试不加载任何容器。
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.codeloom</groupId>
+      <artifactId>codeloom-domain</artifactId>
+    </dependency>
+
+    <!-- 自建 LLM 客户端：JDK HttpClient + Jackson 手写 SSE 解析 -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!--
+        把测试类也打成一个 jar（test-jar），让下游模块的测试能用这里的夹具。
+
+        为什么值得：下游（codeloom-app）的接口测试需要"一个按剧本返回模型结果的假客户端"，
+        而那份夹具的**行为**（脚本用完了怎么办、错误信息怎么写）只该定义一次 ——
+        在拿到 test-jar 之前，它是在两个模块里各自演化的，而且已经漂移了。
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>test-jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

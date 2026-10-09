@@ -1,0 +1,216 @@
+spring:
+  application:
+    name: codeloom
+
+  # 默认激活 local。**它是为了"从 IDEA 里点一下 Run 就能跑"** ——
+  # 否则每次都要在运行配置里手填 SPRING_PROFILES_ACTIVE，而忘了填的表现是
+  # "应用起来了、但连不上库"，看起来像环境问题。
+  #
+  # 这个默认是安全的：**profile 对应的文件不存在不会报错**（Spring 只是少读一份配置），
+  # 所以别人 clone 下来没有 application-local.yml 时，一切照旧。
+  #
+  # 环境变量 SPRING_PROFILES_ACTIVE 的优先级更高，部署时照旧能覆盖它。
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:local}
+
+  # application-local.yml 在 classpath 上（src/main/resources），所以那个 profile
+  # 一旦激活，从任何工作目录启动都读得到它；它也不进 jar（排除在 pom 的 maven-jar-plugin 上）。
+  # 这两条为什么必须同时成立，见那份文件自己开头几行。
+
+  # 虚拟线程：agent 循环的瓶颈是长时间阻塞等待 LLM 流式响应（IO 密集 + 长连接），
+  # 虚拟线程让我们用同步写法拿到异步吞吐。因此明确不引入 WebFlux。
+  threads:
+    virtual:
+      enabled: true
+
+  # 主机名走 `codeloom.db-host` / `codeloom.redis-host`（定义在文件末尾的 codeloom 段）。
+  # 中间多一层是为了**让"换成另一台机器"这件事只在一处发生**：
+  # IDEA 里直接启动靠 application-local.yml 给这两个键赋值，而那份文件不进版本库。
+  #
+  # 默认是 localhost —— 那个地址是"任何人 clone 下来都能跑通"的前提：
+  # 在 docs/deploy/middleware/ 里 docker compose up 一下，默认值就是对的，零配置。
+  #
+  # 其余四个占位符（端口 / 库名 / 账号 / 密码）照旧，默认都是本地那套。
+  #
+  # rewriteBatchedStatements=true 是给事件表的高频批量追加用的，别删。
+  datasource:
+    url: jdbc:mysql://${codeloom.db-host}:${CODELOOM_DB_PORT:3306}/${CODELOOM_DB_NAME:codeloom}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+    username: ${CODELOOM_DB_USER:root}
+    password: ${CODELOOM_DB_PASSWORD:root}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      pool-name: codeloom-pool
+      maximum-pool-size: 20
+
+  data:
+    redis:
+      host: ${codeloom.redis-host}
+      port: ${CODELOOM_REDIS_PORT:6379}
+      password: ${CODELOOM_REDIS_PASSWORD:root}
+      database: 0
+      timeout: 3s
+
+  # 会话状态存 Redis（见 codeloom-app/pom.xml 里那个依赖的注释），
+  # 于是**任何一个实例都能认识任一实例登录出来的会话** —— 水平扩展的前提。
+  #
+  # 用默认的存储类型（RedisSessionRepository，一条 hash + TTL），
+  # 它不需要 Redis 的 keyspace 通知；换成 indexed 那个就要在服务端开 notify-keyspace-events，
+  # 而那是一次部署配置的改动，别无声无息地依赖上。
+  session:
+    timeout: 12h
+    redis:
+      namespace: codeloom:session
+      # immediate：属性被写入的那一刻就落 Redis，于是不存在"响应的 Set-Cookie 已经发给
+      # 客户端、而会话还没写进去"那个窗口。默认的 on_save 在请求结束才写，
+      # 窗口极小但确实存在 —— 而认证恰恰是最不该赌这个的地方
+      flush-mode: immediate
+
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+
+server:
+  port: ${CODELOOM_PORT:8080}
+
+  servlet:
+    session:
+      cookie:
+        # SameSite=Lax 是这套认证的**安全前提**，不是可选调优：跨站请求不会带上这个
+        # cookie，于是伪造的 POST 是匿名的、没有任何可冒用的权限 —— CSRF 由此不成立。
+        # 这就是 SecurityConfig 里敢关掉 CSRF 校验的原因，动它之前先看那边的注释。
+        #
+        # HttpOnly 让它读不到 XSS 脚本；Secure 只在 HTTPS 下有意义，
+        # 本地开发是 http，所以这里不设（部署时设成 true）。
+        same-site: lax
+        http-only: true
+
+codeloom:
+  # ------------------------------------------------------------------
+  # 中间件在哪台机器上（见文件开头 spring.datasource / spring.data.redis 的注释）
+  #
+  # **默认 localhost，而且这里就是唯一的默认值**：换成另一台机器只改这两行，
+  # 而 IDEA 里直接启动时改的是 application-local.yml 里同名的两个键（不进版本库）。
+  #
+  # 环境变量仍然有效（而且优先级最高）：CODELOOM_DB_HOST / CODELOOM_REDIS_HOST。
+  # ------------------------------------------------------------------
+  db-host: ${CODELOOM_DB_HOST:localhost}
+  redis-host: ${CODELOOM_REDIS_HOST:localhost}
+
+  # 本实例的标识，只用于排障：执行租约在 Redis 里的值以它开头，
+  # redis-cli 里一眼能看出是哪台机器拿着锁。上 k8s 时设成 pod 名。
+  instance-id: ${CODELOOM_INSTANCE_ID:${random.uuid}}
+
+  # 执行租约的 TTL。续约节奏自动取它的三分之一（允许连续两次续约失败才判死）。
+  # 别调太小：一个跑构建的长工具调用会在中途失去锁。
+  lease-ttl: ${CODELOOM_LEASE_TTL:30s}
+
+  # 崩溃恢复没有开关：启动时把"执行到一半的工具调用"补写成 ToolInterrupted（防止重放），
+  # 到此为止 —— 不自动接着跑。见 CrashRecovery 的类注释。
+
+  # 模型 API Key **只有一处来源**：用户在界面上配，密钥按 (userId, provider)
+  # 加密存进 user_api_key 表，读写走 PUT/GET/DELETE /api/auth/api-key。
+  #
+  # 这里从前还有一个 codeloom.dev-api-key（用户没配时的兜底，为了本地少配一遍）。
+  # 它删掉了 —— **后端不该是一个能配 key 的地方**：除了一条谁都不该走的路径，
+  # 它还让"这份凭据算谁的"变得含糊（按账号算的额度与限流全都跟着含糊）。
+  # 于是本地跑之前也得先在界面上把这家的 key 配上。
+
+  # BYOK 的主密钥：保护**所有人**的 API Key，base64 的 32 字节。
+  #
+  # 【刻意没有默认值，而且刻意不自动生成】。自动生成的那个会在下次重启时变成另一个，
+  # 于是已经存进库的密钥**一夜之间全部解不开** —— 那是比"启动失败"严重得多的故障。
+  #
+  # 没配只是"BYOK 用不了"，**不拦启动**（用开发用 key 跑演示、跑不碰密钥的测试都该能起来）；
+  # 但配了却是错的（不是合法 base64、长度不对）会立刻炸 —— 那种错当场发现最省事。
+  #
+  # 生成：openssl rand -base64 32
+  secret-key: ${CODELOOM_SECRET_KEY:}
+
+  # ------------------------------------------------------------------
+  # 以下是文件系统上的东西。
+  #
+  # **默认（留空）是从项目根推导**，不是"相对于当前工作目录" —— 那两者在
+  # 启动方式不同时给出不同答案（同一份配置两种结果，而库里的 repo_path 是绝对
+  # 路径、两边都"能用"，界面上完全看不出来）。
+  #
+  # 推导规则见 DataPaths：**从工作目录往上找有 .git 的那一层**，那就是项目根；
+  # 数据统一落在 <项目根>/data/ 下（见 .gitignore 里那条 data/）。
+  # 锚点由代码定，不由启动方式定 —— 所以从哪启动、谁的机器、谁 clone 下来，
+  # 都是同一个位置。
+  #
+  # 找不到项目根（比如打包成 jar 拿到别处跑）**直接启动失败**，不悄悄换个地方放 ——
+  # 数据落在哪儿是运维决定，不该猜。
+  # ------------------------------------------------------------------
+
+  # 项目的 git 仓库根目录：每个项目一个独立仓库。
+  # 注意它和 workspaces-root 是**兄弟关系**，不能互相嵌套 ——
+  # 会话的 worktree 从项目仓库分出来，放进仓库里会被当成未跟踪文件。
+  repos-root: ${CODELOOM_REPOS_ROOT:}
+
+  # 工作区根目录：一棵树一个 worktree，位于 <root>/<ownerId>/<projectId>。
+  # 树挂在「人 × 项目」上（见 WorkspaceId），所以同一个人在这个项目里的所有会话共用一棵。
+  workspaces-root: ${CODELOOM_WORKSPACES_ROOT:}
+
+  git:
+    executable: ${CODELOOM_GIT:git}
+    # git 的加固目录：一个空 hooks 目录 + 一个空全局配置，每次调用都用 -c 指过去，
+    # 用来中和 core.hooksPath / diff.external 那类能执行任意命令的配置项。
+    #
+    # 留空 = **跟着 workspaces-root 走**（放在工作区旁边）。它从前是一条**独立**的
+    # 相对路径 `workspaces/.git-sandbox`，于是把 workspaces-root 改成绝对路径之后，
+    # 它仍然在"当前工作目录"下又建了一个 workspaces/ —— 而且那是**第二份**加固目录，
+    # 两份互不知情。三条路径各写各的，正是"补两条漏一条"的根因
+    sandbox-dir: ${CODELOOM_GIT_SANDBOX:}
+
+  # **免审批清单** —— 列在这里的命令不问你直接跑，其余的会挂起来等你批。
+  #
+  # 它不是"准入名单"：不在里面的命令**批准之后照样能跑**。
+  # （从前它同时管准入，于是"需要审批"和"跑不起来"是同一个条件 ——
+  #   批准 javac 得到的回答是"命令被拒绝: javac"。详见 CommandPolicy 的类注释。）
+  #
+  # 收进来的是**高频且一件事**的操作：看一眼目录、构建、跑测试。
+  # 目的是让人不必为"看一眼文件"点一次批准。
+  #
+  # **名单只看得见第一个词，看不见参数** —— 所以"动到工作区外面"这一步另外判：
+  # rm / rmdir / mv / cp / mkdir / touch 这几个，参数落在项目树外的**还是会问你**
+  #（`rm -rf node_modules` 不问，`rm -rf /` 问）。见 CommandPathScope。
+  #
+  # 另外两件事也归"要问"：第一个词**带了路径**的（`./gradlew`、`bin/mvn` —— 那说的
+  # 是另一个程序，不是 PATH 上这个），以及整行命令**看不懂**的（带变量、命令替换、
+  # 管道、重定向这些展开起来会变样的写法）。见 CommandLine。
+  command-whitelist: ${CODELOOM_COMMAND_WHITELIST:ls,dir,pwd,cat,type,head,tail,wc,grep,rg,sort,uniq,diff,echo,mkdir,touch,rm,rmdir,mv,cp,git,mvn,gradle,npm,yarn,pnpm,node,npx,pytest,python,pip,javac,java,go,cargo,dotnet,make}
+
+  # 跑命令用哪一层 shell。**留空就自己找**（PATH 上的 bash，再兜几个常见位置）。
+  #
+  # 它现在是**硬前提**，不是优化：命令收的是整行文本（管道、重定向都是这一行的一部分），
+  # 只有 shell 能解释它。找不到时 run_command 直接不可用（会明确报错，不会静默换个方式跑）。
+  # 为什么非要过 shell：上面那张名单里 ls、cat、rm、mv、cp 在 Windows 上都不是可执行文件，
+  # 而模型最自然的写法就是这些名字。真实故障：模型想清掉自己编译出来的 .class，
+  # 收到的是「无法启动进程: rm HelloWorld.class」。见 CommandShell。
+  #
+  # **不要写死路径**：Git for Windows 可以装在任意盘符。
+  # 真要指定就写 bash.exe 的绝对路径，或者设环境变量 CODELOOM_COMMAND_SHELL。
+  command-shell: ${CODELOOM_COMMAND_SHELL:}
+
+  # SSE 下行：浏览器订阅一条会话的事件流，用来实时观看对方的 AI 交互。
+  stream:
+    # 一条 SSE 连接最长开多久。到点由服务端主动断开，客户端带 Last-Event-ID 重连接着收。
+    # 为什么要主动断：长连接会被中间设备静默掐掉，而"自己决定何时断"至少是可预期的。
+    timeout: ${CODELOOM_STREAM_TIMEOUT:30m}
+
+    # 重连补历史时，一批从库里取多少条。分批拉到"不满一批"为止 ——
+    # 一次全取会在重连风暴时把库打满。
+    replay-batch: ${CODELOOM_STREAM_REPLAY_BATCH:500}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.codeloom: DEBUG

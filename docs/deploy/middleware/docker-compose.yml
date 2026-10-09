@@ -1,0 +1,64 @@
+# ================================================================
+# codeloom 的中间件：MySQL + Redis
+# ================================================================
+#
+# 部署位置：一台机器上的 /etc/docker/（本项目是「应用在宿主机 + 中间件在另一台机器」
+#           的布局；那台机器在只有宿主机能访问的网段上）
+#
+# 本目录的结构刻意镜像目标机器上的 /etc/docker/，所以部署就是一次目录拷贝：
+#     scp -r docs/deploy/middleware/* root@<VM_IP>:/etc/docker/
+#
+# 下面的 bind mount 用的是【相对路径】：compose 在 /etc/docker/ 下运行时，
+# ./mysql/my.cnf 正好解析到 /etc/docker/mysql/my.cnf。
+# 写成绝对路径会让别人 clone 到别的目录后跑不起来。
+#
+# 口令写死在文件里（root）：本地开发用；对外部署前先改掉 —— 见 README 的最后一节。
+
+name: codeloom-middleware
+
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    restart: unless-stopped
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      # 【关键】不加这行，root 只能从容器内部登录，
+      # 宿主机上的应用会报 "Access denied for user 'root'@'<宿主机IP>'"
+      MYSQL_ROOT_HOST: "%"
+      # 启动时自动建库，省掉手工 create database 那一步
+      MYSQL_DATABASE: codeloom
+      TZ: Asia/Shanghai
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./mysql/my.cnf:/etc/mysql/conf.d/codeloom.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    # 必须显式指定配置文件，否则镜像自带的启动参数会覆盖掉文件里的设置
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "root", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  mysql-data:
+  redis-data:
