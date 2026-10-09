@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.codeloom</groupId>
+    <artifactId>codeloom</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>codeloom-workspace</artifactId>
+  <name>codeloom-workspace</name>
+  <description>
+    工作区能力：git worktree 的创建/销毁、会话级 checkpoint、三方合并、
+    冲突检测，以及命令执行（CommandExecutor 的进程实现）。
+
+    同时持有 Project / Session 两张表的读写（会话的 worktree 路径、分支名、
+    head commit 必须与工作区状态同事务更新）。
+
+    注意：GitClient（参数由我们构造）与 CommandExecutor（参数由 agent 构造）
+    是两条物理隔离的路径，前者绝不放任 agent 调用参数。
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.codeloom</groupId>
+      <artifactId>codeloom-domain</artifactId>
+    </dependency>
+
+    <!--
+      上面那段 description 里「同时持有 Project / Session 两张表的读写」这句，
+      落到代码上就需要这个依赖 —— 会话状态和工作区状态的同事务更新是它的理由。
+
+      注意它不意味着本模块会自己启动 Spring：只有 codeloom-app 有 @SpringBootApplication，
+      这里拿到的只是「能写仓储实现」的编译期能力。本模块现有那些用 @TempDir 跑 git 和
+      进程的测试也不会因此加载任何容器，它们仍然是纯单测。
+    -->
+    <dependency>
+      <groupId>org.mybatis.spring.boot</groupId>
+      <artifactId>mybatis-spring-boot-starter</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

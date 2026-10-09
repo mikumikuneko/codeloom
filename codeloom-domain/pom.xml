@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.codeloom</groupId>
+    <artifactId>codeloom</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>codeloom-domain</artifactId>
+  <name>codeloom-domain</name>
+  <description>
+    领域核心：事件模型（sealed interface + record）、会话状态机、端口接口
+    （EventStore / EventBus / WorkspaceManager / CommandExecutor / 各仓储）。
+
+    这里没有 Spring、没有 Jackson、没有 MyBatis —— 这不是遗漏，是设计。
+    正因为 domain 谁也不依赖，其他模块才可能被单独测试、单独替换。
+  </description>
+
+  <dependencies>
+    <!--
+      刻意不用 spring-boot-starter-test：domain 的测试不需要任何框架。
+      只有 JUnit 和 AssertJ，都是 Spring Boot BOM 管理的版本。
+    -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

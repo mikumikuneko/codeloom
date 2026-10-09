@@ -1,0 +1,20 @@
+# 复制成 application-local.yml（放在同一个目录下），按你的环境改。
+# 那个文件已被 gitignore —— 这一个是给"刚 clone 下来的人"看的。
+#
+# 中间件怎么起、库怎么建：见 docs/deploy/middleware/README.md 与 docs/sql/schema.sql
+codeloom:
+  # MySQL / Redis 的地址。中间件和本机同一台就写 localhost；
+  # 应用在宿主机、中间件在另一台机器（作者用的是虚拟机的 NAT 网段）就写那台的地址。
+  db-host: localhost
+  redis-host: localhost
+
+  # 加密"用户存在库里的 API Key"的那把钥匙。
+  # 它没有默认值、也不会自动生成：自动生成意味着每次重启换一把，
+  # 库里已经加密的东西就再也解不开 —— 所以不配就起不来，这是有意的。
+  # 自己生成一串，例如：openssl rand -base64 32
+  secret-key: "换成你自己生成的一串随机值"
+
+# 口令不用填：仓库里那份 compose 用的是 root，而 application.yml 的默认值也是 root。
+# 改过中间件的口令才需要覆盖这几个键：
+#   spring.datasource.username / spring.datasource.password   （MySQL）
+#   spring.data.redis.password                                （Redis）

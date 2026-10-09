@@ -1,0 +1,252 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --font-heading: var(--font-sans);
+    --font-sans: 'Geist Variable', sans-serif;
+    --font-mono: 'Geist Mono Variable', ui-monospace, monospace;
+
+    /*
+     * 浮起来的东西（下拉菜单、右键菜单）共用的投影：一圈发丝描边 + 一层大而软的暗。
+     * 收成令牌是因为同一份字面值写了两遍，改一处漏一处只是时间问题。
+     */
+    --shadow-float: 0 0 0 1px var(--border), 0 10px 30px -6px rgb(0 0 0 / 55%);
+
+    /*
+     * 颜色只回答两个问题，各占一个通道，而且**互相避开**：
+     *
+     *  一、「是谁」—— 青 / 品红。绿红黄已有语义（通过/失败/警告），不能拿来表示人。
+     *  二、「这是什么文件」—— 钢蓝 / 琥珀。只出现在树的小图标上，文字一律不上色。
+     *
+     * 这两组颜色是全站**仅有的彩色**（语义色除外）：界面的其余部分是单色的，
+     * 所以它们出现时一定读得出来。
+     */
+    --color-loom-a: #5fa8b8;
+    --color-loom-b: #b87ba6;
+
+    /* 「这是目录」/「这是代码」。只用在图标上，绝不用于文字 */
+    --color-loom-folder: #7e9cbb;
+    --color-loom-code: #cfa05e;
+
+    /* diff：极暗的底 + 亮得多的行首记号。大面积饱和色会抢走正文，小符号不会 */
+    --color-loom-added: rgb(22 38 29);
+    --color-loom-added-mark: #63a873;
+    --color-loom-removed: rgb(44 24 27);
+    --color-loom-removed-mark: #c06670;
+
+    /*
+     * 第三档字（行号、时间、"这一轮用了 N tokens"、机器的话）。
+     *
+     * 从 #737380 提到 #80808e：前者在页面底上只有 4.23 的对比度，而 AA 线是 4.5 ——
+     * 差的那一点正是"要眯一下才看清"的那点。现在的值在三个面上都过线：
+     * 页面底 #0a0a0c 上 5.08、侧栏 #101013 上 4.88、卡片 #141418 上 4.72。
+     * 它仍然明显弱于 muted-foreground（#a2a2ad，底上 7.83），三档的关系没变。
+     */
+    --color-loom-faint: #80808e;
+    --color-raise: var(--raise);
+    --color-selected: var(--selected);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+
+    /*
+     * 圆角：工具感，不泡泡。
+     * 大到 20/28px 的圆角让界面显得"软"、"玩具"；开发者工具的圆角只负责
+     * 去掉刺手的直角，不负责卖萌。按钮/输入框 8，卡片 10，对话框 12，层层只差 2px ——
+     * 嵌套时外圈刚好比内圈圆一点点，视觉上才是"一套"。
+     */
+    --radius-sm: 4px; /* 标记、行内代码、小控件 */
+    --radius-md: 6px; /* 紧凑控件：小按钮、图标按钮、菜单项 */
+    --radius-lg: 8px; /* 标准控件：按钮、输入框、代码块 */
+    --radius-xl: 10px; /* 独立内容卡片、菜单 */
+    --radius-2xl: 12px; /* 对话框、主容器 */
+    --radius-3xl: 14px;
+}
+
+/*
+ * 深色主题（唯一的一套：index.html 上常驻 class="dark"）。
+ *
+ * 结构：**四级面 + 三级字**，每级都拉得开。
+ *
+ *  面：页面底 #0a0a0c → 侧栏/浅浮面 #101013 → 卡片 #141418 → 弹窗 #1a1a1f
+ *  字：正文 #ececf1 → 次要 #a2a2ad → 更弱 #737380（行号、时间、机器的话）
+ *
+ * 旧主题的问题是"每级只差 5/255"—— 暗色下那等于没有级，一整屏糊成一片。
+ * 这里的相邻两级差 ~8–10/255：单独看都不扎眼，摆在一起时分得出前后。
+ *
+ * 用十六进制而不是 oklch：每个值都是挑出来的，十六进制能一眼对上色卡。
+ */
+.dark {
+    --background: #0a0a0c;
+    --foreground: #ececf1;
+
+    /* 侧栏、输入框所在的条带：比页面底高半级，够分出"框架"和"内容"，又不至于变成面板 */
+    --raise: #101013;
+
+    /* 卡片：独立内容（项目行、供应商行）落在这级 */
+    --card: #141418;
+    --card-foreground: #ececf1;
+
+    /* 弹窗：最高一级，底下垫着遮罩 */
+    --popover: #1a1a1f;
+    --popover-foreground: #ececf1;
+
+    /* 主按钮：近白底 + 深字。单色界面里最响的强调就是这级明度差，不需要品牌色 */
+    --primary: #ececf1;
+    --primary-foreground: #141416;
+
+    /* 悬停/浅浮面：轻，但要在 #0a0a0c 上看得出来（旧值 #1d2126 在旧底上是"几乎看不见"） */
+    --secondary: #1d1d22;
+    --secondary-foreground: #ececf1;
+    --muted: #1d1d22;
+    --muted-foreground: #a2a2ad;
+    --accent: #232329;
+    --accent-foreground: #ececf1;
+
+    /*
+     * 选中比悬停高整整一档，这是有意的：
+     * 悬停回答"鼠标在哪"（转瞬即逝，轻一点才对），选中回答"我在看哪一行"（要一直看得见）。
+     * 两者共用一个值的代价是：点了一行之后要在整棵树里找自己刚点的是哪行。
+     */
+    --selected: #2e2e36;
+
+    --destructive: #e06c75;
+
+    /* 分界用透明度：实色会在不同级的底色上跳出不同的亮度 */
+    --border: rgb(255 255 255 / 8%);
+    --input: rgb(255 255 255 / 12%);
+
+    /* 焦点环借"我的 agent"那个青 —— 全站只有这一处借它 */
+    --ring: #5fa8b8;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+
+  /*
+   * 键盘焦点是底线：用 Tab 走一遍页面时看不见自己在哪，等于页面用不了。
+   * 只给自己写的按钮（树的行、标签、文字按钮）：shadcn 的 Button 自带 focus ring，
+   * 用 `:not([data-slot])` 避开它，否则一道变两道。负 offset 让环画在元素内部，
+   * 满宽的树行不会被相邻行盖住。
+   */
+  button:focus-visible:not([data-slot]),
+  a:focus-visible,
+  summary:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: -2px;
+    border-radius: 0.25rem;
+    }
+  body {
+    @apply bg-background text-foreground antialiased;
+    }
+
+  /*
+   * 工作区同时有三片滚动区，浏览器默认的浅色粗滚动条是深底上最亮的块之一。
+   * 只调宽度和颜色，不藏 —— "这段输出还有多长"在读 agent 流水时是要紧的信息。
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(255 255 255 / 16%) transparent;
+    }
+
+  ::selection {
+    background: color-mix(in oklab, var(--ring) 30%, transparent);
+    }
+
+  html {
+    @apply font-sans;
+    }
+}
+
+@layer components {
+  /*
+   * 工作区三栏的头。高度写死同一个值是这一条的全部意义：「项目」「文件路径」
+   * 「会话/聊天/观战」的顶边落在同一条水平线上，页面才站得住 —— 各写各的 padding
+   * 时三条线会差 4–8px，那点差距看得出歪、说不出哪里歪。
+   */
+  .pane-head {
+    @apply flex h-9 shrink-0 items-center;
+    }
+
+  /*
+   * 「这一片现在没有东西」—— 落在正中间。左上角一行小字看起来像"内容没加载出来"
+   * （待修故障的样子）；而没选文件、读不到、二进制看不了都是正常状态，
+   * 居中说的是"这里本来就没有东西"。全站空状态只有这一种写法。
+   */
+  .pane-absent {
+    @apply flex min-h-0 flex-1 items-center justify-center p-6 text-center text-sm;
+    }
+
+  /*
+   * 「它正在干活」：一条从文字上扫过去的亮带。只给"确实在变"的地方 ——
+   * 动的东西在一片静止里最响，给静止的东西也加上就等于没有重点。
+   * 它是补充不是唯一信号：每一处另有文字和状态说明。
+   */
+  .loom-shimmer {
+    background-image: linear-gradient(
+      90deg,
+      currentColor 35%,
+      var(--color-foreground) 50%,
+      currentColor 65%
+    );
+    background-size: 200% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: loom-shimmer 1.8s linear infinite;
+  }
+}
+
+@keyframes loom-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/*
+ * 「少动一点」：前庭功能敏感的人会因界面动效头晕。系统说了这件事之后，
+ * 全站一个动画都不该再放；意思还全在（文字和颜色，从来不靠动来表意）。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* 0.01ms 而不是 0：有些组件靠动画结束事件收尾，时长归零会让它不触发 */
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 扫光停下来会卡在渐变的一头，看着像文字花了 —— 直接撤掉，回到本色 */
+  .loom-shimmer {
+    animation: none !important;
+    background-image: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}

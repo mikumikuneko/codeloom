@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.codeloom</groupId>
+    <artifactId>codeloom</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>codeloom-realtime</artifactId>
+  <name>codeloom-realtime</name>
+  <description>
+    事件与实时通道：
+      - Event / ChatMessage 两张表的读写（事件溯源，append-only + 全局单调 seq）
+      - EventCodec：用 sealed 类型的穷尽 switch 手写编解码（新增事件类型漏处理则编译不过）
+      - SSE 下行（Last-Event-ID 断线重连 + 历史补齐）
+      - WebSocket 聊天室
+      - Redis Pub/Sub 跨实例扇出
+      - 执行租约（SET NX PX + Lua 续约 + 单调递增 fencing token）
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.codeloom</groupId>
+      <artifactId>codeloom-domain</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.mybatis.spring.boot</groupId>
+      <artifactId>mybatis-spring-boot-starter</artifactId>
+    </dependency>
+
+    <!-- SSE 端点 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- 聊天室 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-websocket</artifactId>
+    </dependency>
+
+    <!-- Lettuce（默认客户端）+ Redis Pub/Sub 与执行租约 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+</project>

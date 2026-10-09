@@ -1,0 +1,17 @@
+<!doctype html>
+<!-- class="dark" 常驻：这个项目只做深色主题（见 index.css 里 .dark 那段变量表）。
+     不做浅色不是偷懒 —— 一个看代码和看 agent 输出的界面，深色是默认预期；
+     而"两套主题都维护"换来的是一堆只在其中一套下被看过的颜色。
+     shadcn 的暗色变体选择器是 `&:is(.dark *)`，所以这个类必须挂在 <html> 上 -->
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>codeloom</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

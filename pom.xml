@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.5.16</version>
+    <relativePath/>
+  </parent>
+
+  <groupId>com.codeloom</groupId>
+  <artifactId>codeloom</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <name>codeloom</name>
+  <description>面向双人协作的多 Agent 开发平台</description>
+
+  <!--
+    模块划分 = 项目具备的能力，而不是技术分层。
+
+    依赖方向（无环）：
+        app ──→ agent, workspace, realtime
+        其余 ──→ domain ──→ (无)
+
+    domain 出现在所有箭头右侧且自己不依赖任何模块，所以：
+      - 任何模块都不可能引用到别的模块的实现细节
+      - 边界不是靠自觉，是靠编译器（没声明依赖 = import 不到）
+
+    这张图必须和各个 pom 里的 <dependencies> 逐条对得上 —— **多画一条边就等于
+    给"边界靠编译器"这句话打折**。曾经这里画着 `agent ──→ workspace`，
+    而 agent 一次都没 import 过 workspace（它要跑命令走的是 domain 的 CommandExecutor 端口）。
+    改图之前先确认依赖真的存在。
+  -->
+  <modules>
+    <module>codeloom-domain</module>
+    <module>codeloom-workspace</module>
+    <module>codeloom-agent</module>
+    <module>codeloom-realtime</module>
+    <module>codeloom-app</module>
+  </modules>
+
+  <properties>
+    <java.version>21</java.version>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <!-- Spring Boot 不管 MyBatis，所以版本写在这里 -->
+    <mybatis-spring-boot.version>3.0.5</mybatis-spring-boot.version>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <!-- 内部模块：统一版本，子模块引用时不写 version -->
+      <dependency>
+        <groupId>com.codeloom</groupId>
+        <artifactId>codeloom-domain</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.codeloom</groupId>
+        <artifactId>codeloom-workspace</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.codeloom</groupId>
+        <artifactId>codeloom-agent</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.codeloom</groupId>
+        <artifactId>codeloom-realtime</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <!--
+        裸 MyBatis + mybatis-spring，**不是 MyBatis-Plus**。
+        这里曾经声明的是 mybatis-plus-spring-boot3-starter，而全项目一行 MP 的 API
+        都没用（所有 SQL 都是 @Mapper 上的显式注解，见各模块 persistence 包），
+        唯一提到 MP 的地方是一段解释"为什么**不**继承 BaseMapper"的注释。
+        声明一个从不使用的框架只会让人以为项目用了它的 ORM 能力。
+      -->
+      <dependency>
+        <groupId>org.mybatis.spring.boot</groupId>
+        <artifactId>mybatis-spring-boot-starter</artifactId>
+        <version>${mybatis-spring-boot.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+
+</project>
