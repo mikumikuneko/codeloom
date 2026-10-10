@@ -130,10 +130,12 @@ class EventCodecTest {
                         new SessionRewound("deadbee", 733L, UserId.of("u-li"))),
                 Arguments.of(EventType.SESSION_SYNCED,
                         new SessionSynced("aaaa111", "bbbb222")),
-                // truncated 取 true：那个字段两边都得进 JSON（false 走的是同一段代码）
+                // truncated 取 true：那个字段两边都得进 JSON（false 走的是同一段代码）。
+                // turnIndex 取一个**非零**的数：0 是个合法的轮次号，拿 0 试等于没试出
+                // "缺字段"和"第 0 轮"的区别
                 Arguments.of(EventType.WORKSPACE_CHANGES, new WorkspaceChanges("deadbee", List.of(
                         new FileChange("src/OrderService.java", 12, 3, false, false),
-                        new FileChange("assets/logo.png", 0, 0, true, true)), true)),
+                        new FileChange("assets/logo.png", 0, 0, true, true)), true, 7)),
                 Arguments.of(EventType.TODO_LIST_UPDATED, new TodoListUpdated(List.of(
                         new TodoListUpdated.Item("把 OrderService 的并发处理加把锁",
                                 TodoListUpdated.State.COMPLETED),

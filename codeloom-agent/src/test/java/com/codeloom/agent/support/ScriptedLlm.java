@@ -1,6 +1,6 @@
 package com.codeloom.agent.support;
 
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.llm.LlmResult;
@@ -38,7 +38,7 @@ import java.util.function.Consumer;
 public final class ScriptedLlm implements LlmClient {
 
     private final Deque<LlmResult> script = new ArrayDeque<>();
-    private final List<ChatRequest> requests = new ArrayList<>();
+    private final List<LlmRequest> requests = new ArrayList<>();
 
     private boolean repeatLast;
     private LlmResult last;
@@ -90,7 +90,7 @@ public final class ScriptedLlm implements LlmClient {
     }
 
     /** 真实发出去过的请求，按顺序。返回的是快照，调用方改不了它。 */
-    public List<ChatRequest> requests() {
+    public List<LlmRequest> requests() {
         return List.copyOf(requests);
     }
 
@@ -101,7 +101,7 @@ public final class ScriptedLlm implements LlmClient {
     }
 
     @Override
-    public LlmResult stream(ChatRequest request, Consumer<StreamEvent> listener,
+    public LlmResult stream(LlmRequest request, Consumer<StreamEvent> listener,
                             CancellationToken cancellation) {
         requests.add(request);
         onCall.run();

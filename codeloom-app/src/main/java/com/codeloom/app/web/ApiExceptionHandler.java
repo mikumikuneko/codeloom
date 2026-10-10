@@ -2,6 +2,7 @@ package com.codeloom.app.web;
 
 import com.codeloom.app.merge.ConflictPendingException;
 import com.codeloom.app.merge.StaleBranchException;
+import com.codeloom.domain.port.LeaseUnavailableException;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -66,6 +67,24 @@ public class ApiExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatus(e.getStatusCode());
         problem.setTitle("请求无法完成");
         problem.setDetail(e.getReason());
+        return problem;
+    }
+
+    /**
+     * 租约服务够不到 —— **503，不是 500**。
+     *
+     * <p>500 说的是"我们坏了"，而这个说的是"你稍后再来"：服务自己是好的，
+     * 只是它依赖的中间件现在连不上。报成 500 的话，客户端会当成一个缺陷去查，
+     * 而正确的处置是退避重试。
+     *
+     * <p>它和"没抢到锁"（409）也是一回事的两面：那个说明这棵树有人管，这个说明
+     * **连"谁管着"都不知道**。两者都不该被客户端重试成"那就先跑着"。
+     */
+    @ExceptionHandler(LeaseUnavailableException.class)
+    public ProblemDetail onLeaseUnavailable(LeaseUnavailableException e) {
+        ProblemDetail problem = ProblemDetail.forStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        problem.setTitle("执行租约服务连不上");
+        problem.setDetail(e.getMessage());
         return problem;
     }
 

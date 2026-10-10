@@ -12,9 +12,15 @@ import {
 } from '@/components/ui/dialog'
 import type { Session } from '@/lib/api'
 import { personDot, type PersonSlot } from '@/lib/people'
+import type { SessionState } from '@/lib/sessionState'
 
-/** 会话状态的显示名。查表 + 兜底，理由见 `WorkspacePage` 里那段。 */
-const STATE_LABELS: Record<string, string> = {
+/**
+ * 会话状态的显示名。查表 + 兜底，理由见 `WorkspacePage` 里那段。
+ *
+ * <p>键的类型是那份权威词表（`lib/sessionState`）—— **漏一个状态就编译不过**，
+ * 而兜底那一支留着是因为线上来的字符串不保证认得出来。
+ */
+const STATE_LABELS: Record<SessionState, string> = {
   IDLE: '空闲',
   THINKING: '思考中',
   EXECUTING_TOOL: '执行工具',
@@ -88,7 +94,7 @@ export function SessionHistoryDialog({
                     setOpen(false)
                   }}
                   className={`flex w-full items-baseline gap-2 rounded px-2 py-2 text-left text-sm hover:bg-accent ${
-                    selected ? 'bg-accent' : ''
+                    selected ? 'bg-selected' : ''
                   }`}
                 >
                   <span

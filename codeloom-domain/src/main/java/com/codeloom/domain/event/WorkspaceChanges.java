@@ -43,13 +43,22 @@ import java.util.List;
  *                  见 {@code ProjectLayout}）。按路径排序，顺序稳定
  * @param truncated 改动太多、只记下了前一批。界面要如实说"没记全"，
  *                  而不是只报那个偏小的数字 —— 那是在编
+ * @param turnIndex **这是第几轮**，和 {@code CheckpointCreated} 记的是同一个号
+ *                  （同一个收尾里算出来的那一个）。界面拿它把"这一轮改了什么"挂到对的位置上 ——
+ *                  从前它自己数"第几条用户消息"，而两套数法一旦错开，改动就会挂到
+ *                  **别人那一轮**头上，看起来完全像真的。
+ *
+ *                  <p>**可以为空**：加这个字段之前落的事件没有它。用包装类型而不是
+ *                  {@code int}，是因为 **0 是一个合法的轮次号** —— 缺字段读成 0 会指向
+ *                  第一轮，那比"不知道"坏得多（见那条"只在 0 是个谎时才可空"的规矩）。
  */
-public record WorkspaceChanges(String commitSha, List<FileChange> files, boolean truncated)
+public record WorkspaceChanges(String commitSha, List<FileChange> files, boolean truncated,
+                               Integer turnIndex)
         implements PersistentEvent {
 
     /** 没截断（绝大多数情况）。 */
     public WorkspaceChanges(String commitSha, List<FileChange> files) {
-        this(commitSha, files, false);
+        this(commitSha, files, false, null);
     }
 
     public WorkspaceChanges {

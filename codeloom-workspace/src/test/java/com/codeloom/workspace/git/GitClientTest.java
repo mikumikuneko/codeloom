@@ -1,6 +1,7 @@
 package com.codeloom.workspace.git;
 
 import com.codeloom.domain.port.CommitIdentity;
+import com.codeloom.domain.workspace.FileDiff;
 import com.codeloom.domain.port.MergeResult;
 import com.codeloom.workspace.support.TestGit;
 import org.junit.jupiter.api.BeforeEach;
@@ -45,6 +46,72 @@ class GitClientTest {
     }
 
     // ------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("取某个文件的改动")
+    class DiffOfOneFile {
+
+        @BeforeEach
+        void initWithBaseCommit() {
+            git.initRepo(repo, alice);
+        }
+
+        private String commit(String message) {
+            return git.commitAll(repo, message, alice);
+        }
+
+        @Test
+        @DisplayName("【真跑】给的是那个文件在这两步之间的改动")
+        void showsWhatThatFileDidInThatStep() throws IOException {
+            Files.writeString(repo.resolve("a.txt"), "第一行\n", StandardCharsets.UTF_8);
+            commit("base");
+
+            Files.writeString(repo.resolve("a.txt"), "第一行\n第二行\n", StandardCharsets.UTF_8);
+            String sha = commit("加一行");
+
+            FileDiff diff = git.diffOfFile(repo, sha, "a.txt", 100_000);
+
+            assertThat(diff.text()).contains("+第二行");
+            assertThat(diff.text()).doesNotContain("+第一行");
+            assertThat(diff.truncated()).isFalse();
+        }
+
+        @Test
+        @DisplayName("正文太大就截断并**如实标记**，不报错 —— 截一段仍然有用")
+        void aHugeDiffIsTruncatedRatherThanRefused() throws IOException {
+            // 基点提交由 initRepo 打过了，这里不另打一次空的
+            Files.writeString(repo.resolve("big.txt"), "x".repeat(2_000) + "\n",
+                    StandardCharsets.UTF_8);
+            String sha = commit("加一个大文件");
+
+            FileDiff diff = git.diffOfFile(repo, sha, "big.txt", 500);
+
+            assertThat(diff.truncated()).isTrue();
+            assertThat(diff.text()).hasSize(500);
+        }
+
+        @Test
+        @DisplayName("提交取不出来 → 报错，而不是给一段空的")
+        void anUnresolvableCommitIsAnError() {
+            assertThatThrownBy(() -> git.diffOfFile(repo,
+                    "0000000000000000000000000000000000000000", "a.txt", 10_000))
+                    .isInstanceOf(GitCommandException.class);
+        }
+
+        @Test
+        @DisplayName("那个路径这一步没动过 → 空的正文。**git 不把这当错**")
+        void aPathThatDidNotChangeGivesAnEmptyDiff() throws IOException {
+            // 这条钉的是实际行为：路径对不上时 git 退出码是 0、输出为空。
+            // 所以"取不到"和"没改过"在存储层是分不开的 —— 那种区分只能由调用方
+            // 拿着事件里记过的路径来保证（见 ProjectDiff）
+            Files.writeString(repo.resolve("a.txt"), "第一行\n", StandardCharsets.UTF_8);
+            commit("base");
+            Files.writeString(repo.resolve("a.txt"), "改了\n", StandardCharsets.UTF_8);
+            String sha = commit("改一行");
+
+            assertThat(git.diffOfFile(repo, sha, "nope.txt", 10_000).text()).isEmpty();
+        }
+    }
 
     @Nested
     @DisplayName("基点与仓库初始化")

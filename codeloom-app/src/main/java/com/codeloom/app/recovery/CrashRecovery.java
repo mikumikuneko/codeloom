@@ -1,18 +1,15 @@
 package com.codeloom.app.recovery;
 
+import com.codeloom.app.turn.SessionWriter;
+import com.codeloom.domain.event.Event;
 import com.codeloom.domain.event.StoredEvent;
-import com.codeloom.domain.event.ToolApprovalRequested;
-import com.codeloom.domain.event.ToolApprovalResolved;
-import com.codeloom.domain.event.ToolCallRequested;
-import com.codeloom.domain.event.ToolCancelled;
-import com.codeloom.domain.event.ToolInterrupted;
-import com.codeloom.domain.event.ToolResult;
 import com.codeloom.domain.port.EventStore;
 import com.codeloom.domain.port.ExecutionLease;
 import com.codeloom.domain.port.LeaseToken;
 import com.codeloom.domain.port.SessionRepository;
 import com.codeloom.domain.session.Session;
 import com.codeloom.domain.session.SessionId;
+import com.codeloom.domain.session.ToolCallLifecycle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -30,7 +27,7 @@ import java.util.Set;
  * <pre>
  *   1. 扫出所有**非终态**的会话
  *   2. 逐个抢租约 —— 抢不到说明那个实例还活着，跳过
- *   3. 抢到了：把"执行到一半的工具调用"补写成 {@link ToolInterrupted}
+ *   3. 抢到了：把"执行到一半的工具调用"补写成 {@code ToolInterrupted}
  * </pre>
  *
  * <h2>为什么到第 3 步就停</h2>
@@ -55,13 +52,16 @@ public class CrashRecovery {
     private final SessionRepository sessions;
     private final EventStore events;
     private final ExecutionLease leases;
+    private final SessionWriter writer;
 
     public CrashRecovery(SessionRepository sessions,
                          EventStore events,
-                         ExecutionLease leases) {
+                         ExecutionLease leases,
+                         SessionWriter writer) {
         this.sessions = sessions;
         this.events = events;
         this.leases = leases;
+        this.writer = writer;
     }
 
     /** 应用就绪之后跑一次。放在就绪之后而不是更早：那时数据库、Redis 都已经可用。 */
@@ -103,8 +103,8 @@ public class CrashRecovery {
         List<String> interrupted;
         try {
             interrupted = unfinishedToolCalls(session.id());
-            for (String callId : interrupted) {
-                events.append(session.id(), new ToolInterrupted(callId), token);
+            if (!interrupted.isEmpty()) {
+                writer.interruptUnfinished(session, interrupted, token);
             }
             if (!interrupted.isEmpty()) {
                 log.info("会话 {} 有 {} 个执行到一半的工具调用，已补写成 ToolInterrupted",
@@ -137,33 +137,25 @@ public class CrashRecovery {
     private List<String> unfinishedToolCalls(SessionId sessionId) {
         Set<String> pending = new LinkedHashSet<>();
         for (StoredEvent stored : events.readAll(sessionId)) {
-            switch (stored.event()) {
-                case ToolCallRequested requested -> pending.add(requested.callId());
-                case ToolResult done -> pending.remove(done.callId());
-                case ToolCancelled cancelled -> pending.remove(cancelled.callId());
-                // 已经补过的不再补 —— 于是这个恢复跑几遍都一样（幂等）
-                case ToolInterrupted interrupted -> pending.remove(interrupted.callId());
+            Event event = stored.event();
+            // **"这条事件把那次调用推到哪一步"由域层那一处说**（见 ToolCallLifecycle）——
+            // 这里只管"那一步对这个名单意味着什么"。哪些事件算终局、为什么，
+            // 都写在那边；漏掉一种在那里编译不过
+            ToolCallLifecycle.openedBy(event).ifPresent(pending::add);
+            ToolCallLifecycle.closedBy(event).ifPresent(pending::remove);
 
-                // 挂起等人批：这个调用**还没跑**，它在等一个人 —— 那不是"执行到一半"。
-                // 会话状态停在 AWAITING_APPROVAL，重启之后那条批准还应该点得动
-                case ToolApprovalRequested waiting -> pending.remove(waiting.callId());
+            // 挂起等人批：这个调用**还没跑**，它在等一个人 —— 那不是"执行到一半"。
+            // 会话状态停在 AWAITING_APPROVAL，重启之后那条批准还应该点得动
+            ToolCallLifecycle.approvalAskedBy(event).ifPresent(pending::remove);
 
-                // 答复到了：**批了就得跑**，所以它又回到名单里。
-                //
-                // 这一条不是对称的补充，是必须的：少了它，进程死在上一条和
-                // "批准之后那次真正执行"之间的缝里时，这个调用会被安静地漏掉 ——
-                // 模型永远不会知道它批准过的那个调用压根没跑（比"跑了一半"更糟，
-                // 因为它看起来像已经做完了）。
-                case ToolApprovalResolved resolved -> {
-                    if (resolved.approved()) {
-                        pending.add(resolved.callId());
-                    }
-                    // 拒了就是这件事结束了，不该进名单
-                }
-
-                default -> {
-                }
-            }
+            // 答复到了：**批了就得跑**，所以它又回到名单里。
+            //
+            // 这一条不是对称的补充，是必须的：少了它，进程死在上一条和
+            // "批准之后那次真正执行"之间的缝里时，这个调用会被安静地漏掉 ——
+            // 模型永远不会知道它批准过的那个调用压根没跑（比"跑了一半"更糟，
+            // 因为它看起来像已经做完了）。拒了就是这件事结束了，不该进名单
+            ToolCallLifecycle.approvalGrantedBy(event).ifPresent(pending::add);
+            ToolCallLifecycle.approvalRefusedBy(event).ifPresent(pending::remove);
         }
         return List.copyOf(pending);
     }

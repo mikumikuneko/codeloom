@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ChatPanel } from '@/components/workspace/ChatPanel'
 import { CodeView } from '@/components/workspace/CodeView'
+import { ProjectDiffView } from '@/components/workspace/ProjectDiffView'
 import { Composer } from '@/components/workspace/Composer'
 import { CollaboratorsDialog } from '@/components/workspace/CollaboratorsDialog'
 import { ConflictResolver } from '@/components/workspace/ConflictResolver'
@@ -70,6 +71,28 @@ export function WorkspacePage() {
   const panes = usePaneWidths(row)
 
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  /**
+   * 中栏现在看的是**哪一轮对哪个文件的改动**（null = 看文件本身）。
+   *
+   * <p>它和 `selectedFile` 是同一栏的两种用法，所以两者一起变：见 {@link openDiff} 和
+   * 左边那棵树的 `onSelect`。分开管的话，会出现"文件换了、改动还是上一个文件的"这种状态。
+   */
+  const [diffView, setDiffView] = useState<{ commitSha: string; path: string } | null>(null)
+
+  /**
+   * 点"这一轮改了哪些文件"里的某一条：中栏切成**那一段改动**。
+   *
+   * <p>再点一次同一条就关掉 —— 和左边那棵树点同一个节点是同一种手感。
+   * 关掉之后落在这个文件**本身**（`selectedFile` 一直跟着它），而不是落回上一次打开的那个。
+   */
+  function openDiff(commitSha: string, path: string) {
+    setDiffView((current) =>
+      current !== null && current.commitSha === commitSha && current.path === path
+        ? null
+        : { commitSha, path },
+    )
+    setSelectedFile(path)
+  }
   const [tab, setTab] = useState<'session' | 'chat' | 'watch'>('session')
   const [mySession, setMySession] = useState<string | null>(null)
   const [theirSession, setTheirSession] = useState<string | null>(null)
@@ -234,7 +257,7 @@ export function WorkspacePage() {
   //（那张表只管对话和模型配置）。为一个"默认选谁"去加一列，代价大于收益；
   // 而 localStorage 丢了（换浏览器、清缓存）只是退回第一条 —— 那是合理的退化。
   /**
-   * 用户刚点过"开一条新对话"。
+   * 用户刚点过"新建会话"。
    *
    * <p>**必须有这样一个标记**：下面那个自动选中依赖的 {@code mine} 是每次渲染新建的数组，
    * 所以它其实每渲染都跑一遍 —— 光把 {@code mySession} 置空，它下一次就替你把
@@ -395,7 +418,12 @@ export function WorkspacePage() {
             projectId={projectId}
             rootName={data.rootName}
             selected={selectedFile}
-            onSelect={setSelectedFile}
+            // 点树里的文件 = 看它**现在**的样子，所以顺手把中栏那一段改动关掉。
+            // 不关的话会出现"选的是这个文件、看的是上一个文件的改动"这种错位
+            onSelect={(next) => {
+              setSelectedFile(next)
+              setDiffView(null)
+            }}
             trunk={trunk}
             onTrunk={setTrunk}
 
@@ -447,6 +475,14 @@ export function WorkspacePage() {
                 }))
               }
             />
+          ) : diffView !== null ? (
+            // 看"这一轮对它做了什么" —— 和下面那支（看它现在是什么样）是同一栏的两种用法
+            <ProjectDiffView
+              projectId={projectId}
+              commitSha={diffView.commitSha}
+              path={diffView.path}
+              onClose={() => setDiffView(null)}
+            />
           ) : (
             <CodeView
               projectId={projectId}
@@ -497,8 +533,8 @@ export function WorkspacePage() {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  title="开一条新对话"
-                  aria-label="开一条新对话"
+                  title="新建会话"
+                  aria-label="新建会话"
                   className="text-muted-foreground"
                   onClick={startNewConversation}
                 >
@@ -558,6 +594,9 @@ export function WorkspacePage() {
                 // 流里提到的文件点一下就在中栏打开它 —— 这一栏和中栏本来就是
                 // "它说它动了哪个文件"和"那个文件里写了什么"的关系
                 onOpenFile={setSelectedFile}
+                // "这一轮改了哪些文件"那一行点的是**另一个东西**：它这一轮改了什么。
+                // 同一个文件在两个地方的两种读法，见 ChangesRow
+                onOpenDiff={openDiff}
                 // ★ 接上的那根线：agent 往后端写文件，和左边那棵树之间本来什么都没有。
                 //   观战那处**刻意不接** —— 对方的 agent 改的是他的树
                 onWorkspaceChanged={refreshWorkspace}
@@ -614,6 +653,8 @@ export function WorkspacePage() {
                 speaker={teammate?.displayName ?? '对方'}
                 nameOf={nameOf}
                 onOpenFile={setSelectedFile}
+                // 观战那一栏也一样：对方改了什么，正是最想看的
+                onOpenDiff={openDiff}
                 // 观战这栏**不给引用入口**：引用是"把我自己 agent 的某一步交接出去"，
                 // 而这一栏看到的是**对方的** agent。要在这一栏引用的话，
                 // 语义变成"引用别人的东西再推给别人的 agent" —— 那是另一回事

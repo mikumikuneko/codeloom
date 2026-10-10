@@ -4,7 +4,9 @@ import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommitIdentity;
 import com.codeloom.domain.port.CommandTermination;
 import com.codeloom.domain.port.MergeResult;
+import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.workspace.FileChange;
+import com.codeloom.domain.workspace.FileDiff;
 import com.codeloom.workspace.exec.ProcessOutcome;
 import com.codeloom.workspace.exec.ProcessRunner;
 
@@ -222,17 +224,20 @@ public final class GitClient {
     }
 
     private List<String> hardening() {
-        return List.of(
-                "core.autocrlf=false",
-                "core.longpaths=true",
-                "core.symlinks=false",
+        // **从 PERSISTENT_CONFIG 起头**，不把那三条再抄一遍：它们本来就要两边都生效
+        //（写进仓库配置是让用户自己碰这个仓库时行为一致，每次再给一遍是防它被改回去）。
+        // 抄成两份的话，改一处就会让"codeloom 自己跑 git"和"用户手动跑 git"分成两套行为
+        // —— 而那正是 PERSISTENT_CONFIG 想避免的事
+        List<String> settings = new ArrayList<>(PERSISTENT_CONFIG);
+        settings.addAll(List.of(
                 "core.hooksPath=" + hooksDir,
                 "core.fsmonitor=false",
                 "color.ui=false",
                 "advice.detachedHead=false",
                 "credential.helper=",
                 "protocol.file.allow=never"
-        );
+        ));
+        return settings;
     }
 
     private Map<String, String> environment() {
@@ -271,8 +276,11 @@ public final class GitClient {
         } catch (IOException e) {
             throw new UncheckedIOException("无法创建仓库目录: " + repoPath, e);
         }
-        // -b main 必须显式给：默认分支名依赖 git 版本和 init.defaultBranch 配置
-        runOrThrow(repoPath, List.of("init", "-q", "-b", "main"));
+        // -b 必须显式给：默认分支名依赖 git 版本和 init.defaultBranch 配置。
+        // **名字取常量，不在这儿另写一个字面量** —— 合并、同步、归档都是拿
+        // `WorkspaceManager.MAIN_BRANCH` 去找分支的，这里写死一个和它不同的名字，
+        // 新建的仓库就落在另一个分支上，而那些操作全都找不到它
+        runOrThrow(repoPath, List.of("init", "-q", "-b", WorkspaceManager.MAIN_BRANCH));
 
         for (String setting : PERSISTENT_CONFIG) {
             int eq = setting.indexOf('=');
@@ -552,6 +560,45 @@ public final class GitClient {
                     binary ? 0 : parseInt(parts[1]), binary, created.contains(parts[2])));
         }
         return List.copyOf(changes);
+    }
+
+    /**
+     * 这个提交里某个文件改了什么 —— 一段统一的 diff 正文。
+     *
+     * <p><strong>区间和 {@link #numstatOf} 取的是同一个</strong>：那边写的是简写
+     * {@code <sha>^!}，在普通提交上与这里这两参数等价（实测过）。两者只在**根提交**上分岔，
+     * 而分岔的原因是两边**问的时机不同**：
+     * <ul>
+     *   <li>{@code numstatOf} 是**在轮内**问的，那一刻工作树正好就是这一轮的现状，
+     *       所以"根提交 vs 工作树"恰是答案（项目刚建出来、第一轮还没产生提交时就是它）；</li>
+     *   <li>这里是**事后**问的，工作树早往前走了，那种写法会变成"从起点到现在的全部"——
+     *       一份看着像答案、其实多算了很多东西的正文。所以这里写两个参数，
+     *       让它在根提交上**明确失败**：那时如实说"查不到"，不编。</li>
+     * </ul>
+     * 取同一个区间，是为了让"这里说改了 3 行、点开却有 40 行"这种不一致不可能发生。
+     *
+     * <p>**允许截断**，所以不走 {@link #runWhole}（那条路把截断当失败）。
+     * 这里的正文是给人看的：少一截仍然有用，而一份被截断的 diff 会由
+     * {@link FileDiff#truncated} 如实说出来。
+     */
+    public FileDiff diffOfFile(Path directory, String commitSha, String gitPath, int maxChars) {
+        List<String> command = buildCommand(directory, null, List.of(
+                "-c", "core.quotepath=false",
+                "diff", commitSha + "^", commitSha, "--", gitPath));
+        // **不能走 execute**：它用的是类上那个"输出要拿来解析"的大上限，
+        // 而这里要的正是调用方给的那一份 —— 走它的话，`maxChars` 会被静默丢掉，
+        // "截断了"永远为假（这条是测试抓出来的，不是我想到的）
+        ProcessOutcome outcome = ProcessRunner.run(command, directory, environment(), timeout,
+                maxChars, outputCharset, CancellationToken.none());
+        if (outcome.termination() != CommandTermination.COMPLETED) {
+            throw new GitCommandException(command, outcome,
+                    "取这段 diff 超过 " + timeout + " 没有结束，已强制终止进程树");
+        }
+        if (outcome.exitCode() != 0) {
+            throw new GitCommandException(command, outcome,
+                    "取不出这个提交里那个文件的改动 —— 提交或不在这棵树里，或路径不对");
+        }
+        return new FileDiff(outcome.stdout(), outcome.truncated());
     }
 
     /**

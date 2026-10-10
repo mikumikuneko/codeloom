@@ -18,12 +18,12 @@ import java.util.Objects;
  * @param tools       暴露给模型的工具；为空表示这次不提供工具
  * @param maxTokens   单次输出上限
  */
-public record ChatRequest(String model,
-                          List<ChatMessage> messages,
+public record LlmRequest(String model,
+                          List<LlmMessage> messages,
                           List<ToolDefinition> tools,
                           int maxTokens) {
 
-    public ChatRequest {
+    public LlmRequest {
         Objects.requireNonNull(model, "model");
         Objects.requireNonNull(messages, "messages");
         tools = tools == null ? List.of() : List.copyOf(tools);

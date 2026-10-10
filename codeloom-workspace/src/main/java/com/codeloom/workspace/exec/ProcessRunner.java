@@ -18,7 +18,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
@@ -26,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * 跑一个子进程并把它管住：读输出、限时、杀树。
@@ -33,6 +36,16 @@ import java.util.concurrent.TimeUnit;
  * <p>抽出来是因为**有两处都要跑进程**：{@code GitClient}（参数由我们构造，可信）
  * 和 {@code LocalCommandExecutor}（参数来自模型，不可信）。两者的管控逻辑一样，
  * 只是权限策略不同 —— 那部分由调用方负责，这里只管"把进程跑干净"。
+ *
+ * <h2>子进程的环境是**重建**出来的，不是原样继承下去的</h2>
+ * 凭据形状的名字（见 {@link #SENSITIVE_ENV_NAME}）和整片 {@code CODELOOM_} 命名空间都不递给子进程，
+ * 其余照旧（{@code PATH}、{@code HOME}、locale、代理变量都在）。因为 {@code run_command}
+ * 的参数来自模型，而这台机器上的 JVM 环境里有 {@code CODELOOM_SECRET_KEY} ——
+ * 那是解开库里用户 API Key 的主密钥，一条 {@code echo} 就能读走。
+ *
+ * <p>清完之后**才**合并调用方显式给的 {@code extraEnvironment}，所以"这个程序确实需要某个变量"
+ * 另有路可走；默认那条路是干净的。反过来把顺序写反，显式给的变量会被清掉，
+ * 表现是 git 忽然读不到自己那份配置。
  *
  * <h2>四个容易写错的地方</h2>
  * <ol>
@@ -65,6 +78,29 @@ public final class ProcessRunner {
      */
     private static final int FALLBACK_EXIT_CODE = 1;
 
+    /**
+     * 子进程环境里**不许带过去**的名字。
+     *
+     * <p>凭据的名字就那么几种形状，按形状匹配比维护一张名单可靠：名单会漏，而且每加一个新变量
+     * 都得记得回来补；模式匹配自动盖住它。deepseek-harness 用同一套规则清它的每一个子进程。
+     *
+     * <p>代价是误伤：{@code TOKENIZERS_PARALLELISM} 这种带 TOKEN 字样的普通变量也进不去。
+     * 那比漏掉一把真密钥轻得多。
+     */
+    private static final Pattern SENSITIVE_ENV_NAME =
+            Pattern.compile("KEY|PASSWORD|SECRET|TOKEN", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * 我们自己的配置命名空间，整片丢掉。
+     *
+     * <p>它里面除了口令，还有 {@code CODELOOM_COMMAND_WHITELIST} 这类**不该让模型看见的调参** ——
+     * 让 agent 读到自己的审批白名单，等于把"哪条命令不会被人看见"告诉它。
+     *
+     * <p>比对上要 {@code toUpperCase}：Windows 的环境名不区分大小写，父进程里一个
+     * {@code codeloom_*} 不这样做就会原样漏过去。
+     */
+    private static final String OWN_ENV_PREFIX = "CODELOOM_";
+
     private ProcessRunner() {
     }
 
@@ -72,7 +108,8 @@ public final class ProcessRunner {
      * 同步执行，直到进程结束、超时、或被中断。
      *
      * @param workingDirectory 工作目录，null 表示继承当前目录
-     * @param extraEnvironment 追加的环境变量（会覆盖同名项）
+     * @param extraEnvironment 显式给子进程的环境变量。**在清洗之后合并**，所以调用方给的
+     *                         一定到得了（见类注释），同名项以这里为准
      * @param timeout          时限；到点强杀整棵进程树
      * @param maxOutputChars   单个流（stdout / stderr 各自）的字符上限
      * @param charset          **兜底**字符集：解出来不是合法 UTF-8 时用它，
@@ -107,6 +144,10 @@ public final class ProcessRunner {
         if (workingDirectory != null) {
             builder.directory(workingDirectory.toFile());
         }
+        // 顺序就是契约，见类注释：先清掉 ProcessBuilder 默认继承的那一份，再放"清过的父环境"，
+        // 最后才合并调用方显式给的
+        builder.environment().clear();
+        builder.environment().putAll(childEnvironment());
         builder.environment().putAll(extraEnvironment);
 
         long startedAt = System.nanoTime();
@@ -142,6 +183,29 @@ public final class ProcessRunner {
             return new ProcessOutcome(exitCodeOf(process), out.text(), err.text(),
                     out.truncated() || err.truncated(), durationMs, termination);
         }
+    }
+
+    /** 交给子进程的那份环境：本进程的环境，清掉见不得的那些。 */
+    static Map<String, String> childEnvironment() {
+        return scrubbed(System.getenv());
+    }
+
+    /**
+     * 清洗规则本身，**纯函数**。
+     *
+     * <p>抽出来是为了能拿一份**构造好的**环境去断言它 —— 本进程的环境里有没有可清的东西
+     * 取决于这台机器，靠它验不出规则对不对。
+     */
+    static Map<String, String> scrubbed(Map<String, String> parentEnvironment) {
+        Map<String, String> kept = new LinkedHashMap<>();
+        parentEnvironment.forEach((name, value) -> {
+            if (SENSITIVE_ENV_NAME.matcher(name).find()
+                    || name.toUpperCase(Locale.ROOT).startsWith(OWN_ENV_PREFIX)) {
+                return;
+            }
+            kept.put(name, value);
+        });
+        return kept;
     }
 
     /**

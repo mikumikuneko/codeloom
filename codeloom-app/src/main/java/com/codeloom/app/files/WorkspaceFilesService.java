@@ -2,6 +2,7 @@ package com.codeloom.app.files;
 
 import com.codeloom.agent.tool.WorkspacePathGuard;
 import com.codeloom.app.project.ProjectLayout;
+import com.codeloom.domain.port.Workspace;
 import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.project.Project;
 import com.codeloom.domain.project.ProjectId;
@@ -79,11 +80,11 @@ public class WorkspaceFilesService {
      * <ul>
      *   <li>{@code .git} —— 在 linked worktree 里它是个**文件**（内容是 {@code gitdir: …}）。
      *       列出来既没意义，又把主仓库在磁盘上的位置泄给前端</li>
-     *   <li>{@code .codeloom} —— 我们自己塞进去的落盘目录（见 {@code Workspace.TOOL_OUTPUT_DIR}），
+     *   <li>{@code .codeloom} —— 我们自己塞进去的落盘目录（见 {@code Workspace.PLATFORM_DIR}），
      *       里面是给模型读的工具输出，不属于用户的代码</li>
      * </ul>
      */
-    private static final Set<String> HIDDEN = Set.of(".git", ".codeloom");
+    private static final Set<String> HIDDEN = Set.of(".git", Workspace.PLATFORM_DIR);
 
     /** 目录在前，然后按名字（不区分大小写）。顺序必须稳定，否则树会在刷新时跳。 */
     private static final Comparator<FileEntryView> ENTRY_ORDER =

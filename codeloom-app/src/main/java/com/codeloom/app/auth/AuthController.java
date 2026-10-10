@@ -153,9 +153,22 @@ public class AuthController {
     // ------------------------------------------------------------------
 
     public record RegisterRequest(String username, String password, String displayName) {
+
+        /** 打印时隐去口令。理由与遮法见 {@link ApiKeyController.ConfigureRequest#toString()}。 */
+        @Override
+        public String toString() {
+            return "RegisterRequest[username=" + username + ", password=[已隐去], displayName="
+                    + displayName + "]";
+        }
     }
 
     public record LoginRequest(String username, String password) {
+
+        /** 打印时隐去口令。理由与遮法见 {@link ApiKeyController.ConfigureRequest#toString()}。 */
+        @Override
+        public String toString() {
+            return "LoginRequest[username=" + username + ", password=[已隐去]]";
+        }
     }
 
     /**

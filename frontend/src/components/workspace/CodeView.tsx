@@ -182,7 +182,7 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-function Hint({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
+export function Hint({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
   return (
     <div className="pane-absent">
       <p

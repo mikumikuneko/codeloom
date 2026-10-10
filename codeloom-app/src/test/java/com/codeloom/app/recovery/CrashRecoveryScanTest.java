@@ -2,9 +2,13 @@ package com.codeloom.app.recovery;
 
 import com.codeloom.app.support.TestSessions;
 import com.codeloom.app.support.TestUsers;
+import com.codeloom.app.turn.SessionWriter;
+import com.codeloom.domain.event.Event;
 import com.codeloom.domain.event.StoredEvent;
+import com.codeloom.domain.event.ToolApprovalRequested;
+import com.codeloom.domain.event.ToolApprovalResolved;
 import com.codeloom.domain.event.ToolCallRequested;
-import com.codeloom.domain.event.ToolInterrupted;
+import com.codeloom.domain.event.ToolRejected;
 import com.codeloom.domain.port.EventStore;
 import com.codeloom.domain.port.ExecutionLease;
 import com.codeloom.domain.port.LeaseToken;
@@ -22,10 +26,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -53,6 +55,10 @@ class CrashRecoveryScanTest {
     @Mock
     private ExecutionLease leases;
 
+    /** 补写那一步的落点 —— 恢复不自己往事件流写，走的是唯一那个写入口。 */
+    @Mock
+    private SessionWriter writer;
+
     @Test
     @DisplayName("一条会话恢复失败不拖住其他的 —— 剩下的还能救")
     void oneBadSessionDoesNotStopTheOthers() {
@@ -65,7 +71,7 @@ class CrashRecoveryScanTest {
         // 我们要验的只是**它被访问到了**
         when(leases.tryAcquire(fine)).thenReturn(Optional.empty());
 
-        new CrashRecovery(sessions, events, leases).recoverUnfinishedSessions();
+        new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
 
         verify(leases).tryAcquire(fine);
     }
@@ -82,10 +88,10 @@ class CrashRecoveryScanTest {
                 new StoredEvent(session.id(), 1L, Instant.parse("2026-09-25T10:00:00Z"),
                         new ToolCallRequested("call_1", "read_file", "{}"))));
 
-        new CrashRecovery(sessions, events, leases).recoverUnfinishedSessions();
+        new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
 
         // 这条事实不补的话，模型下次会以为那个调用成功了，可能把写操作重放一遍
-        verify(events).append(eq(session.id()), any(ToolInterrupted.class), eq(token));
+        verify(writer).interruptUnfinished(session, List.of("call_1"), token);
         // 锁一定要还。不还的话这条会话就永远被这个实例占着，用户下次发话只会拿到 Busy ——
         // 而恢复本身是启动时跑一次的后台动作，没有人会去排查"为什么一直忙"
         verify(leases).release(token);
@@ -100,16 +106,41 @@ class CrashRecoveryScanTest {
         when(leases.tryAcquire(session)).thenReturn(Optional.of(token));
         when(events.readAll(session.id())).thenReturn(List.of());
 
-        new CrashRecovery(sessions, events, leases).recoverUnfinishedSessions();
+        new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
 
-        // 类型参数写出来是为了消歧：EventStore.append 有单条和批量两个重载
-        verify(events, never()).append(any(SessionId.class), any(ToolInterrupted.class),
-                any(LeaseToken.class));
+        // 一个字都不写 —— 连那个写入口都不碰
+        verifyNoInteractions(writer);
         // 但锁照样要放 —— 抢到了就得负责还
         verify(leases).release(token);
     }
 
+    @Test
+    @DisplayName("【被拒绝的调用不算执行到一半】它压根没跑过")
+    void aRejectedCallIsNotPatched() {
+        Session session = session();
+        LeaseToken token = tokenFor(session);
+        when(sessions.findAll()).thenReturn(List.of(session));
+        when(leases.tryAcquire(session)).thenReturn(Optional.of(token));
+        // 请求了 → 挂起等人批 → 用户拒了 → 收尾标记
+        when(events.readAll(session.id())).thenReturn(List.of(
+                stored(session, 1, new ToolCallRequested("call_1", "run_command", "{}")),
+                stored(session, 2, new ToolApprovalRequested("call_1", "要问你")),
+                stored(session, 3, new ToolApprovalResolved("call_1", false, TestUsers.OWNER, null)),
+                stored(session, 4, new ToolRejected("call_1"))));
+
+        new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
+
+        // 给它补一条 ToolInterrupted 等于说"它执行到一半被重启打断了" —— 而它从来没跑过。
+        // 判据落在**那个写入口**上：补写走的是 SessionWriter，不碰就是没补
+        verifyNoInteractions(writer);
+        verify(leases).release(token);
+    }
+
     // ------------------------------------------------------------------
+
+    private static StoredEvent stored(Session session, long seq, Event event) {
+        return new StoredEvent(session.id(), seq, Instant.parse("2026-10-10T10:00:00Z"), event);
+    }
 
     private static Session session() {
         return Session.create(SessionId.generate(), PROJECT_ID, TestUsers.OWNER,

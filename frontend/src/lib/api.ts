@@ -12,6 +12,8 @@
  * 等于在说"我要跨源发凭据"，那是一个要同时改后端 SameSite 的决定，不该悄悄发生。
  */
 
+import type { SessionState } from '@/lib/sessionState'
+
 /** 后端返回的 ProblemDetail。`detail` 是给人看的那句话，`title` 是它的分类。 */
 export interface ProblemDetail {
   title?: string
@@ -222,6 +224,20 @@ export const projects = {
    */
   leave: (projectId: string) =>
     api<void>(`/api/projects/${projectId}/members/me`, { method: 'DELETE' }),
+  /**
+   * 某一个提交里某个文件改了什么 —— 正文。
+   *
+   * <p>两个参数都来自流里那条"这一轮改了什么"（见 `ChangedFile`）：`commitSha` 是它那个提交，
+   * `path` 是**项目相对**路径 —— 正是后端要的那一种形状。
+   *
+   * <p>正文可能被截断（后端按字符上限截的），`truncated` 要如实显示 ——
+   * 一份截断的正文与"只改了这么多"长得一模一样。
+   */
+  diff: (projectId: string, commitSha: string, path: string) =>
+    api<{ text: string; truncated: boolean }>(
+      `/api/projects/${projectId}/diff?commitSha=${encodeURIComponent(commitSha)}` +
+        `&path=${encodeURIComponent(path)}`,
+    ),
 }
 
 /**
@@ -312,7 +328,7 @@ export interface Session {
   /** 分支名和 HEAD 是**工作区**的属性 —— 同一个人在这个项目里的几条会话看到的是同一对值 */
   branch: string
   headCommit: string | null
-  state: string
+  state: SessionState
   turnIndex: number
   model: SessionModel
   /**

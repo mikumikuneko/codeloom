@@ -1,7 +1,7 @@
 package com.codeloom.agent.llm.openai;
 
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmResult;
 import com.codeloom.agent.llm.ToolCall;
@@ -118,8 +118,8 @@ class OpenAiCompatibleClientTest {
             received.set(readJson(exchange));
             send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
         });
-        ChatRequest request = new ChatRequest("deepseek-flash",
-                List.of(ChatMessage.user("读文件")),
+        LlmRequest request = new LlmRequest("deepseek-flash",
+                List.of(LlmMessage.user("读文件")),
                 List.of(new ToolDefinition("read_file", "读取文件",
                         "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}")),
                 1024);
@@ -144,9 +144,9 @@ class OpenAiCompatibleClientTest {
         });
         // 来源模型传 null = **不知道这条是谁产的**（老事件就是这样）。
         // 不知道来源时照发 —— 见 reasoningToSend："该发而没发"曾导致 400
-        ChatRequest request = new ChatRequest("deepseek-reasoner",
-                List.of(ChatMessage.user("读一下 A"),
-                        ChatMessage.assistantWithToolCalls("", List.of(new ToolCall("call_1",
+        LlmRequest request = new LlmRequest("deepseek-reasoner",
+                List.of(LlmMessage.user("读一下 A"),
+                        LlmMessage.assistantWithToolCalls("", List.of(new ToolCall("call_1",
                                 "read_file", "{\"path\":\"A.java\"}")), null, "我在想先看哪个文件")),
                 List.of(), 1024);
 
@@ -170,9 +170,9 @@ class OpenAiCompatibleClientTest {
             send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
         });
         // 这条 assistant 消息是 flash 说的，而这次请求发给 pro
-        ChatRequest request = new ChatRequest("deepseek-pro",
-                List.of(ChatMessage.user("接着改"),
-                        ChatMessage.assistant("前半段我在想接口该怎么切", "deepseek-flash",
+        LlmRequest request = new LlmRequest("deepseek-pro",
+                List.of(LlmMessage.user("接着改"),
+                        LlmMessage.assistant("前半段我在想接口该怎么切", "deepseek-flash",
                                 "前半段我在想接口该怎么切")),
                 List.of(), 1024);
 
@@ -195,9 +195,9 @@ class OpenAiCompatibleClientTest {
             received.set(readJson(exchange));
             send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
         });
-        ChatRequest request = new ChatRequest("deepseek-flash",
-                List.of(ChatMessage.user("接着改"),
-                        ChatMessage.assistantWithToolCalls("", List.of(new ToolCall("call_1",
+        LlmRequest request = new LlmRequest("deepseek-flash",
+                List.of(LlmMessage.user("接着改"),
+                        LlmMessage.assistantWithToolCalls("", List.of(new ToolCall("call_1",
                                         "read_file", "{\"path\":\"A.java\"}")),
                                 "deepseek-flash", "我在想先看哪个文件")),
                 List.of(), 1024);
@@ -337,8 +337,8 @@ class OpenAiCompatibleClientTest {
     // 辅助
     // ------------------------------------------------------------------
 
-    private ChatRequest request(String userText) {
-        return new ChatRequest("deepseek-flash", List.of(ChatMessage.user(userText)),
+    private LlmRequest request(String userText) {
+        return new LlmRequest("deepseek-flash", List.of(LlmMessage.user(userText)),
                 List.of(), 1024);
     }
 

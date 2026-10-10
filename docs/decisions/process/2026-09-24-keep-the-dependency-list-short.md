@@ -8,6 +8,8 @@
 
 不引 Lombok、不引数据库迁移工具（Flyway/Liquibase，也不让 `spring.sql.init` 自动建表）、不引 AI 框架、不用 OkHttp、不引 JSON Schema 校验库 —— HTTP 客户端用 JDK 自带的 `HttpClient`，参数校验自己写（`ArgumentValidator`）。
 
+**测试那侧另算**：前端引了一个测试运行器（vitest），理由和边界在 `2026-10-10-frontend-pure-modules-get-tests.md` 里 —— 它是 dev 依赖、不进产物，而且这一条是**试过零依赖那条路之后**才选的。
+
 ## 还考虑过什么，为什么没选
 
 - **Lombok**：省下的是几个 getter 和一个日志字段，换来的是编译期处理器、一份编译器配置、以及长期的 JDK 升级跟进责任 —— 这笔账不划算。而且 JDK 21 的 record 已经吃掉了它大部分价值。

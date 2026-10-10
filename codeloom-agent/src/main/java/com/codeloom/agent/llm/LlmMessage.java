@@ -13,23 +13,23 @@ import java.util.Objects;
  * <p>用一条 record 覆盖四种角色而不是四个子类，是因为它们的载荷差异很小
  * （都是文本 + 可选的工具信息），拆开反而要在每个处理点写四路分支。
  *
- * @param content    正文。{@link ChatRole#TOOL} 消息里是工具的执行结果
- * @param toolCalls  仅 {@link ChatRole#ASSISTANT} 可能有：模型发起的工具调用
- * @param toolCallId 仅 {@link ChatRole#TOOL} 需要：回应的是哪一次调用
- * @param reasoning  仅 {@link ChatRole#ASSISTANT} 可能有：这条回复**当时**的思考过程
- * @param model      **产出这条回复的模型**。仅 {@link ChatRole#ASSISTANT} 有。
+ * @param content    正文。{@link LlmRole#TOOL} 消息里是工具的执行结果
+ * @param toolCalls  仅 {@link LlmRole#ASSISTANT} 可能有：模型发起的工具调用
+ * @param toolCallId 仅 {@link LlmRole#TOOL} 需要：回应的是哪一次调用
+ * @param reasoning  仅 {@link LlmRole#ASSISTANT} 可能有：这条回复**当时**的思考过程
+ * @param model      **产出这条回复的模型**。仅 {@link LlmRole#ASSISTANT} 有。
  *                   它存在的唯一理由是：{@code reasoning} 是**只对产生它的那个模型成立**的东西，
  *                   换了模型之后不能原样发回去（见 {@code OpenAiCompatibleClient#wireMessage}）。
  *                   null = **来源未知**（老事件、测试），那时维持旧行为：照发
  */
-public record ChatMessage(ChatRole role,
+public record LlmMessage(LlmRole role,
                           String content,
                           List<ToolCall> toolCalls,
                           String toolCallId,
                           String reasoning,
                           String model) {
 
-    public ChatMessage {
+    public LlmMessage {
         Objects.requireNonNull(role, "role");
         toolCalls = toolCalls == null ? List.of() : List.copyOf(toolCalls);
         if (reasoning != null && reasoning.isBlank()) {
@@ -40,26 +40,26 @@ public record ChatMessage(ChatRole role,
         if (model != null && model.isBlank()) {
             model = null;
         }
-        if (role == ChatRole.TOOL && (toolCallId == null || toolCallId.isBlank())) {
+        if (role == LlmRole.TOOL && (toolCallId == null || toolCallId.isBlank())) {
             throw new IllegalArgumentException("TOOL 消息必须带 toolCallId，否则模型对不上是哪次调用");
         }
-        if (role != ChatRole.TOOL && toolCallId != null) {
+        if (role != LlmRole.TOOL && toolCallId != null) {
             throw new IllegalArgumentException("只有 TOOL 消息能带 toolCallId，收到角色 " + role);
         }
-        if (role != ChatRole.ASSISTANT && reasoning != null) {
+        if (role != LlmRole.ASSISTANT && reasoning != null) {
             throw new IllegalArgumentException("只有 ASSISTANT 消息能带 reasoning，收到角色 " + role);
         }
-        if (role != ChatRole.ASSISTANT && model != null) {
+        if (role != LlmRole.ASSISTANT && model != null) {
             throw new IllegalArgumentException("只有 ASSISTANT 消息能带 model，收到角色 " + role);
         }
     }
 
-    public static ChatMessage system(String text) {
-        return new ChatMessage(ChatRole.SYSTEM, text, List.of(), null, null, null);
+    public static LlmMessage system(String text) {
+        return new LlmMessage(LlmRole.SYSTEM, text, List.of(), null, null, null);
     }
 
-    public static ChatMessage user(String text) {
-        return new ChatMessage(ChatRole.USER, text, List.of(), null, null, null);
+    public static LlmMessage user(String text) {
+        return new LlmMessage(LlmRole.USER, text, List.of(), null, null, null);
     }
 
     /**
@@ -82,17 +82,17 @@ public record ChatMessage(ChatRole role,
      *
      * @param model **产出这条回复的模型**。null = 不知道（老事件、测试）
      */
-    public static ChatMessage assistant(String text, String model, String reasoning) {
-        return new ChatMessage(ChatRole.ASSISTANT, text, List.of(), null, reasoning, model);
+    public static LlmMessage assistant(String text, String model, String reasoning) {
+        return new LlmMessage(LlmRole.ASSISTANT, text, List.of(), null, reasoning, model);
     }
 
-    public static ChatMessage assistantWithToolCalls(String text, List<ToolCall> toolCalls,
+    public static LlmMessage assistantWithToolCalls(String text, List<ToolCall> toolCalls,
                                                      String model, String reasoning) {
-        return new ChatMessage(ChatRole.ASSISTANT, text, toolCalls, null, reasoning, model);
+        return new LlmMessage(LlmRole.ASSISTANT, text, toolCalls, null, reasoning, model);
     }
 
-    public static ChatMessage toolResult(String toolCallId, String content) {
-        return new ChatMessage(ChatRole.TOOL, content, List.of(), toolCallId, null, null);
+    public static LlmMessage toolResult(String toolCallId, String content) {
+        return new LlmMessage(LlmRole.TOOL, content, List.of(), toolCallId, null, null);
     }
 
     public boolean hasToolCalls() {

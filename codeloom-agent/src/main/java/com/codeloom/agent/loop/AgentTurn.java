@@ -1,8 +1,8 @@
 package com.codeloom.agent.loop;
 
 import com.codeloom.agent.context.ContextAssembler;
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmResult;
 import com.codeloom.agent.llm.StreamEvent;
@@ -54,7 +54,7 @@ import java.util.stream.Stream;
  * 一轮 agent 执行 —— ReAct 循环：让模型说话、执行它要的工具、把结果喂回去，直到它不再要工具。
  *
  * <h2>这个类不碰存储</h2>
- * 它拿事件流当输入、把新事件当输出。落库、更新会话状态、广播 SSE 都是调用方的事。
+ * 它拿事件流当输入、把新事件当输出。落库、更新会话状态、把事件送到订阅者那里都是调用方那边的事。
  * 于是它成了一个**纯函数**：{@code (历史, 配置) → 新事件}。最容易长 bug 的那部分代码，
  * 恰好是最好测的那部分 —— 塞个假客户端就能跑完整条路径。
  *
@@ -69,7 +69,7 @@ import java.util.stream.Stream;
  * <h2>两条输出通道，别混</h2>
  * <ul>
  *   <li>{@link #run(TurnInput, ToLongFunction)} 的 {@code onEvent} —— **持久事件**，产生的那一刻
- *       就交给调用方：它立刻落库并广播，再把这条事件真实的 seq 返回。</li>
+ *       就交给调用方：它立刻落库（落下的那条随即被送出去），再把这条事件真实的 seq 返回。</li>
  *   <li>构造器里的 {@code liveListener} —— **流式增量**（{@code StreamEvent}），逐 token 的
  *       文本片段。它不落库，只是让正在看的人看到"模型正在打字"。</li>
  * </ul>
@@ -316,7 +316,7 @@ public final class AgentTurn {
      *       如果事件要等整轮结束才出去，对方在这 30 秒里看不到任何东西。
      * </ol>
      *
-     * <p>调用方应当在回调里**立刻落库并广播**（带 fencing token 的那次追加），
+     * <p>调用方应当在回调里**立刻落库**（带 fencing token 的那次追加），
      * 而不是攒起来。回调抛异常（比如 fencing token 已失效）会中止整轮 —— 这是对的，
      * 那时候本轮剩下的产出已经不可信了。
      *
@@ -366,7 +366,7 @@ public final class AgentTurn {
             // **只调工具、一个字不说**的那一轮也要落库 —— 落的是它的思考。
             // 这一轮正是带 tool_calls 的那一条，而 OpenAI 兼容阵营的推理模型
             // （DeepSeek 的思维链模式）要求它必须把当时的 reasoning_content 带回来：
-            // 少存了这条消息，下一次请求发出去就是一个 400（见 ChatMessage#assistant）。
+            // 少存了这条消息，下一次请求发出去就是一个 400（见 LlmMessage#assistant）。
             if (!result.text().isEmpty() || result.hasReasoning()) {
                 // 带上**这一刻**的模型名：一轮里模型可能被换过（用户切了、或者降级了），
                 // 而这一条消息要说得清是谁写的
@@ -460,13 +460,13 @@ public final class AgentTurn {
 
     private LlmResult callModel(TurnInput input, Workbench bench, boolean wrapUpRequested) {
         // 装进自己的 list（下一步就发给模型，不需要不可变兜底）
-        List<ChatMessage> messages = new ArrayList<>();
+        List<LlmMessage> messages = new ArrayList<>();
         bench.assembleMessages(messages);
         if (wrapUpRequested) {
-            messages.add(ChatMessage.user(TokenBudget.WRAP_UP_INSTRUCTION));
+            messages.add(LlmMessage.user(TokenBudget.WRAP_UP_INSTRUCTION));
         }
 
-        ChatRequest request = new ChatRequest(
+        LlmRequest request = new LlmRequest(
                 bench.currentModelId(),
                 messages,
                 input.tools().definitions(),
@@ -1090,7 +1090,7 @@ public final class AgentTurn {
          *
          * <p>现在折的是**这一轮自己产生的事件**（投影里已经有此前所有事件了）。
          */
-        void assembleMessages(List<ChatMessage> sink) {
+        void assembleMessages(List<LlmMessage> sink) {
             projection.advance(fresh, sink);
         }
 

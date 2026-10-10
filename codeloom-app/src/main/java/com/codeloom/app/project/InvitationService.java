@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
@@ -151,10 +152,12 @@ public class InvitationService {
     public Project accept(String token, User invitee) {
         Instant now = Instant.now();
         ProjectInvitation invitation = invitations.findByToken(token).orElseThrow(notFound());
-        if (!invitation.isUsableAt(now)) {
-            // 三种作废原因分开说。合成一句"这张邀请已经不能用了"的话，
-            // 人的第一反应是"为什么"，而那个答案本来就在手里
-            throw new ResponseStatusException(HttpStatus.CONFLICT, unusableReason(invitation, now));
+        // 判据和理由是**同一个**（`unusableReasonAt`），不存在"判了却说不清为什么"这种缝。
+        // 三种作废原因分开说：合成一句"这张邀请已经不能用了"的话，人的第一反应是"为什么"，
+        // 而那个答案本来就在手里
+        Optional<String> unusable = invitation.unusableReasonAt(now);
+        if (unusable.isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, unusable.get());
         }
 
         // 先锁再读：锁的是"这个项目现在有几个成员"这件事，而它必须和下面的写入在同一个事务里
@@ -225,6 +228,10 @@ public class InvitationService {
         Project project = projects.findById(invitation.projectId()).orElseThrow(notFound());
         User inviter = users.findById(invitation.createdBy()).orElse(null);
 
+        // 能不能用、以及为什么不能用，出自**同一处**（见 `unusableReasonAt`）——
+        // 分开算的话，预览页会出现"还能用、底下却写着一句作废理由"这种自相矛盾
+        Optional<String> unusable = invitation.unusableReasonAt(now);
+
         return new InvitationPreview(
                 invitation.projectId().value(),
                 project.name(),
@@ -232,8 +239,8 @@ public class InvitationService {
                 // 只是"谁邀请的"那一栏空了。为了一行显示把人挡在门外不值得
                 inviter == null ? null : inviter.displayName(),
                 invitation.expiresAt(),
-                invitation.isUsableAt(now),
-                unusableReason(invitation, now),
+                unusable.isEmpty(),
+                unusable.orElse(null),
                 viewerOf(invitation, project, viewerId));
     }
 
@@ -252,19 +259,6 @@ public class InvitationService {
 
     // ------------------------------------------------------------------
 
-    /** 这张邀请为什么不能用；还能用就返回 null。 */
-    private static String unusableReason(ProjectInvitation invitation, Instant now) {
-        if (invitation.revokedAt() != null) {
-            return "这张邀请已经被撤销了";
-        }
-        if (invitation.acceptedBy() != null) {
-            return "这张邀请已经被用过了 —— 邀请链接是一次性的";
-        }
-        if (!now.isBefore(invitation.expiresAt())) {
-            return "这张邀请已经过期了，让项目里的人重新发一张";
-        }
-        return null;
-    }
 
     /**
      * 404 而不是 403：拿一批 token 挨个试的时候，分不出"不存在"和"不是你的"，

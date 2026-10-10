@@ -9,7 +9,12 @@ import { languageOfPath, useHighlighted, useViewportHighlighting } from '@/lib/h
 import { observeStream, usePendingEcho } from '@/lib/pendingEcho'
 import {
   formatTokens,
+  groupIntoTurns,
+  changeTotals,
+  toolIsRunning,
+  turnStateOf,
   turnChanges,
+  turnIsActive,
   workspaceWrites,
   type ContextReading,
   type NoticeTone,
@@ -53,6 +58,7 @@ export function SessionStreamView({
   canApprove = false,
   footer,
   onOpenFile,
+  onOpenDiff,
 
   onWorkspaceChanged,
 }: {
@@ -98,7 +104,7 @@ export function SessionStreamView({
    * <p>**观战时也传**：看别人的 agent 改了一个文件，正是最想打开看的时候。
    */
   onOpenFile?: (path: string) => void
-
+  onOpenDiff?: (commitSha: string, path: string) => void
 
   /**
    * agent 动了工作区里的文件。
@@ -132,23 +138,11 @@ export function SessionStreamView({
   /**
    * 这一轮是不是还在跑。
    *
-   * <p>两个判据缺一不可：
-   *
-   * <ul>
-   *   <li><b>正在长的那段文字</b>。注意 {@code streaming} **永远不是 null**
-   *       （空的时候是 {@code {text: '', reasoning: ''}}）—— 拿它和 null 比是恒真的，
-   *       那样写等于"永远在跑"</li>
-   *   <li><b>没跑完的工具</b>：{@code outcome} 为空**而且** {@code unfinished} 也为空。
-   *       后半个不能省：被取消、被中断的工具**也没有 outcome**（它们落成"没跑完"，
-   *       而不是一个结果），少了它，一轮早停了、最后一个工具还挂着，界面就一直
-   *       以为它在跑</li>
-   * </ul>
+   * <p>判据只有一个：**这一轮最后那条状态**（见 {@link turnIsActive}）。
+   * 它喂的是"按 Esc 打断"和下面那行状态 —— 判错的方向里，说"没在跑"更贵：
+   * 人正要打断一次跑了几十秒的构建，而按钮不响应。
    */
-  const last = items.at(-1)
-  const running =
-    streaming.text !== '' ||
-    streaming.reasoning !== '' ||
-    (last?.kind === 'tool' && last.outcome === null && last.unfinished === null)
+  const running = turnIsActive(items)
 
   /** 停止信号发出去了、但还没真的停。**只为了给一句话的反馈**，见下面那个 effect */
   const [stopping, setStopping] = useState(false)
@@ -234,7 +228,7 @@ export function SessionStreamView({
   //  二、更要紧：轮次号是按块在数组里的**下标**去查的（见下面 changesByTurn 和
   //     TurnRail）。会话开头那条 checkpoint 多占一格，后面每一轮的编号就整体错一格 ——
   //     "这一轮改了哪些文件"会挂到别人那一轮头上，而那看起来完全像真的。
-  const turns = groupIntoTurns(items.filter((item) => item.kind !== 'checkpoint'))
+  const turns = groupIntoTurns(items)
 
   /**
    * 每一轮改了哪些文件。
@@ -255,7 +249,7 @@ export function SessionStreamView({
    *
    * <p>不用"事件条数"当依赖：那个每一帧都在变，会把这条接口打成轮询。
    */
-  const changesByTurn = new Map(turnChanges(items).map((entry) => [entry.turn, entry]))
+  const changesByTurn = new Map(turnChanges(turns).map((entry) => [entry.turn, entry]))
 
   /**
    * 每一轮的根元素。轮次导航点一下，就把那一轮滚进视野 —— 见 {@link TurnRail}。
@@ -340,6 +334,7 @@ export function SessionStreamView({
                 sessionId={sessionId}
                 canApprove={canApprove}
                 onOpenFile={onOpenFile}
+                onOpenDiff={onOpenDiff}
                 nameOf={lookupName}
               />
             ))}
@@ -373,28 +368,6 @@ function who(
   id: string | null | undefined,
 ): string {
   return (id ? nameOf?.(id) : null) || '有人'
-}
-
-/**
- * 把一条平坦的流切成**一轮一块**。
- *
- * <h2>为什么这件事值得做</h2>
- * 平铺的时候，一轮内部的间距和轮与轮之间的间距是同一个数 —— 于是"这段话属于哪一轮"
- * 只能靠读内容去推。而一段几十步的流水里，**块与块的边界是读它的人唯一能靠的骨架**：
- * 一眼看出"这三步是同一件事"，比任何颜色和图标都管用。
- *
- * <p>规则只有一条：**遇到一条用户消息就起新块**。它正好就是"这一轮是从哪儿开始的" ——
- * 而这个流里唯一确定的边界也只有它（工具调用、平台提示、状态变化全都在一轮之内）。
- */
-function groupIntoTurns(items: StreamItem[]): StreamItem[][] {
-  const turns: StreamItem[][] = []
-  for (const item of items) {
-    if (item.kind === 'user' || turns.length === 0) {
-      turns.push([])
-    }
-    turns[turns.length - 1].push(item)
-  }
-  return turns
 }
 
 function Item({
@@ -520,6 +493,10 @@ function Item({
     // 和"忘了画"在代码里长得一模一样，而它们该被人分得清
     case 'checkpoint':
     case 'changes':
+    // 状态那条也**不显示**：它进流只为了让"这一轮现在什么状态"有个事实来源（见 turnStateOf）。
+    // 这里显式列出来，而不是靠"掉出 switch 就是 undefined"—— 那种隐式行为会被下一个人
+    // 加一个 default 或者开 noImplicitReturns 时打掉
+    case 'state':
       return null
   }
 }
@@ -549,6 +526,7 @@ function Turn({
   sessionId,
   canApprove,
   onOpenFile,
+  onOpenDiff,
   nameOf,
 
 }: {
@@ -565,6 +543,7 @@ function Turn({
   sessionId: string | null
   canApprove: boolean
   onOpenFile?: (path: string) => void
+  onOpenDiff?: (commitSha: string, path: string) => void
   /** 见 {@link SessionStreamView} 的 nameOf */
   nameOf: (id: string) => string | null
 
@@ -586,10 +565,11 @@ function Turn({
    * AWAITING_APPROVAL），照画的话，屏幕上会冒出"这一轮用了 8,538 tokens · 用时 21 秒"，
    * 而那一轮明明还在等人 —— 看的人会以为它结束了。
    *
-   * <p>这条规则在投影那边已经写着（{@code SESSION_STATE_CHANGED} 里那句"等人批不算"），
-   * 只是它当时只用来关掉悬挂的调用，没管用量行。
+   * <p>它和投影那边问的是**同一个事实**（这一轮的状态，见 {@code turnStateOf}）。
+   * 从前后者是去数"这一块里还有没有没答复的审批卡片" —— 同一个问题两个来源，
+   * 两边一旦不同步就会自相矛盾。
    */
-  const awaitingApproval = turn.some((one) => one.kind === 'approval' && one.approved === null)
+  const awaitingApproval = turnStateOf(turn) === 'AWAITING_APPROVAL'
 
   return (
     <LiveTurn.Provider value={live}>
@@ -614,6 +594,7 @@ function Turn({
                 endedAt={span.endedAt}
                 stopped={stopped}
                 onOpenFile={onOpenFile}
+                onOpenDiff={onOpenDiff}
               />
             ) : null
           ) : (
@@ -717,6 +698,7 @@ function TurnTail({
   endedAt,
   stopped,
   onOpenFile,
+  onOpenDiff,
 }: {
   item: Extract<StreamItem, { kind: 'usage' }>
   change: TurnChanges | null
@@ -725,6 +707,7 @@ function TurnTail({
   /** 这一轮没正常跑完（失败 / 被打断 / 被拒绝停下） */
   stopped: boolean
   onOpenFile?: (path: string) => void
+  onOpenDiff?: (commitSha: string, path: string) => void
 
 
 }) {
@@ -747,7 +730,7 @@ function TurnTail({
         context={item.context}
       />
       {duration !== null && <span className="text-xs text-loom-faint">{duration}</span>}
-      <ChangesRow change={change} onOpenFile={onOpenFile} />
+      <ChangesRow change={change} onOpenFile={onOpenFile} onOpenDiff={onOpenDiff} />
     </div>
   )
 }
@@ -769,9 +752,11 @@ function TurnTail({
 function ChangesRow({
   change,
   onOpenFile,
+  onOpenDiff,
 }: {
   change: TurnChanges | null
   onOpenFile?: (path: string) => void
+  onOpenDiff?: (commitSha: string, path: string) => void
 
 
 }) {
@@ -779,8 +764,7 @@ function ChangesRow({
   if (change === null || change.files.length === 0) {
     return null
   }
-  const added = change.files.reduce((sum, file) => sum + file.added, 0)
-  const deleted = change.files.reduce((sum, file) => sum + file.deleted, 0)
+  const { added, deleted } = changeTotals(change.files)
 
   return (
     <details
@@ -801,10 +785,14 @@ function ChangesRow({
       <ul className="mt-2 space-y-0.5 border-l-2 border-border pl-3 text-xs text-loom-faint">
         {change.files.map((file) => (
           <li key={file.path} className="flex items-baseline gap-3">
-            {/* 路径可点 —— 和会话流里别处的路径同一个行为：点了在中栏打开它 */}
+            {/* 路径可点。**这里的点和流里别处的路径不一样**：别处打开的是"它**现在**是什么样"，
+                这里打开的是"**这一轮**对它做了什么" —— 回滚之后只剩后者看得见。
+                （没人挂那个回调时才退回旧行为：打开文件本身） */}
             <button
               type="button"
-              onClick={() => onOpenFile?.(file.path)}
+              onClick={() =>
+                onOpenDiff ? onOpenDiff(file.commitSha, file.path) : onOpenFile?.(file.path)
+              }
               className="min-w-0 truncate text-left font-mono underline-offset-2 transition-colors hover:text-muted-foreground hover:underline"
             >
               {file.path}
@@ -1049,6 +1037,14 @@ function ContextRing({ reading }: { reading: ContextReading }) {
       />
     </svg>
   )
+}
+
+/**
+ * 折叠区那颗按钮上写什么。两个折叠区（工具结果、一段 diff）用**同一句话**，
+ * 所以只有这一处 —— 各写一遍的话，改文案会漏一处，而两处长得一样、不容易发现。
+ */
+function expandLabel(expanded: boolean, hidden: number): string {
+  return expanded ? '收起' : hidden === 1 ? '还有 1 行' : `还有 ${hidden} 行`
 }
 
 /**
@@ -1347,8 +1343,8 @@ function ToolLine({
   const failed = outcome !== null && !outcome.success
   // **正在跑要两个条件**：没有结果，也**没有**"没跑完"这个事实。
   // 少了后半个条件，崩溃恢复后重进会话，那条调用会一直闪 —— 界面在说它还在跑，
-  // 而它早就没了。这是这条判断唯一容易写错的地方
-  const running = outcome === null && unfinished === null
+  // 而它早就没了。这是这条判断唯一容易写错的地方（规则本身只有一处：`toolIsRunning`）
+  const running = toolIsRunning(outcome, unfinished)
   // 这个工具**声明的样子**。取不到就是空 —— 那时下面几处各自退化成"显示工具名/原始参数"
   const tool = useTool(name)
   const detail = summarize(tool, args)
@@ -1527,7 +1523,7 @@ function ResultText({ name, outcome }: { name: string; outcome: ToolOutcome }) {
           onClick={() => setExpanded(!expanded)}
           className="mt-0.5 text-loom-faint transition-colors hover:text-muted-foreground"
         >
-          {expanded ? '收起' : hidden === 1 ? '还有 1 行' : `还有 ${hidden} 行`}
+          {expandLabel(expanded, hidden)}
         </button>
       )}
     </>
@@ -1545,7 +1541,7 @@ function ResultText({ name, outcome }: { name: string; outcome: ToolOutcome }) {
  * <h2>颜色不是唯一的信号</h2>
  * 底色只是帮忙扫，`+` / `−` 那两个记号才是真正的信息 —— 它们对读屏器也说得出来。
  */
-function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null }) {
+export function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null }) {
   const [expanded, setExpanded] = useDisclosure()
   const shown = expanded ? rows : rows.slice(0, DIFF_PREVIEW_ROWS)
   const hidden = rows.length - shown.length
@@ -1622,7 +1618,7 @@ function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null }) {
           onClick={() => setExpanded(!expanded)}
           className="mt-0.5 pl-4 text-loom-faint transition-colors hover:text-muted-foreground"
         >
-          {expanded ? '收起' : hidden === 1 ? '还有 1 行' : `还有 ${hidden} 行`}
+          {expandLabel(expanded, hidden)}
         </button>
       )}
     </div>

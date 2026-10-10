@@ -1,18 +1,27 @@
 package com.codeloom.workspace.exec;
 
+import com.codeloom.domain.port.CancellationToken;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 解码规则是**纯函数**，所以不用真起进程就能把它验透 —— 而这正是它值得被抽出来的原因。
+ * 两类东西：解码规则是**纯函数**，不用真起进程就能验透；**环境清洗**只能真跑 ——
+ * 它发生在子进程那一侧，在父进程里断言等于没验。
  *
- * <p>规则本身见 {@link ProcessRunner#decode(byte[], Charset)}。
+ * <p>规则本身见 {@link ProcessRunner#decode(byte[], Charset)} 与
+ * {@link ProcessRunner#scrubbed(java.util.Map)}。
  */
 class ProcessRunnerTest {
 
@@ -91,5 +100,113 @@ class ProcessRunnerTest {
         } else {
             assertThat(ProcessRunner.nativeCharset()).isNotNull();
         }
+    }
+
+    // ------------------------------------------------------------------
+    // 子进程环境
+    // ------------------------------------------------------------------
+
+    /**
+     * 规则本身。拿一份**构造好的**环境去验，而不是这台机器上碰巧有的那份 ——
+     * 后者在没有密钥的机器上会让整条断言空转。
+     */
+    @Test
+    @DisplayName("凭据形状的名字和整片 CODELOOM_ 命名空间被丢掉，PATH 这类照旧")
+    void scrubbingDropsCredentialShapedNames() {
+        Map<String, String> parent = new LinkedHashMap<>();
+        parent.put("PATH", "/usr/bin");
+        parent.put("HOME", "/home/someone");
+        parent.put("CODELOOM_COMMAND_WHITELIST", "ls,mvn");
+        parent.put("CODELOOM_SECRET_KEY", "example-not-a-real-key");
+        parent.put("AWS_SECRET_ACCESS_KEY", "example-not-a-real-key");
+        parent.put("NPM_TOKEN", "example-not-a-real-token");
+        // 大小写不敏感：Windows 的环境名本来就不区分大小写，父进程里一个 codeloom_* 不能漏过去
+        parent.put("codeloom_db_password", "example-not-a-real-password");
+
+        Map<String, String> kept = ProcessRunner.scrubbed(parent);
+
+        assertThat(kept).containsOnlyKeys("PATH", "HOME");
+        assertThat(kept.get("PATH")).isEqualTo("/usr/bin");
+    }
+
+    @Test
+    @DisplayName("【已知代价】带这几个字样的普通变量也会被丢掉，比如 TOKENIZERS_PARALLELISM")
+    void scrubbingAlsoDropsInnocentNamesThatMatchTheShape() {
+        // 按形状匹配换来的正是"新加的环境变量自动被盖住"，代价就是这类误伤。
+        // 钉在这里，免得以后有人看到某个工具读不到自己的变量时以为见了鬼
+        Map<String, String> parent = Map.of("TOKENIZERS_PARALLELISM", "false");
+
+        assertThat(ProcessRunner.scrubbed(parent)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("【真跑】子进程的环境里没有凭据形状的名字，而 PATH 还在")
+    void aRealChildGetsAScrubbedEnvironment() {
+        List<String> names = probeEnvironment(Map.of());
+
+        assertThat(names)
+                .as("凭据形状的名字一个都不该在子进程里出现")
+                .noneMatch(ProcessRunnerTest::looksSensitive);
+        assertThat(names)
+                .as("PATH 必须还在，否则子进程找不到任何程序")
+                .contains("PATH");
+    }
+
+    @Test
+    @DisplayName("【真跑】显式传进去的变量照样到得了子进程 —— 清洗在前，合并在后")
+    void explicitlyPassedVariablesSurviveTheScrub() {
+        // 这条钉住的是顺序，不是规则：extraEnvironment 要是被合并到清洗之前，
+        // GitClient 那份自己的配置就会被清掉，表现是 git 忽然读不到设置
+        List<String> names = probeEnvironment(Map.of("NPM_TOKEN", "example-not-a-real-token"));
+
+        assertThat(names).contains("NPM_TOKEN");
+    }
+
+    /**
+     * 起一个真进程，读它**自己**的环境变量名。
+     *
+     * <p>用 {@code java} 当那个子进程：跑测试的机器上必然有它，不用再引入一个环境依赖；
+     * 而探针自己只用 JDK，所以 classpath 上有它自己那个目录就够了。
+     */
+    private static List<String> probeEnvironment(Map<String, String> extraEnvironment) {
+        List<String> command = List.of(
+                Path.of(System.getProperty("java.home"), "bin", javaExecutableName()).toString(),
+                "-cp", classesDirectoryOfProbe(),
+                EnvironmentProbe.class.getName());
+
+        ProcessOutcome outcome = ProcessRunner.run(command, null, extraEnvironment,
+                Duration.ofSeconds(60), 100_000, ProcessRunner.nativeCharset(), CancellationToken.none());
+
+        assertThat(outcome.succeeded())
+                .as("探针本身没跑起来，下面的断言没有意义：%s", outcome.combinedOutput())
+                .isTrue();
+        // 比对上统一大写：Windows 的环境名不区分大小写，PATH 在那边叫 Path
+        return outcome.stdout().lines()
+                .map(line -> line.strip().toUpperCase(Locale.ROOT))
+                .filter(line -> !line.isEmpty())
+                .toList();
+    }
+
+    /** 和 {@link ProcessRunner#SENSITIVE_ENV_NAME} 同一套判据，写成断言里能用的样子。 */
+    private static boolean looksSensitive(String name) {
+        return name.contains("KEY") || name.contains("PASSWORD") || name.contains("SECRET")
+                || name.contains("TOKEN") || name.startsWith("CODELOOM_");
+    }
+
+    private static String javaExecutableName() {
+        return isWindows() ? "java.exe" : "java";
+    }
+
+    private static String classesDirectoryOfProbe() {
+        try {
+            return Path.of(EnvironmentProbe.class.getProtectionDomain()
+                    .getCodeSource().getLocation().toURI()).toString();
+        } catch (Exception e) {
+            throw new IllegalStateException("取不到测试类的目录，探针起不来", e);
+        }
+    }
+
+    private static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
     }
 }

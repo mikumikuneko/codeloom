@@ -7,6 +7,7 @@ import com.codeloom.app.note.AgentNotes;
 import com.codeloom.app.turn.RunningTurns;
 import com.codeloom.app.turn.TurnExecutor;
 import com.codeloom.app.turn.TurnResult;
+import com.codeloom.app.web.PageLimits;
 import com.codeloom.domain.event.AgentNoteDelivered;
 import com.codeloom.domain.event.EventEnvelope;
 import com.codeloom.domain.llm.ProviderId;
@@ -102,10 +103,10 @@ public class SessionController {
     public List<SessionView> list(Principal principal,
                                   @PathVariable String projectId,
                                   @RequestParam(defaultValue = "0") int offset,
-                                  @RequestParam(defaultValue = "50") int limit) {
+                                  @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
         Project project = access.requireMember(me.id(), ProjectId.of(projectId));
-        return sessions.listFor(project, Math.clamp(limit, 1, MAX_PAGE), Math.max(0, offset));
+        return sessions.listFor(project, Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
     }
 
     @GetMapping("/api/sessions/{sessionId}")
@@ -370,8 +371,6 @@ public class SessionController {
 
     private static final int MAX_EVENTS_PER_REQUEST = 1000;
 
-    /** 列表类接口一页最多多少条。和事件流那个上千的上限不同：这里拦的是"没上限"。 */
-    private static final int MAX_PAGE = 200;
 
     /**
      * 建会话要带的东西：**只有"哪一家、哪个模型"**。

@@ -232,6 +232,21 @@ public class ApiKeyController {
      * @param apiKey   明文密钥。它只出现在这个入参里，落库前就会被加密
      */
     public record ConfigureRequest(String provider, String baseUrl, String name, String apiKey) {
+
+        /**
+         * **打印它的时候不带密钥。**
+         *
+         * <p>record 默认的 {@code toString} 会把每个字段都写出来 —— 密钥也在内。少了这层覆盖，
+         * 一句"收到请求 {}"的日志、或者顺手把请求对象塞进异常消息，就把明文密钥落进了日志，
+         * 而写下那行的人不会觉得自己在做危险的事。
+         *
+         * <p>密钥仍然取得到（{@link #apiKey()}）—— 遮的是**打印**，不是取值。
+         */
+        @Override
+        public String toString() {
+            return "ConfigureRequest[provider=" + provider + ", baseUrl=" + baseUrl
+                    + ", name=" + name + ", apiKey=[已隐去]]";
+        }
     }
 
     /** 这一家上可用的模型。 */

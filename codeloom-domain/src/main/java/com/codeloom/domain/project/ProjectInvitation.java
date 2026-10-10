@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * 一张**邀请链接**：拿着它的人点一下就能加入这个项目。
@@ -119,7 +120,28 @@ public record ProjectInvitation(String token,
      * 时间从外面传进来，这个方法才是可测的、而且一次请求里用的是同一个时刻。
      */
     public boolean isUsableAt(Instant now) {
-        return acceptedBy == null && revokedAt == null && now.isBefore(expiresAt);
+        return unusableReasonAt(now).isEmpty();
+    }
+
+    /**
+     * 这张邀请现在**为什么**不能用；还能用就是空。
+     *
+     * <p>"能不能用"和"为什么不能用"是同一件事的两面，所以判据只有这一个 ——
+     * {@link #isUsableAt} 从它派生。各写一遍的话（这里判、那边拼话），
+     * 改一条作废规则只改一处就会得到**"判定为不可用、却拼不出一句原因"**：
+     * 调用方拿到 null，抛出一个没有消息的 409，看的人完全不知道发生了什么。
+     */
+    public Optional<String> unusableReasonAt(Instant now) {
+        if (revokedAt != null) {
+            return Optional.of("这张邀请已经被撤销了");
+        }
+        if (acceptedBy != null) {
+            return Optional.of("这张邀请已经被用过了 —— 邀请链接是一次性的");
+        }
+        if (!now.isBefore(expiresAt)) {
+            return Optional.of("这张邀请已经过期了，让项目里的人重新发一张");
+        }
+        return Optional.empty();
     }
 
     /** 记下"被谁接受了"。调用方要先确认 {@link #isUsableAt}。 */
