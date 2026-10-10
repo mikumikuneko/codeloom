@@ -1,8 +1,8 @@
 package com.codeloom.agent.loop;
 
 import com.codeloom.agent.context.ContextAssembler;
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRole;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRole;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.model.ModelCapabilities;
@@ -126,9 +126,9 @@ class AgentTurnTest {
         assertThat(outcome.newEvents().get(2)).isInstanceOf(AssistantMessage.class);
 
         // 第二次调用模型时，工具结果必须已经在上下文里
-        List<ChatMessage> secondRequest = client.requests().get(1).messages();
+        List<LlmMessage> secondRequest = client.requests().get(1).messages();
         assertThat(secondRequest).anySatisfy(m -> {
-            assertThat(m.role()).isEqualTo(ChatRole.TOOL);
+            assertThat(m.role()).isEqualTo(LlmRole.TOOL);
             assertThat(m.toolCallId()).isEqualTo("call_1");
         });
     }
@@ -160,9 +160,9 @@ class AgentTurnTest {
         // ★ 而且它必须**真的走到发出去的请求里**。
         //   只测"落库了"是不够的 —— 事件落库和请求组装是两段代码，
         //   而这次出问题的恰恰是后一段（装配时把思考丢了）。
-        List<ChatMessage> secondRequest = client.requests().get(1).messages();
+        List<LlmMessage> secondRequest = client.requests().get(1).messages();
         assertThat(secondRequest).anySatisfy(m -> {
-            assertThat(m.role()).isEqualTo(ChatRole.ASSISTANT);
+            assertThat(m.role()).isEqualTo(LlmRole.ASSISTANT);
             assertThat(m.toolCalls()).hasSize(1);
             assertThat(m.reasoning()).isEqualTo("先看看这个文件里有什么");
         });
@@ -180,12 +180,12 @@ class AgentTurnTest {
 
         // 不产思考的模型（非推理模型、或者思维链关着）这一项必须一直是 null ——
         // wire 那层靠它决定发不发 reasoning_content，发一个空串会被拒
-        List<ChatMessage> secondRequest = client.requests().get(1).messages();
+        List<LlmMessage> secondRequest = client.requests().get(1).messages();
         assertThat(secondRequest)
-                .filteredOn(m -> m.role() == ChatRole.ASSISTANT)
+                .filteredOn(m -> m.role() == LlmRole.ASSISTANT)
                 .allSatisfy(m -> assertThat(m.reasoning()).isNull());
         assertThat(secondRequest)
-                .filteredOn(m -> m.role() == ChatRole.ASSISTANT)
+                .filteredOn(m -> m.role() == LlmRole.ASSISTANT)
                 .allSatisfy(m -> assertThat(m.toolCalls()).isNotEmpty());
     }
 
@@ -824,8 +824,8 @@ class AgentTurnTest {
 
         // 第二次请求里必须带着收尾指令 —— 是"叫它收尾"，不是"把它掐掉"
         String lastUserMessage = client.requests().get(1).messages().stream()
-                .filter(m -> m.role() == ChatRole.USER)
-                .map(ChatMessage::content)
+                .filter(m -> m.role() == LlmRole.USER)
+                .map(LlmMessage::content)
                 .reduce((a, b) -> b)
                 .orElse("");
         assertThat(lastUserMessage).contains("预算即将用尽").contains("停止调用工具");
@@ -1098,7 +1098,7 @@ class AgentTurnTest {
      */
     private ContextAssembler.Projection projection() {
         ContextAssembler.Projection projection =
-                new ContextAssembler().projection(MODEL.systemPrompt());
+                new ContextAssembler(userId -> null).projection(MODEL.systemPrompt());
         projection.fold(history);
         return projection;
     }

@@ -1,12 +1,13 @@
 package com.codeloom.app.turn;
 
 import com.codeloom.agent.context.ContextAssembler;
-import com.codeloom.agent.llm.ChatMessage;
+import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.domain.event.AssistantMessage;
 import com.codeloom.domain.event.ContextCompacted;
 import com.codeloom.domain.event.PersistentEvent;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.TodoListUpdated;
+import com.codeloom.domain.event.ToolResultsCleared;
 import com.codeloom.domain.event.UserMessage;
 import com.codeloom.domain.llm.ProviderId;
 import com.codeloom.domain.port.EventStore;
@@ -15,17 +16,16 @@ import com.codeloom.domain.project.ProjectId;
 import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.session.Session;
 import com.codeloom.domain.session.SessionId;
-import com.codeloom.domain.port.UserRepository;
-import com.codeloom.domain.user.User;
 import com.codeloom.domain.user.UserId;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.unit.DataSize;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -43,46 +43,30 @@ class SessionProjectionsTest {
     private final FakeStore events = new FakeStore();
 
     /**
-     * 用户表的最小替身。**这条测试不关心用户名** —— 投影里唯一查它的一处是
-     * "别人捎来的留言"要标来源（见 {@link ContextAssembler}），而这里没有留言。
+     * 装配器。**这条测试不关心用户名** —— 投影里唯一查它的一处是"别人捎来的留言"
+     * 要标来源（见 {@link ContextAssembler}），而这里没有留言，所以明写"不要名字"。
      */
-    private static final UserRepository NO_USERS = new UserRepository() {
-        @Override
-        public void save(User user) {
-            throw new UnsupportedOperationException("这条测试不写用户");
-        }
+    private static final ContextAssembler NAMELESS = new ContextAssembler(userId -> null);
 
-        @Override
-        public Optional<User> findById(UserId id) {
-            return Optional.empty();
-        }
-
-        @Override
-        public Optional<User> findByUsername(String username) {
-            return Optional.empty();
-        }
-
-        @Override
-        public boolean existsByUsername(String username) {
-            return false;
-        }
-
-        @Override
-        public boolean existsByDisplayName(String displayName) {
-            return false;
-        }
-    };
     private SessionProjections projections;
 
     @BeforeEach
     void setUp() {
-        projections = new SessionProjections(events, NO_USERS);
+        projections = new SessionProjections(events, NAMELESS, 128, DataSize.ofMegabytes(32));
     }
 
     private static Session sessionWith(String systemPrompt) {
-        return Session.create(SESSION, ProjectId.of("22222222-2222-2222-2222-222222222222"),
+        return sessionWith(SESSION, systemPrompt);
+    }
+
+    private static Session sessionWith(SessionId id, String systemPrompt) {
+        return Session.create(id, ProjectId.of("22222222-2222-2222-2222-222222222222"),
                 UserId.of("33333333-3333-3333-3333-333333333333"),
                 new ModelConfig(ProviderId.of("deepseek"), "deepseek-flash", systemPrompt));
+    }
+
+    private void assertSameAsFromScratch(ContextAssembler.Projection cached) {
+        assertSameAsFromScratch(SESSION, cached);
     }
 
     /**
@@ -91,11 +75,11 @@ class SessionProjectionsTest {
      * <p>这是整个缓存唯一的正确性判据：它错了不会报错，只会让模型看见的上下文
      * 重复一段或者少一段。
      */
-    private void assertSameAsFromScratch(ContextAssembler.Projection cached) {
-        ContextAssembler.Projection fresh = new ContextAssembler().projection(PROMPT);
-        fresh.fold(events.all);
-        List<ChatMessage> fromCache = new ArrayList<>();
-        List<ChatMessage> fromScratch = new ArrayList<>();
+    private void assertSameAsFromScratch(SessionId sessionId, ContextAssembler.Projection cached) {
+        ContextAssembler.Projection fresh = new ContextAssembler(userId -> null).projection(PROMPT);
+        fresh.fold(events.of(sessionId));
+        List<LlmMessage> fromCache = new ArrayList<>();
+        List<LlmMessage> fromScratch = new ArrayList<>();
         cached.advance(List.of(), fromCache);
         fresh.advance(List.of(), fromScratch);
         assertThat(fromCache).isEqualTo(fromScratch);
@@ -111,7 +95,7 @@ class SessionProjectionsTest {
         ContextAssembler.Projection second = projections.acquire(sessionWith(PROMPT));
 
         assertThat(second).isSameAs(first);
-        assertThat(projections.liveCount()).isEqualTo(1);
+        assertThat(projections.liveReport().count()).isEqualTo(1);
         assertSameAsFromScratch(second);
     }
 
@@ -143,11 +127,27 @@ class SessionProjectionsTest {
         projections.acquire(sessionWith(PROMPT));
         assertThat(projection).isSameAs(projections.acquire(sessionWith(PROMPT)));
         assertSameAsFromScratch(projection);
-        List<ChatMessage> messages = new ArrayList<>();
+        List<LlmMessage> messages = new ArrayList<>();
         projection.advance(List.of(), messages);
-        assertThat(messages).extracting(ChatMessage::content)
+        assertThat(messages).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("前面聊过这些"))
                 .noneMatch(content -> content.contains("第一句"));
+    }
+
+    @Test
+    @DisplayName("【分页】改写类事件落在第二页时，重来拿的是整条流 —— 不是手里那一页")
+    void aRewriteBeyondTheFirstPageStillRebuildsFromTheWholeStream() {
+        // 一页 500 条，前 600 条把改写事件顶到第二页去。补读那一趟手里只有第二页，
+        // 而"推倒重来"要的是整条流 —— 拿那一片当整条流，前面 500 条会静默消失
+        for (int i = 1; i <= 600; i++) {
+            events.append(new UserMessage("第 " + i + " 句"));
+        }
+        ContextAssembler.Projection projection = projections.acquire(sessionWith(PROMPT));
+
+        events.append(new ToolResultsCleared(List.of("call_1")));
+
+        projections.acquire(sessionWith(PROMPT));
+        assertSameAsFromScratch(projection);
     }
 
     @Test
@@ -156,7 +156,7 @@ class SessionProjectionsTest {
         events.append(new TodoListUpdated(List.of(
                 new TodoListUpdated.Item("跑测试", TodoListUpdated.State.IN_PROGRESS))));
 
-        List<ChatMessage> messages = new ArrayList<>();
+        List<LlmMessage> messages = new ArrayList<>();
         projections.acquire(sessionWith(PROMPT)).advance(List.of(), messages);
 
         assertThat(messages.getLast().content())
@@ -173,9 +173,79 @@ class SessionProjectionsTest {
         ContextAssembler.Projection after = projections.acquire(sessionWith("换了一份提示词。"));
 
         assertThat(after).isNotSameAs(before);
-        List<ChatMessage> messages = new ArrayList<>();
+        List<LlmMessage> messages = new ArrayList<>();
         after.advance(List.of(), messages);
         assertThat(messages.getFirst().content()).isEqualTo("换了一份提示词。");
+    }
+
+    // ------------------------------------------------------------------
+    // 上限
+
+    @Test
+    @DisplayName("【上限】超了就把**最久没用过**的那条放下；被放下的下次是重建")
+    void evictionDropsTheLeastRecentlyUsed() {
+        SessionId a = SessionId.generate();
+        SessionId b = SessionId.generate();
+        SessionId c = SessionId.generate();
+        events.append(a, new UserMessage("a 说的话"));
+        events.append(b, new UserMessage("b 说的话"));
+        events.append(c, new UserMessage("c 说的话"));
+
+        SessionProjections capped =
+                new SessionProjections(events, NAMELESS, 2, DataSize.ofMegabytes(32));
+
+        capped.acquire(sessionWith(a, PROMPT));
+        capped.acquire(sessionWith(b, PROMPT));
+        // 再碰一次 a —— 于是"最久没用过"换成了 b，而不是先来的 a
+        capped.acquire(sessionWith(a, PROMPT));
+        capped.acquire(sessionWith(c, PROMPT));
+
+        assertThat(capped.liveReport().count()).isEqualTo(2);
+
+        events.readAfterCalls.clear();
+        capped.acquire(sessionWith(a, PROMPT));
+        assertThat(events.readAfterCalls)
+                .as("a 还在表里 —— 它只该往后补读，不该从第 0 条重建")
+                .allMatch(seq -> seq > 0);
+
+        events.readAfterCalls.clear();
+        ContextAssembler.Projection rebuilt = capped.acquire(sessionWith(b, PROMPT));
+        assertThat(events.readAfterCalls)
+                .as("b 被放下过 —— 再拿就得重建")
+                .containsExactly(0L);
+        assertSameAsFromScratch(b, rebuilt);
+    }
+
+    @Test
+    @DisplayName("【上限】字节那条也会踢 —— 条数远远没到也一样")
+    void evictionAlsoHonoursTheByteBudget() {
+        SessionId a = SessionId.generate();
+        SessionId b = SessionId.generate();
+        events.append(a, new UserMessage("x".repeat(1_000)));
+        events.append(b, new UserMessage("x".repeat(1_000)));
+
+        // 每条投影约 2,000 字节（按最坏情况"一个字符两个字节"算），而这里只给 2,500
+        SessionProjections capped =
+                new SessionProjections(events, NAMELESS, 128, DataSize.ofBytes(2_500));
+
+        capped.acquire(sessionWith(a, PROMPT));
+        capped.acquire(sessionWith(b, PROMPT));
+
+        assertThat(capped.liveReport().count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("丢弃会话之后它的投影不再常驻；再拿是一次重建，内容仍然一样")
+    void forgettingASessionDropsItsProjection() {
+        events.append(new UserMessage("说一句"));
+        ContextAssembler.Projection before = projections.acquire(sessionWith(PROMPT));
+
+        projections.forget(SESSION);
+
+        assertThat(projections.liveReport().count()).isZero();
+        ContextAssembler.Projection after = projections.acquire(sessionWith(PROMPT));
+        assertThat(after).isNotSameAs(before);
+        assertSameAsFromScratch(after);
     }
 
     // ------------------------------------------------------------------
@@ -191,13 +261,22 @@ class SessionProjectionsTest {
         private long nextSeq = 1;
 
         private void append(PersistentEvent event) {
-            all.add(new StoredEvent(SESSION, nextSeq++, Instant.EPOCH, event));
+            append(SESSION, event);
+        }
+
+        private void append(SessionId sessionId, PersistentEvent event) {
+            all.add(new StoredEvent(sessionId, nextSeq++, Instant.EPOCH, event));
+        }
+
+        /** 这条会话的全部事件 —— 测试拿它去对"从头建一条"。 */
+        private List<StoredEvent> of(SessionId sessionId) {
+            return all.stream().filter(stored -> stored.sessionId().equals(sessionId)).toList();
         }
 
         @Override
         public List<StoredEvent> readAfter(SessionId sessionId, long afterSeq, int limit) {
             readAfterCalls.add(afterSeq);
-            return all.stream()
+            return of(sessionId).stream()
                     .filter(stored -> stored.seq() > afterSeq)
                     .limit(limit)
                     .toList();
@@ -205,12 +284,19 @@ class SessionProjectionsTest {
 
         @Override
         public List<StoredEvent> readAll(SessionId sessionId) {
-            return List.copyOf(all);
+            return of(sessionId);
         }
 
         @Override
         public long lastSeq(SessionId sessionId) {
-            return all.isEmpty() ? 0 : all.getLast().seq();
+            List<StoredEvent> mine = of(sessionId);
+            return mine.isEmpty() ? 0 : mine.getLast().seq();
+        }
+
+        /** 这条测试盯的是**投影**，压缩那道闸归 {@code ContextCompactorTest} 管。 */
+        @Override
+        public OptionalInt lastContextTokens(SessionId sessionId) {
+            throw new UnsupportedOperationException();
         }
 
         @Override

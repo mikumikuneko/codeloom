@@ -2,6 +2,7 @@ package com.codeloom.app.chat;
 
 import com.codeloom.app.auth.CurrentUser;
 import com.codeloom.app.auth.ProjectAccess;
+import com.codeloom.app.web.PageLimits;
 import com.codeloom.domain.port.ChatMessageRepository;
 import com.codeloom.domain.project.ProjectId;
 import com.codeloom.domain.user.User;
@@ -29,9 +30,6 @@ import java.util.List;
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class ChatController {
 
-    /** 一次最多拉多少条。界面上是"加载更多"，不该一次把整个聊天记录拉下来。 */
-    private static final int MAX_PAGE = 200;
-
     private final CurrentUser currentUser;
     private final ProjectAccess access;
     private final ChatMessageRepository messages;
@@ -54,12 +52,12 @@ public class ChatController {
     public List<ChatMessagePayload> history(Principal principal,
                                             @PathVariable String projectId,
                                             @RequestParam(required = false) Long afterId,
-                                            @RequestParam(defaultValue = "50") int limit) {
+                                            @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
         ProjectId project = ProjectId.of(projectId);
         access.requireMember(me.id(), project);
 
-        int bounded = Math.clamp(limit, 1, MAX_PAGE);
+        int bounded = Math.clamp(limit, 1, PageLimits.MAX);
         // 返回的是**时间正序**的：聊天记录从旧到新，而 "after" 与 "recent" 两条路
         // 在仓储里已经统一成正序了（findRecent 内部会把倒序翻回来）
         return (afterId == null

@@ -15,6 +15,8 @@
  * 而不是新加一条。
  */
 
+import { dropsStreaming, isActive, settlesDangling } from '@/lib/sessionState'
+
 /**
  * 一次调用**存在过、却没有结果**的几种原因。
  *
@@ -61,63 +63,202 @@ export interface ChangedFile {
   binary: boolean
   /** 这一步是**新建**了这个文件，不是改了一个已有的 */
   created: boolean
+  /**
+   * 这条改动出自哪一个提交 —— 点开看正文时要拿它去问（见 `ProjectDiffView`）。
+   *
+   * <p>它跟着**文件**走、不跟着轮走：一轮里可能落好几条改动记录（批准一次之后续跑，
+   * 收尾会再落一条），同一条路径于是可能出自两个提交。上面那个合并按 `...file` 摊开，
+   * 所以留下的是**晚**的那一个 —— 也就是说点开看到的是**其中一次**的正文，
+   * 而行数是两次的和。这一条如实记在这儿，别把它当成"全部"。
+   */
+  commitSha: string
 }
 
-/** 一轮的改动。{@code turn} 是**第几条用户消息**（从 0 数），和"第几轮"是同一条尺子。 */
-export interface TurnChanges {
-  turn: number
+/** 一轮改了哪些文件。 */
+export interface TurnFiles {
   files: ChangedFile[]
   /** 改动太多、后端只记下了前一批 —— 界面要如实说"没记全"，而不是只报那个偏小的数字 */
   truncated: boolean
 }
 
 /**
+ * 这次工具调用**还在跑吗**。
+ *
+ * <p>两个条件缺一不可：没有结果，**也**没有"它没跑完"这个事实。少了后半个，
+ * 崩溃恢复之后那条调用会一直闪 —— 界面在说它还在跑，而它早就没了。
+ *
+ * <p>**这条规则只有这一处**：界面上有两处问"整轮/单个工具还在跑吗"，而 fold 里
+ * 还有一处问"要不要给它补一个没跑完"（那一处在这个之上多一个条件）。各写一遍的话，
+ * 将来多一种结局就会漏改一处 —— 漏掉的那处不报错，只是一直闪。
+ */
+export function toolIsRunning(
+  outcome: ToolOutcome | null,
+  unfinished: Unfinished | null,
+): boolean {
+  return outcome === null && unfinished === null
+}
+
+/**
+ * 这一轮现在是什么状态 —— 取它**最后**一条状态变更。
+ *
+ * <p>界面上有两处要问它（投影要不要给悬挂的调用收尾、会话流那一栏要不要画用量行），
+ * 而它们必须看**同一个事实**。所以状态进流（见 StreamItem 里那条 `state`），
+ * 谁都不许去数别的迹象。
+ */
+export function turnStateOf(turn: StreamItem[]): string | null {
+  const last = turn.findLast((item) => item.kind === 'state')
+  return last === undefined ? null : last.to
+}
+
+/**
+ * 这一轮**还在被推进**吗 —— 看它最后一条状态，不看 item 的形状。
+ *
+ * <h2>为什么不看形状</h2>
+ * 从前这里问的是"最后一条 item 是不是一条还在跑的工具"。那个判据会**随流的形状漂**：
+ * 后来往流里加了一种条目（状态本身也进流），工具后面就跟着一条状态条目，
+ * 于是"工具正在跑"再也判不出来 —— 症状是**Esc 打断在工具执行期间失灵**，
+ * 而那恰好是最需要打断的时候（一次构建可能几十秒）。
+ *
+ * <p>状态是"这一轮在被推进"的**事实**（后端每一步都落一条），从它推才是稳的。
+ *
+ * @param turn 这一轮的那些条目。**传整条流也行**：最后一条状态一定属于最后那一轮。
+ */
+export function turnIsActive(turn: StreamItem[]): boolean {
+  return isActive(turnStateOf(turn))
+}
+
+/** 一轮改动的增删合计。两处都在算它（会话流那一行、回滚面板那一行），算的地方只留一个。 */
+export function changeTotals(files: ChangedFile[]): { added: number; deleted: number } {
+  return {
+    added: files.reduce((sum, file) => sum + file.added, 0),
+    deleted: files.reduce((sum, file) => sum + file.deleted, 0),
+  }
+}
+
+/** 一轮的改动。{@code turn} 就是**块号**（见 {@link groupIntoTurns}），和"第几轮"是同一条尺子。 */
+export interface TurnChanges extends TurnFiles {
+  turn: number
+}
+
+/**
+ * 把这条流切成**块**：一块 = 一句用户消息 + 它之后发生的事。
+ *
+ * <h2>为什么"哪几条算一轮"只能定义一次</h2>
+ * 会话流按它分块、回滚面板按它标位置、"这一轮改了哪些文件"按它挂号 ——
+ * 三处各数一遍的话，两套编号一旦错开，"改了 N 个文件"就挂到**别人那一轮**头上，
+ * 而那看起来完全像真的。这里为 checkpoint 栽过一次：它多占一块，后面每一轮整体错一格。
+ * 所以分块只有这一个函数，{@link turnChanges} 收的就是它的产出。
+ *
+ * <p>**回滚标记（checkpoint）不进分块**：它不显示（渲染时返回 null），
+ * 留着只会让开头多出一块**空块** —— 而空块自己没有高度，`space-y` 却会给它下一个兄弟留白。
+ */
+export function groupIntoTurns(items: StreamItem[]): StreamItem[][] {
+  const turns: StreamItem[][] = []
+  /** 第一条用户消息**之前**落下的那些（状态条目、通知）—— 它们属于**那一轮**，不是单独一块 */
+  const leading: StreamItem[] = []
+  for (const item of items) {
+    if (item.kind === 'checkpoint') {
+      continue
+    }
+    if (item.kind === 'user') {
+      // **块由用户消息起。** 这样块号就是"第几条用户消息"，而"第 k 轮"在整个界面上
+      // 只此一套下标 —— 悬停那行的「第 N 轮」和回滚面板按消息顺序取的那句，用的是同一个 k
+      turns.push(leading.splice(0))
+      turns[turns.length - 1].push(item)
+      continue
+    }
+    if (turns.length === 0) {
+      // 还没见过用户消息：先攒着，等那一块建起来再并进去
+      leading.push(item)
+      continue
+    }
+    turns[turns.length - 1].push(item)
+  }
+  // 一句用户消息都还没有（会话刚建好）时，开头那些自成一块 —— 不然它们没地方显示
+  if (turns.length === 0 && leading.length > 0) {
+    turns.push(leading)
+  }
+  return turns
+}
+
+/**
  * 每一轮改了哪些文件 —— **从流里数出来**，不再另发请求。
  *
- * <p>轮次号就是"第几条用户消息"。一轮里可能落好几条改动记录（批准一次之后续跑，
- * 收尾时会再落一条），**按路径相加**而不是只留最后一条 —— 那会把前一次的改动从账上抹掉。
+ * <p>轮次号就是**块号**（见 {@link groupIntoTurns}）。一轮里可能落好几条改动记录
+ *（批准一次之后续跑，收尾时会再落一条），**按路径相加**而不是只留最后一条 ——
+ * 那会把前一次的改动从账上抹掉。
+ *
+ * <p>它按**已经分好的块**数，不自己再数一遍用户消息：两种数法一旦错开，
+ * "这一轮改了哪些文件"就会挂到别人那一轮头上，而那看起来完全像真的。
  *
  * <p>写法上是个纯函数，和 {@link fold} 一样：同样的流永远给同样的结果。
  * 于是会话流显示的、回滚面板列的，是**同一份推导**，不可能各说各的。
  */
-export function turnChanges(items: StreamItem[]): TurnChanges[] {
-  const byTurn = new Map<number, Map<string, ChangedFile>>()
-  const truncatedTurns = new Set<number>()
-  let turn = -1
+export function turnChanges(turns: StreamItem[][]): TurnChanges[] {
+  return turns.flatMap((block, turn) => {
+    const files = new Map<string, ChangedFile>()
+    let truncated = false
+    for (const item of block) {
+      mergeChanges(files, item)
+      if (item.kind === 'changes' && item.truncated) {
+        truncated = true
+      }
+    }
+    // 一轮可能落好几条改动记录，也可能一条都没有（没写任何文件的那些轮）
+    return files.size === 0 ? [] : [{ turn, files: [...files.values()], truncated }]
+  })
+}
 
+/**
+ * 每一轮改了哪些文件，**按后端那个轮次号**索引（见 `WorkspaceChanges.turnIndex`）。
+ *
+ * <h2>为什么这里不跟着会话流用"块号"</h2>
+ * 因为读它的是**回滚面板**，而那个面板里的每一行本来就是一个后端号
+ *（它列的是 checkpoint，号是后端推的）。两条路各自和自己那套对齐：
+ * 会话流按块号挂号、回滚面板按后端号挂号 —— 谁也不去猜另一套，就不会错开。
+ *
+ * <p>老事件没有这个号（字段是后加的），那些改动**进不了这张表** ——
+ * 这比按位置猜一个号塞进去诚实：猜错的话，那句话配的就是别人的改动。
+ */
+export function changesByTurnIndex(items: StreamItem[]): Map<number, TurnFiles> {
+  const byTurn = new Map<number, { files: Map<string, ChangedFile>; truncated: boolean }>()
   for (const item of items) {
-    if (item.kind === 'user') {
-      turn++
+    if (item.kind !== 'changes' || item.turnIndex === null) {
       continue
     }
-    if (item.kind !== 'changes' || turn < 0) {
-      continue
+    let entry = byTurn.get(item.turnIndex)
+    if (entry === undefined) {
+      entry = { files: new Map(), truncated: false }
+      byTurn.set(item.turnIndex, entry)
     }
+    mergeChanges(entry.files, item)
     if (item.truncated) {
-      truncatedTurns.add(turn)
-    }
-    let files = byTurn.get(turn)
-    if (files === undefined) {
-      files = new Map()
-      byTurn.set(turn, files)
-    }
-    for (const file of item.files) {
-      const seen = files.get(file.path)
-      files.set(file.path, seen === undefined ? file : {
-        ...file,
-        added: seen.added + file.added,
-        deleted: seen.deleted + file.deleted,
-        binary: seen.binary || file.binary,
-        created: seen.created || file.created,
-      })
+      entry.truncated = true
     }
   }
+  return new Map([...byTurn].map(([turn, e]) => [turn, { files: [...e.files.values()], truncated: e.truncated }]))
+}
 
-  return [...byTurn.entries()].map(([index, files]) => ({
-    turn: index,
-    files: [...files.values()],
-    truncated: truncatedTurns.has(index),
-  }))
+/**
+ * 把一条改动并进"按路径"的账里。
+ *
+ * <p>**按路径相加**而不是只留最后一条：一轮里可能落好几条改动记录
+ *（批准一次之后续跑，收尾时会再落一条），只留最后一条会把前一次的改动从账上抹掉。
+ */
+function mergeChanges(into: Map<string, ChangedFile>, item: StreamItem): void {
+  if (item.kind !== 'changes') {
+    return
+  }
+  for (const file of item.files) {
+    const seen = into.get(file.path)
+    into.set(file.path, seen === undefined ? file : {
+      ...file,
+      added: seen.added + file.added,
+      deleted: seen.deleted + file.deleted,
+      binary: seen.binary || file.binary,
+      created: seen.created || file.created,
+    })
+  }
 }
 
 export type StreamItem = {
@@ -201,7 +342,21 @@ export type StreamItem = {
    *
    * <p>它自己不占一行：跟着那一轮的尾巴显示（见 {@code ChangesRow}）。
    */
-  | { kind: 'changes'; files: ChangedFile[]; truncated: boolean }
+  /**
+   * 一条状态变更。**不显示**（渲染时返回 null）—— 它留在流里只为一件事：
+   * 让"这一轮现在什么状态"只有**一个**事实来源（见 {@link turnStateOf}）。
+   *
+   * <p>从前状态不进流，于是会话流那一栏只能**去数**"这一块里还有没有没答复的审批卡片"
+   * 来回答"还挂着等人批吗" —— 同一个问题两个来源，两边不同步就自相矛盾。
+   */
+  | { kind: 'state'; to: string; reason: string }
+  | {
+      kind: 'changes'
+      files: ChangedFile[]
+      truncated: boolean
+      /** 这是第几轮（后端那个号，见 `WorkspaceChanges.turnIndex`）。加这个字段之前落的事件没有 */
+      turnIndex: number | null
+    }
   /**
    * 一个回滚点。**它不显示**（渲染时给 null），留在列表里只为两件事：
    *
@@ -465,11 +620,12 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
     case 'SESSION_STATE_CHANGED': {
       const to = str(p.to)
       const reason = str(p.reason)
+      /** 状态本身也进流 —— 见 StreamItem 上那条 `state`。它不显示，只当事实来源 */
+      const stateItem = { kind: 'state' as const, to, reason }
 
-      // 这一轮**收尾了**：回到等用户、或者失败了。**等人批不算** ——
-      // 那条调用还在等一个人，它没结束
-      const settled =
-        to === 'WAITING_USER' || to === 'FAILED' ? closeDanglingCalls(items) : items
+      // 这一轮**收尾了**没有 —— 谁算收尾由状态自己那张表说（见 lib/sessionState）。
+      // **等人批不算**：那条调用还在等一个人，它没结束
+      const settled = settlesDangling(to) ? closeDanglingCalls(items) : items
 
       // 只显示"值得停一下"的那两个：出错了、或者挂在等人批。
       // 其余状态变化（思考中、执行中、回到等用户）是过程的细节，
@@ -478,6 +634,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
         return [
           ...settled,
           { kind: 'notice', tone: 'bad', text: `这一轮失败了：${reason}`, turnEnd: 'failed' },
+          stateItem,
         ]
       }
       // **用户按 Esc 停的那一轮**：一行暗字，不是错误。Claude Code 里那句话是
@@ -487,6 +644,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
         return [
           ...settled,
           { kind: 'notice', tone: 'plain', text: '已打断 · 接下来要它做什么？', turnEnd: 'stopped' },
+          stateItem,
         ]
       }
       // **拒绝且没留下指示**：那一轮也停住了（见后端的 ApprovalService），
@@ -495,6 +653,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
         return [
           ...settled,
           { kind: 'notice', tone: 'plain', text: '已停下 · 接下来要它做什么？', turnEnd: 'stopped' },
+          stateItem,
         ]
       }
       // 等人批**不写小字** —— 那件事由**待批卡片自己**表达：它就在那次调用的下面，
@@ -507,7 +666,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       //
       // 教训：状态式的话（"停下来等你…"）不能写进追加式的流里 —— 流没有让话过期的机制，
       // 而状态会过去。要进流的话，得写成一件**带时间的事实**（谁、什么时候做了什么）。
-      return settled
+      return [...settled, stateItem]
     }
 
     case 'CHECKPOINT_CREATED':
@@ -550,12 +709,17 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
     }
 
     case 'WORKSPACE_CHANGES':
-      // 后端收尾时算好的"这一轮改了什么"。它跟着流走，于是读的人照着读就行 ——
-      // 不用再问 git，也不受"那个提交还在不在"的影响（见后端 WorkspaceChanges）
+      // 后端收尾时算好的"这一轮改了什么"。**哪些文件、各多少行**跟着流走，
+      // 于是读的人照着读就行 —— 不用再问 git，也不受"那个提交还在不在"的影响。
+      //
+      // 只有**正文**是按需去取的（点开某一个文件时，见 ProjectDiffView），
+      // 所以那个提交被回收之后正文会问不出来 —— 那时界面上要如实说，不编
       return [...items, {
         kind: 'changes',
-        files: Array.isArray(p.files) ? p.files.map(changedFile) : [],
+        files: Array.isArray(p.files) ? p.files.map((file) => changedFile(file, str(p.commitSha))) : [],
         truncated: p.truncated === true,
+        // 缺字段就是"加这个字段之前落的" —— **不能默认成 0**：0 是一个合法的轮次号
+        turnIndex: typeof p.turnIndex === 'number' ? p.turnIndex : null,
       }]
 
     case 'MODEL_CHANGED':
@@ -624,10 +788,9 @@ export function foldStreaming(current: Streaming, frame: Frame): Streaming {
   }
   // **一轮收了尾也要清。** 光等 ASSISTANT_MESSAGE 是不够的：**被打断的那一轮永远
   // 不会有它**（模型没说完），于是缓冲一直挂着 —— 界面上就表现为"它还在跑"，
-  // 而它早就停了。三个终态都算收尾：回到等用户、挂在等人批、出错
+  // 而它早就停了。哪些状态算"这截不会再长了"由状态自己那张表说（见 lib/sessionState）
   if (frame.type === 'SESSION_STATE_CHANGED') {
-    const to = str(p.to)
-    if (to === 'WAITING_USER' || to === 'AWAITING_APPROVAL' || to === 'FAILED') {
+    if (dropsStreaming(str(p.to))) {
       return EMPTY_STREAMING
     }
   }
@@ -655,8 +818,7 @@ function closeDanglingCalls(items: StreamItem[]): StreamItem[] {
   }
   return items.map((item) =>
     item.kind === 'tool' &&
-    item.outcome === null &&
-    item.unfinished === null &&
+    toolIsRunning(item.outcome, item.unfinished) &&
     !approvedPending.has(item.callId)
       ? { ...item, unfinished: 'no-result' }
       : item,
@@ -692,7 +854,7 @@ function rewindNotice(before: StreamItem[], at: number): string {
 }
 
 /** 一条改动记录。字段缺了按"没有"算 —— 它从线上流里读来，不能假设一定完整。 */
-function changedFile(raw: unknown): ChangedFile {
+function changedFile(raw: unknown, commitSha: string): ChangedFile {
   const file = (raw ?? {}) as Record<string, unknown>
   return {
     path: str(file.path),
@@ -700,6 +862,7 @@ function changedFile(raw: unknown): ChangedFile {
     deleted: num(file.deleted),
     binary: file.binary === true,
     created: file.created === true,
+    commitSha,
   }
 }
 

@@ -28,5 +28,5 @@ public interface LlmClient {
      * @throws LlmCallException 调用失败。看 {@link LlmCallException.Kind} 决定是重试、
      *                          回灌给模型自修、还是报给用户
      */
-    LlmResult stream(ChatRequest request, Consumer<StreamEvent> listener, CancellationToken cancellation);
+    LlmResult stream(LlmRequest request, Consumer<StreamEvent> listener, CancellationToken cancellation);
 }

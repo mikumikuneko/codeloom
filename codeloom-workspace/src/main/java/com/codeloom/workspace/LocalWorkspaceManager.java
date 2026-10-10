@@ -5,6 +5,7 @@ import com.codeloom.domain.port.MergeResult;
 import com.codeloom.domain.port.Workspace;
 import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.workspace.FileChange;
+import com.codeloom.domain.workspace.FileDiff;
 import com.codeloom.domain.workspace.WorkspaceId;
 import com.codeloom.workspace.git.GitClient;
 
@@ -116,6 +117,11 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     @Override
     public void archive(Path repoPath, String treeish, Path outputZip) {
         git.archive(repoPath, treeish, outputZip);
+    }
+
+    @Override
+    public FileDiff diffOfFile(Path worktree, String commitSha, String gitPath, int maxChars) {
+        return git.diffOfFile(worktree, commitSha, gitPath, maxChars);
     }
 
     @Override

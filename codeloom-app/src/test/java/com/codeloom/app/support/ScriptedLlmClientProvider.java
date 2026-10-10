@@ -1,6 +1,6 @@
 package com.codeloom.app.support;
 
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.agent.llm.LlmResult;
@@ -32,7 +32,7 @@ public class ScriptedLlmClientProvider implements LlmClientProvider {
     }
 
     /** 真实发出去过的请求，按顺序 —— 断言"模型到底看到了什么"时用它。 */
-    public List<ChatRequest> requests() {
+    public List<LlmRequest> requests() {
         return client.requests();
     }
 

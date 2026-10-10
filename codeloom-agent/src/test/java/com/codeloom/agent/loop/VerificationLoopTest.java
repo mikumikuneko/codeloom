@@ -231,7 +231,7 @@ class VerificationLoopTest {
     /** 这条会话的投影：从测试那份事件流建一条活的（生产里它跨轮活着）。 */
     private ContextAssembler.Projection projection() {
         ContextAssembler.Projection projection =
-                new ContextAssembler().projection(MODEL.systemPrompt());
+                new ContextAssembler(userId -> null).projection(MODEL.systemPrompt());
         projection.fold(history);
         return projection;
     }

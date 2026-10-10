@@ -59,6 +59,9 @@ export function CodeLines({
   const gutter = `${Math.max(2, String(shown.length).length)}ch`
 
   return (
+    // **改这里的排版，要跟着改 `usePaneWidths` 里的 `MIN_MIDDLE`** ——
+    // 那个"中栏能拖到多窄"是照这里的实际排版量出来的（内边距 + 行号列 + 它右边那段间距），
+    // 而它是字体度量，代码里算不出来。不跟着改的话，拖到头时中栏会比预期多/少几个像素
     <div className={`group/code relative font-mono text-[13px] leading-6 ${className}`}>
       {copyable && <CopyButton contentRef={body} className="absolute right-0 top-0 z-10" />}
       <div className="flex">

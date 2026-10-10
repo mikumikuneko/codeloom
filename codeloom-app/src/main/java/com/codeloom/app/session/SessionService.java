@@ -2,10 +2,10 @@ package com.codeloom.app.session;
 
 import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.app.note.AgentNotes;
+import com.codeloom.app.turn.SessionProjections;
 import com.codeloom.app.turn.SessionWriter;
 import com.codeloom.app.workspace.WorkspaceProvisioner;
 import com.codeloom.domain.event.CheckpointCreated;
-import com.codeloom.domain.event.SessionStarted;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.UserMessage;
 import com.codeloom.domain.llm.ProviderId;
@@ -63,6 +63,7 @@ public class SessionService {
     private final SessionCheckpoints sessionCheckpoints;
     private final SessionErasure erasure;
     private final AgentNotes notes;
+    private final SessionProjections projections;
 
     public SessionService(SessionRepository sessions,
                           WorkspaceRepository stored,
@@ -74,7 +75,8 @@ public class SessionService {
                           LlmClientProvider clients,
                           SessionCheckpoints sessionCheckpoints,
                           SessionErasure erasure,
-                          AgentNotes notes) {
+                          AgentNotes notes,
+                          SessionProjections projections) {
         this.sessions = sessions;
         this.stored = stored;
         this.provisioner = provisioner;
@@ -86,6 +88,7 @@ public class SessionService {
         this.sessionCheckpoints = sessionCheckpoints;
         this.erasure = erasure;
         this.notes = notes;
+        this.projections = projections;
     }
 
     public Session create(User owner, Project project, ModelConfig model) {
@@ -286,6 +289,9 @@ public class SessionService {
         // 反过来先清队列的话，一次失败会连那些还没投递的留言一起丢掉，
         // 而那次失败从外面完全看不出来
         notes.discard(session.id());
+        // 内存里那条投影也一起放下：会话都没了，留着它就是把一段已经删掉的对话
+        // 继续搁在内存里。**不清理也不会错**（有上限、迟早被挤掉），但没必要留着
+        projections.forget(session.id());
     }
 
     private void appendStarted(Session session, Workspace workspace) {
@@ -294,18 +300,7 @@ public class SessionService {
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new IllegalStateException(
                 "刚创建的会话所在这棵树不该已经有人持有租约：" + session.workspaceId()));
         try {
-            events.append(session.id(), new SessionStarted(
-                    workspace.branch(), workspace.path().toString(), workspace.headCommit()), token);
-            // 第 0 个 checkpoint：会话刚建、还没跑过任何一轮的那个位置。
-            //
-            // 它必须在这里落下来，因为**每轮结束才打下一个 checkpoint** ——
-            // 没有它的话，"撤销第一轮的全部改动"就没有可回的点，
-            // 而那是回滚最常用的那一次。
-            //
-            // 它记的是**这棵树当时的位置**：同一个人的第二条会话，第 0 个 checkpoint
-            // 落在第一条会话干完之后的地方，所以"撤销这一条会话的全部改动"退到的正是
-            // "它开始说话之前"。那是对的 —— 换会话本来就不该把代码退回去
-            events.append(session.id(), new CheckpointCreated(workspace.headCommit(), 0), token);
+            writer.startSession(session, workspace, token);
         } finally {
             leases.release(token);
         }

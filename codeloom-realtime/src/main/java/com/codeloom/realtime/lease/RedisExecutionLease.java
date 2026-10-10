@@ -2,10 +2,14 @@ package com.codeloom.realtime.lease;
 
 import com.codeloom.domain.port.ExecutionLease;
 import com.codeloom.domain.port.LeaseToken;
+import com.codeloom.domain.port.LeaseUnavailableException;
 import com.codeloom.domain.port.WorkspaceFence;
 import com.codeloom.domain.session.Session;
 import com.codeloom.domain.workspace.WorkspaceId;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
@@ -45,6 +49,8 @@ import java.util.UUID;
  */
 @Component
 public class RedisExecutionLease implements ExecutionLease {
+
+    private static final Logger log = LoggerFactory.getLogger(RedisExecutionLease.class);
 
     /**
      * 键的前缀。后面接的是 {@code WorkspaceId} 的文本形式（两个 UUID，冒号分隔），
@@ -119,7 +125,17 @@ public class RedisExecutionLease implements ExecutionLease {
         String key = keyFor(workspaceId);
         String holderId = instanceId + "/" + UUID.randomUUID();
 
-        if (!Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, holderId, leaseTtl))) {
+        boolean acquired;
+        try {
+            acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, holderId, leaseTtl));
+        } catch (DataAccessException e) {
+            // 连不上、超时、命令被拒 —— 对调用方是同一件事：**这把锁现在问不到**。
+            // 不能当成"没抢到"：那个含义是"有人管着这棵树"，
+            // 而这个连"谁管着"都不知道，两者的处置完全不同
+            throw new LeaseUnavailableException(
+                    "执行租约服务（Redis）连不上 —— 这一轮没法开始。稍后重试", e);
+        }
+        if (!acquired) {
             // 不阻塞、不排队：拿不到就是拿不到，让调用方自己决定（多半是拒绝这次请求）
             return Optional.empty();
         }
@@ -133,7 +149,7 @@ public class RedisExecutionLease implements ExecutionLease {
         } catch (RuntimeException e) {
             // 锁拿到了却没还回去，它会一直被占到 TTL 结束 —— 那段时间里谁都拿不到这棵树的锁。
             // 发号失败（比如工作区还不存在）是调用方的问题，不该让整棵树因此被锁住。
-            releaseQuietly(key, holderId);
+            quietly("还锁", key, holderId);
             throw e;
         }
     }
@@ -149,21 +165,24 @@ public class RedisExecutionLease implements ExecutionLease {
 
     @Override
     public void release(LeaseToken token) {
-        redis.execute(RELEASE_SCRIPT, List.of(keyFor(token.workspaceId())), token.holderId());
+        quietly("还锁", keyFor(token.workspaceId()), token.holderId());
     }
 
     /**
      * 还锁，但**绝不把异常抛出去**。
      *
-     * <p>只用在 {@link #tryAcquire} 的失败分支：那里已经有一个正在往外抛的异常了，
-     * 再抛一个会把它顶掉，而它才是调用方需要看到的那个原因。
-     * 还锁失败不是什么大事 —— 锁有 TTL，最坏就是多占一会儿。
+     * <p>调用方几乎总站在两种位置上，而两种都要求它别抛：{@link #tryAcquire} 的失败分支
+     * 已经有一个正在往外抛的异常了，再抛一个会把它顶掉；而 {@code finally} 那一边更严重 ——
+     * 那里抛出去的东西会**盖掉本轮真正的结果**（成功、失败、还是被取消）。
+     *
+     * <p>还不上也不是什么大事：锁有 TTL，最坏是别人多等一个 TTL。所以**记日志、不抛** ——
+     * 不声不响地失败和抛出去一样坏，只是坏得安静些。
      */
-    private void releaseQuietly(String key, String holderId) {
+    private void quietly(String what, String key, String holderId) {
         try {
             redis.execute(RELEASE_SCRIPT, List.of(key), holderId);
-        } catch (RuntimeException ignored) {
-            // 刻意吞掉：见上面
+        } catch (RuntimeException e) {
+            log.warn("{}失败（{}），锁会在 TTL 到期时自己消失", what, key, e);
         }
     }
 }

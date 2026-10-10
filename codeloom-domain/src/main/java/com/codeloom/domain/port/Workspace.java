@@ -34,17 +34,26 @@ import java.util.Objects;
 public record Workspace(WorkspaceId workspaceId, Path path, String branch, String headCommit) {
 
     /**
-     * agent 存放**完整**工具输出的目录名（相对工作区根）。
+     * 平台自己那个目录（相对工作区根）。工具输出落在它下面。
      *
-     * <p>为什么这个常量住在 domain：往里写的是 agent 模块，把它在 git 那边忽略掉的是
-     * workspace 模块，而这两个模块**互不依赖**（那条边是刻意删掉的）——
+     * <p>为什么这个常量住在 domain：往里写的是 agent 模块，把它在 git 那边忽略掉、在文件树里
+     * 藏起来的是别的模块，而它们**互不依赖**（那条边是刻意删掉的）——
      * 定义在这儿是它们唯一都能看见它的地方。复制成两份的话，某次改名就会错开，
-     * 而错开的后果是"落盘的东西全进了版本库"。
+     * 而错开的后果是"落盘的东西全进了版本库"或者"它出现在文件树里"。
      *
      * <p>放在**工作区内部**是刻意的：那样模型用普通的 {@code read_file} 就能读回来，
      * 不必给路径守卫（{@code WorkspacePathGuard}）开任何口子。
      */
-    public static final String TOOL_OUTPUT_DIR = ".codeloom/tool-output";
+    public static final String PLATFORM_DIR = ".codeloom";
+
+    /**
+     * agent 存放**完整**工具输出的目录（相对工作区根）。
+     *
+     * <p>从 {@link #PLATFORM_DIR} 拼出来，不另写一遍：文件树那边藏的是**父目录**
+     *（整个 {@code .codeloom}），两边各写各的话，哪天把工具输出挪到别处去，
+     * 它就会一边被忽略、一边出现在文件树里。
+     */
+    public static final String TOOL_OUTPUT_DIR = PLATFORM_DIR + "/tool-output";
 
     public Workspace {
         Objects.requireNonNull(workspaceId, "workspaceId");

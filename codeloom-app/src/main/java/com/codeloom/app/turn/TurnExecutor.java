@@ -391,14 +391,14 @@ public class TurnExecutor {
     }
 
     /**
-     * 把一次写入的结果应用回来：更新游标，然后广播。
+     * 把一次写入的结果应用回来：**游标**跟着走。
      *
-     * <p>广播**在这里**而不是在 {@code SessionWriter} 里面 —— 这个方法被调用时，
-     * 那个事务已经提交了。"提交之后才推送"这件事，是靠这个调用顺序保证的。
+     * <p>广播不在这里 —— 写入自己在事务提交之后宣布（见 {@code SessionWriter.Written}）。
+     * 从前这一步还得负责推，靠的是"调用点在事务外"这个顺序上的巧合；而漏掉它的那几处
+     * （回滚、换模型、两条同步）压根不经过这个方法，所以那条巧合从来没护住它们。
      */
     private void apply(AtomicReference<Session> current, SessionWriter.Written written) {
         current.set(written.session());
-        written.events().forEach(broadcaster::publish);
     }
 
     /**
@@ -663,7 +663,11 @@ public class TurnExecutor {
      *
      * <p>跑在虚拟线程上：它整段时间都在睡，正是虚拟线程最擅长的负载。
      */
-    private static final class LeaseWatchdog {
+    /**
+     * 续约看门狗。**不是 private**：它守的那条规则（续约失败 = 立刻放弃本轮）只有把
+     * 一个"续约会失败/会抛异常"的租约塞给它才验得了，而这在这个包里做得到。
+     */
+    static final class LeaseWatchdog {
 
         private static final long STOP_TIMEOUT_MS = 2_000;
 
@@ -691,7 +695,20 @@ public class TurnExecutor {
                     Thread.currentThread().interrupt();
                     return;
                 }
-                if (leases.renew(token)) {
+                boolean renewed;
+                try {
+                    renewed = leases.renew(token);
+                } catch (RuntimeException e) {
+                    // **续约这一步自己炸了，与"续约被拒"是同一件事**：我们已经不知道
+                    // 自己还持不持着这把锁（Redis 中途挂了就是这条）。
+                    //
+                    // 放它过去的话，这个线程会安静地死掉，而 leaseLost 永远是假 ——
+                    // 本轮于是"以为锁还在"跑完。写入还有 fencing token 挡着，
+                    // **但工作区里那些改动没有任何东西挡**，那正是下面这段要防的事
+                    log.warn("会话 {} 的租约续不上，按失去执行权处理", token.sessionId(), e);
+                    renewed = false;
+                }
+                if (renewed) {
                     continue;
                 }
                 // 已经失去执行权。取消的话，循环会在下一个边界上停下来

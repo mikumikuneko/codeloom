@@ -57,6 +57,11 @@ public interface ExecutionLease {
     /**
      * 主动释放。实现必须校验 token 才删除，否则会误删别人的锁
      * （经典的"锁过期后原持有者释放了新人刚拿到的锁"）。
+     *
+     * <p><strong>它不抛异常。</strong>调用方几乎总是站在 {@code finally} 上，那里抛出去的东西会
+     * <strong>盖掉本轮真正的结果</strong>（成功、失败、还是被取消）—— 而那个结果才是调用方要的。
+     * 还不上也不要紧：锁有 TTL，最坏是别人多等一个 TTL。实现应当把失败**记进日志**，
+     * 别不声不响 —— 安静地失败和抛出去一样坏。
      */
     void release(LeaseToken token);
 

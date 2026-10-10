@@ -6,6 +6,7 @@ import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.session.SessionId;
 
 import java.util.List;
+import java.util.OptionalInt;
 
 /**
  * 事件存储。append-only，永不修改、永不删除。
@@ -51,4 +52,19 @@ public interface EventStore {
 
     /** 当前最后一条事件的 seq；没有任何事件时返回 0。用于重连时确定初始游标。 */
     long lastSeq(SessionId sessionId);
+
+    /**
+     * 这条会话**最后一次**服务商报的上下文大小（token）。没有就是空。
+     *
+     * <p>它是"要不要压缩"那个判断的**一手读数**：估算器按字符算，而那个比例是照英文定的、
+     * **系统性低估中文**，所以真正拍板的通常是这个数（见 {@code ContextCompactor}）。
+     * 有了它就**不必先读整条流** —— 绝大多数轮次看一眼就能结束。
+     *
+     * <p>给的是读数本身而不是那条事件：调用方要的只是这个数，把 {@code TurnTokensUsed}
+     * 整个交出去，等于把它长什么样也变成契约的一部分。
+     *
+     * <p>**读数的覆盖不完整**：一轮没调过模型（被取消、或压根没走完）时它里面没有这个数，
+     * 那种收尾落下的 {@code TurnTokensUsed} 读出来就是空 —— 调用方要能接受"这次问不出来"。
+     */
+    OptionalInt lastContextTokens(SessionId sessionId);
 }

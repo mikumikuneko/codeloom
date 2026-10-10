@@ -1,7 +1,6 @@
 package com.codeloom.app.approval;
 
 import com.codeloom.app.turn.SessionWriter;
-import com.codeloom.app.turn.TurnBroadcaster;
 import com.codeloom.app.turn.TurnExecutor;
 import com.codeloom.domain.event.ToolApprovalResolved;
 import com.codeloom.domain.event.ToolRejected;
@@ -13,7 +12,6 @@ import com.codeloom.domain.session.SessionId;
 import com.codeloom.domain.session.SessionState;
 import com.codeloom.domain.user.UserId;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
 
@@ -38,6 +36,17 @@ import java.util.Optional;
  * Claude Code 也是直接中止整个回合 —— 用户把这件事叫停了、又没说下一步怎么办，
  * 让模型自己猜一个做法往下跑多半是白烧一轮。
  * 详见 {@link #resolve} 里那段注释。
+ *
+ * <h2>三次写入为什么各自成一小段事务，而不是整个包一个</h2>
+ * {@link TurnExecutor#resume} 是**同步跑完一整轮**的，所以 {@link #resolve} 整个包一个事务
+ * 会把那一轮也裹进去。两条后果都不轻：宣布挂在提交上，用户点完批准要等整轮跑完界面才有反应；
+ * 而且只要中间有任何一处写入真按自己的事务提交了，这个长事务的宣布就排到它后面 ——
+ * **晚发的旧事件会被订阅端直接丢掉**（那个判据在 {@code EventAnnouncer} 上），
+ * 不是"晚一点到"。
+ *
+ * <p>三次写入各写各的，也就和 {@code SessionWriter} 那篇"每次调用都是一小段事务"同一个主张。
+ * 代价是它们不再原子：中间挂了会留下"答复记了、收尾没记"，而那一支有兜底 ——
+ * 崩溃恢复会把它补成一条终局（见那篇决策），界面上也不会一直停在"正在跑"。
  */
 @Component
 public class ApprovalService {
@@ -46,18 +55,15 @@ public class ApprovalService {
     private final SessionWriter writer;
     private final ExecutionLease leases;
     private final TurnExecutor executor;
-    private final TurnBroadcaster broadcaster;
 
     public ApprovalService(SessionRepository sessions,
                            SessionWriter writer,
                            ExecutionLease leases,
-                           TurnExecutor executor,
-                           TurnBroadcaster broadcaster) {
+                           TurnExecutor executor) {
         this.sessions = sessions;
         this.writer = writer;
         this.leases = leases;
         this.executor = executor;
-        this.broadcaster = broadcaster;
     }
 
     /**
@@ -68,7 +74,6 @@ public class ApprovalService {
      *                         追责要的是身份，而用户名会变 —— 唯一不等于它是身份
      *                        （见 {@link ToolApprovalResolved}）
      */
-    @Transactional
     public void resolve(SessionId sessionId, String callId, boolean approved,
                         UserId resolvedByUserId, String reason) {
         // 会话要先读出来：租约是按它所在的**那棵树**抢的（见 ExecutionLease）
@@ -87,13 +92,6 @@ public class ApprovalService {
         try {
             SessionWriter.Written written = writer.append(
                     session, new ToolApprovalResolved(callId, approved, resolvedByUserId, reason), token);
-            // ★ **必须广播出去。** 漏发的话那条答复写进了库、也醒了执行器，
-            //   却**从来没送到界面上** —— 点了「批准」的那条会一直停在"等你批准"，
-            //   因为它等的那个 ToolApprovalResolved 只活在库里。
-            //
-            //   这不算"少了一行提示"：用户看到的是"我批了，但界面没反应"，
-            //   而那一轮其实已经在跑了 —— 于是他再点一次，或者以为按钮坏了。
-            written.events().forEach(broadcaster::publish);
 
             SessionWriter.Written latest = written;
             if (!approved) {
@@ -106,7 +104,6 @@ public class ApprovalService {
                 //
                 // 不带理由：那是"决定"的一部分，已经在上面那条答复里了。见 ToolRejected
                 latest = writer.append(written.session(), new ToolRejected(callId), token);
-                latest.events().forEach(broadcaster::publish);
             }
 
             // **拒绝、而且没留下指示 → 这一轮不接着跑。**
@@ -124,13 +121,8 @@ public class ApprovalService {
                 // 用 latest.session()，不是最上面那个快照：状态已经被 append 推到 WAITING_USER 了，
                 // 拿旧的那份去收尾会再落一条一模一样的迁移事件。
                 // commitSha 传 null：这一轮没有新的产出位置可打（要回退的话，点还是挂起时那条）
-                SessionWriter.Written closed = writer.abortTurn(latest.session(), null,
+                writer.abortTurn(latest.session(), null,
                         SessionState.WAITING_USER, "REJECTED", token);
-                // ★ **也必须广播。** 漏发的话状态迁移只落在库里，
-                //   于是界面永远停在"停下来等你批准一次调用"，而那一轮其实已经收尾了。
-                //   只要落库而没广播，用户看到的就是"我操作了，界面没反应" ——
-                //   和 TurnExecutor.apply(...) 是同一条规矩
-                closed.events().forEach(broadcaster::publish);
             }
         } finally {
             // 先把自己的锁放掉再叫执行器 —— 它自己会去抢，而我们持有的话它只会拿到 Busy，

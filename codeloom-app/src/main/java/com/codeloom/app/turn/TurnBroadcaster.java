@@ -4,32 +4,20 @@ import com.codeloom.agent.llm.StreamEvent;
 import com.codeloom.agent.loop.AgentTurn;
 import com.codeloom.domain.event.AssistantDelta;
 import com.codeloom.domain.event.ReasoningDelta;
-import com.codeloom.domain.event.StoredEvent;
-import com.codeloom.domain.port.EventBus;
 import com.codeloom.domain.session.SessionId;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.function.Consumer;
 
 /**
- * 把一轮里产生的东西推给正在看的人 —— **两条通道，别混**。
+ * 一轮里那半截**正在长出来的**东西推给正在看的人：模型逐 token 吐出的正文和思考。
  *
- * <ul>
- *   <li>{@link #publish} —— <b>持久事件</b>。落库之后才推，订阅者断线重连时能从库里补齐
- *       （SSE 的 {@code Last-Event-ID} 就是干这个的）。</li>
- *   <li>{@link #liveListener} —— <b>流式增量</b>。模型正在打字的那半截，不落库、不保证送达。</li>
- * </ul>
+ * <p>{@link #liveListener} 只走易失通道。**已落库的事件不从这里走** ——
+ * 它们由 {@link EventAnnouncer} 在事务提交之后宣布，那里也写着两条通道为什么必须分开
+ * （一条丢了是数据丢失，一条丢了只是少刷一段字）。
  *
  * <h2>为什么从 TurnExecutor 里拿出来</h2>
- * 这段只碰 {@link EventBus} 一个依赖，和执行器的租约、状态机、提交没有半点共享状态。
- *
- * <h2>广播一律尽力而为</h2>
- * 失败只记日志，绝不往外抛。理由两条通道一致 —— **数据本身已经安全了**：
- * 持久事件已经落库，推送失败只是"这一刻没推到"；流式增量本来就"不保证送达"。
- * 把这类会自愈的问题抛出去，会让 agent 循环以为是自己出错了，
- * 从而把一个能跑的 turn 判死。
+ * 这段只碰一个依赖，和执行器的租约、状态机、提交没有半点共享状态。
  */
 @Component
 public class TurnBroadcaster {
@@ -43,30 +31,10 @@ public class TurnBroadcaster {
      */
     private static final int DELTA_FLUSH_CHARS = 64;
 
-    private static final Logger log = LoggerFactory.getLogger(TurnBroadcaster.class);
+    private final EventAnnouncer announcer;
 
-    private final EventBus bus;
-
-    public TurnBroadcaster(EventBus bus) {
-        this.bus = bus;
-    }
-
-    /**
-     * 一条持久事件。
-     *
-     * <h2>调用点必须保证**事务已经提交**</h2>
-     * 在事务里发的话，订阅者可能先看到一条、然后事务回滚 —— 于是所有人的界面上都出现了
-     * 一条**并不存在**的事实，而库里没有。{@code SessionWriter.Written} 之所以把事件
-     * 交回给调用方、而不是自己发，就是为了把这个时机摆在调用处看得见的地方。
-     *
-     * <h2>为什么它是 public</h2>
-     * 凡是**写进了事件流、而人正看着**的地方，都该能调它。{@code ApprovalService}
-     * 就是一处：它落了一条 {@code ToolApprovalResolved}，漏发的话用户点了「批准」之后
-     * 那一行还停在"等你批准"，而命令其实已经在跑了。可见性收在 {@code app.turn} 里
-     * 就会造成这种漏发，而它的症状不是报错，是"界面不动"，最容易被当成"按钮坏了"。
-     */
-    public void publish(StoredEvent event) {
-        quietly("事件 seq=" + event.seq(), () -> bus.publish(event));
+    public TurnBroadcaster(EventAnnouncer announcer) {
+        this.announcer = announcer;
     }
 
     /**
@@ -158,7 +126,7 @@ public class TurnBroadcaster {
         }
         String text = pending.text.toString();
         pending.text.setLength(0);
-        quietly("流式正文增量", () -> bus.publishEphemeral(sessionId, new AssistantDelta(text)));
+        announcer.announceEphemeral(sessionId, new AssistantDelta(text));
     }
 
     private void flushReasoning(SessionId sessionId, LiveDeltas pending) {
@@ -167,15 +135,6 @@ public class TurnBroadcaster {
         }
         String text = pending.reasoning.toString();
         pending.reasoning.setLength(0);
-        quietly("流式思考增量", () -> bus.publishEphemeral(sessionId, new ReasoningDelta(text)));
-    }
-
-    /** 见类注释最后一段：广播失败只记日志，绝不往外抛。 */
-    private static void quietly(String what, Runnable push) {
-        try {
-            push.run();
-        } catch (RuntimeException e) {
-            log.warn("{} 广播失败 —— 数据本身没问题，只是这一刻没推出去", what, e);
-        }
+        announcer.announceEphemeral(sessionId, new ReasoningDelta(text));
     }
 }

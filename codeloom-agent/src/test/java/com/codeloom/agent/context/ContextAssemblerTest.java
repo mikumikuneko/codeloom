@@ -1,7 +1,8 @@
 package com.codeloom.agent.context;
 
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRole;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRole;
+import com.codeloom.agent.llm.ToolCall;
 import com.codeloom.domain.event.AgentNoteDelivered;
 import com.codeloom.domain.event.AssistantMessage;
 import com.codeloom.domain.event.CheckpointCreated;
@@ -27,6 +28,8 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -53,8 +56,34 @@ class ContextAssemblerTest {
         return seq;
     }
 
-    private List<ChatMessage> assemble() {
+    private List<LlmMessage> assemble() {
         return assembler.assemble(events, SYSTEM);
+    }
+
+    /**
+     * 投影**对外看得见**的全部东西。
+     *
+     * <p>为什么不止消息：那几份派生事实也是投影的产出。只比消息的话，"推倒重来时漏清了一份"
+     * 这种错**不会红** —— 而它正是这套代码里最容易出、也最难发现的一种（漏掉不报错，
+     * 那份事实只是带着被退掉的那段时间的痕迹活下来）。
+     */
+    private record ProjectionView(List<LlmMessage> messages, Set<String> readPaths,
+                                  Optional<ToolCall> pendingApprovedCall) {
+    }
+
+    /** 一条投影现在对外是什么样。 */
+    private static ProjectionView viewOf(ContextAssembler.Projection projection,
+                                         List<LlmMessage> sink) {
+        return new ProjectionView(List.copyOf(sink), projection.readPaths(),
+                projection.pendingApprovedCall());
+    }
+
+    /** 「整条流一次喂完」那一份 —— 等价断言的对照。 */
+    private ProjectionView fedInOneGo() {
+        ContextAssembler.Projection fresh = assembler.projection(SYSTEM);
+        List<LlmMessage> sink = new ArrayList<>();
+        fresh.advance(events, sink);
+        return viewOf(fresh, sink);
     }
 
     // ------------------------------------------------------------------
@@ -64,11 +93,11 @@ class ContextAssemblerTest {
     void systemPromptComesFirst() {
         append(new UserMessage("你好"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
-        assertThat(messages.getFirst().role()).isEqualTo(ChatRole.SYSTEM);
+        assertThat(messages.getFirst().role()).isEqualTo(LlmRole.SYSTEM);
         assertThat(messages.getFirst().content()).isEqualTo(SYSTEM);
-        assertThat(messages.get(1).role()).isEqualTo(ChatRole.USER);
+        assertThat(messages.get(1).role()).isEqualTo(LlmRole.USER);
     }
 
     @Test
@@ -81,7 +110,7 @@ class ContextAssemblerTest {
         // 换到 pro 之后这一轮
         append(new AssistantMessage("接着说", "deepseek-pro", "这次换个路子"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 两份思考各自标着**谁产的**。少了这个，wire 那一层就没有判据 ——
         // 它只能看到"有思考"，看不见"这不是这个模型的思考"，于是会原样发出去
@@ -102,18 +131,18 @@ class ContextAssemblerTest {
         append(new ToolResult("call_2", true, "class B {}", false, 0, 5));
         append(new AssistantMessage("两个都看完了", null));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant(2个tool_calls), tool, tool, assistant
         assertThat(messages).hasSize(6);
-        ChatMessage assistant = messages.get(2);
-        assertThat(assistant.role()).isEqualTo(ChatRole.ASSISTANT);
+        LlmMessage assistant = messages.get(2);
+        assertThat(assistant.role()).isEqualTo(LlmRole.ASSISTANT);
         assertThat(assistant.content()).isEqualTo("我先读两个文件");
         assertThat(assistant.toolCalls()).hasSize(2);
         assertThat(assistant.toolCalls().get(0).name()).isEqualTo("read_file");
         assertThat(assistant.toolCalls().get(1).id()).isEqualTo("call_2");
 
-        assertThat(messages.get(3).role()).isEqualTo(ChatRole.TOOL);
+        assertThat(messages.get(3).role()).isEqualTo(LlmRole.TOOL);
         assertThat(messages.get(3).toolCallId()).isEqualTo("call_1");
         assertThat(messages.get(3).content()).contains("成功").contains("class A {}");
 
@@ -132,10 +161,10 @@ class ContextAssemblerTest {
         append(new ToolResult("call_1", true, "class A {}", false, 0, 5));
         append(new AssistantMessage("看完了", "deepseek-reasoner", "没什么特别的"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
-        ChatMessage toolTurn = messages.get(2);
-        assertThat(toolTurn.role()).isEqualTo(ChatRole.ASSISTANT);
+        LlmMessage toolTurn = messages.get(2);
+        assertThat(toolTurn.role()).isEqualTo(LlmRole.ASSISTANT);
         assertThat(toolTurn.toolCalls()).hasSize(1);
         assertThat(toolTurn.reasoning()).isEqualTo("我在想先看哪个文件");
 
@@ -160,7 +189,7 @@ class ContextAssemblerTest {
         append(new ToolApprovalRequested("call_B", "测试：这条命令要人批一下"));
         append(new ToolApprovalResolved("call_B", true, UserId.of("root"), null));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant([A]), tool(A), assistant([B]), tool(B)
         assertThat(messages).hasSize(6);
@@ -187,12 +216,12 @@ class ContextAssemblerTest {
         // ★ 用户批准之后，那次调用真的被执行了，结果落下来
         append(new ToolResult("call_1", true, "javac 21.0.1", false, 0, 5));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant([call_1]), tool(call_1) —— **只有一条 tool**
         assertThat(messages).hasSize(4);
-        ChatMessage answered = messages.get(3);
-        assertThat(answered.role()).isEqualTo(ChatRole.TOOL);
+        LlmMessage answered = messages.get(3);
+        assertThat(answered.role()).isEqualTo(LlmRole.TOOL);
         assertThat(answered.toolCallId()).isEqualTo("call_1");
         assertThat(answered.content()).contains("javac 21.0.1");
         assertThat(answered.content()).doesNotContain("批准");
@@ -210,7 +239,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"rm -rf /\"}"));
         append(new ToolApprovalResolved("call_1", false, UserId.of("root"), "太危险"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(messages).hasSize(4);
         assertThat(messages.get(3).content()).contains("用户拒绝了这次调用").contains("太危险");
@@ -226,7 +255,7 @@ class ContextAssemblerTest {
         // 用户只点了"拒绝"，一个字都没留 —— 界面上本来也没有留字的地方
         append(new ToolApprovalResolved("call_1", false, UserId.of("root"), null));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(messages).hasSize(4);
         assertThat(messages.get(3).content())
@@ -250,7 +279,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("call_3", "run_command", "{\"command\":\"rm -rf /\"}"));
         append(new ToolApprovalResolved("call_3", false, UserId.of("root"), "太危险"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(answeredCalls(messages)).containsExactly("call_1", "call_2", "call_3");
     }
@@ -259,10 +288,10 @@ class ContextAssemblerTest {
      * 每个 {@code tool_call_id} 被回答了几次 —— 同一个 id 出现两次就是那份请求会 400 的形状。
      * 只看 {@code role="tool"} 的消息：别的消息上这个字段是 null，混进来会得到一堆假重复。
      */
-    private static List<String> answeredCalls(List<ChatMessage> messages) {
+    private static List<String> answeredCalls(List<LlmMessage> messages) {
         return messages.stream()
-                .filter(message -> message.role() == ChatRole.TOOL)
-                .map(ChatMessage::toolCallId)
+                .filter(message -> message.role() == LlmRole.TOOL)
+                .map(LlmMessage::toolCallId)
                 .toList();
     }
 
@@ -277,7 +306,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("call_2", "edit_file", "{\"path\":\"A.java\"}"));
         append(new ToolResult("call_2", true, "已修改", false, 0, 3));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(messages.get(2).reasoning()).isEqualTo("第一轮的思考");
         assertThat(messages.get(4).reasoning()).isEqualTo("第二轮的思考");
@@ -292,7 +321,7 @@ class ContextAssemblerTest {
         append(new ToolResult("call_1", true, "class A {}", false, 0, 5));
         append(new AssistantMessage("读完了", null));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // null 和空串在 wire 那层的下场完全不同：null → 不发那个字段；
         // 空串 → 发出去，而服务商拒收空串
@@ -311,13 +340,13 @@ class ContextAssemblerTest {
         append(new ToolResult("call_2", true, "已修改", false, 0, 3));
         append(new AssistantMessage("改好了", null));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant(c1), tool, assistant(c2), tool, assistant
         // 合并不了：OpenAI 的格式要求 tool 结果必须紧跟带 tool_calls 的那条 assistant 消息，
         // 中间隔着别人的结果就没法并成一条
         assertThat(messages).hasSize(7);
-        assertThat(messages.get(4).role()).isEqualTo(ChatRole.ASSISTANT);
+        assertThat(messages.get(4).role()).isEqualTo(LlmRole.ASSISTANT);
         assertThat(messages.get(4).content()).isEmpty();     // 第二次调用前模型没说话
         assertThat(messages.get(4).toolCalls()).singleElement()
                 .satisfies(c -> assertThat(c.name()).isEqualTo("edit_file"));
@@ -330,9 +359,9 @@ class ContextAssemblerTest {
         append(new UserMessage("读一下"));
         append(new ToolCallRequested("c1", "read_file", "{}"));
 
-        ChatMessage assistant = assemble().get(2);
+        LlmMessage assistant = assemble().get(2);
 
-        assertThat(assistant.role()).isEqualTo(ChatRole.ASSISTANT);
+        assertThat(assistant.role()).isEqualTo(LlmRole.ASSISTANT);
         assertThat(assistant.content()).isEmpty();
         assertThat(assistant.hasToolCalls()).isTrue();
     }
@@ -360,15 +389,15 @@ class ContextAssemblerTest {
         // 结果永远不会来。事件流里于是只剩「请求了」—— 直接投影出去，
         // 就是一条没有配对 tool 消息的 assistant(tool_calls)，API 会拒
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant([c1]), tool(c1)
         assertThat(messages).hasSize(4);
         assertThat(messages.get(2).toolCalls()).singleElement()
                 .satisfies(c -> assertThat(c.id()).isEqualTo("c1"));
 
-        ChatMessage tool = messages.get(3);
-        assertThat(tool.role()).isEqualTo(ChatRole.TOOL);
+        LlmMessage tool = messages.get(3);
+        assertThat(tool.role()).isEqualTo(LlmRole.TOOL);
         assertThat(tool.toolCallId()).isEqualTo("c1");
         assertThat(tool.content()).contains("没有留下结果").contains("不要直接重试");
     }
@@ -382,7 +411,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("c2", "run_command", "{}"));
         // c2 执行到一半这一轮就断了，没有结果
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user, assistant([c1]), tool(c1), assistant([c2]), tool(c2)
         assertThat(messages).hasSize(6);
@@ -399,13 +428,13 @@ class ContextAssemblerTest {
         append(new ToolResult("c1", true, "class A { 一大堆正文 }", false, 0, 5));
         append(new ToolResultsCleared(List.of("c1")));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 结构一个字没变：清的是正文，不是那条消息。变了的话配对就断了，
         // 而配对断了 API 直接拒
         assertThat(messages).hasSize(4);
-        ChatMessage tool = messages.get(3);
-        assertThat(tool.role()).isEqualTo(ChatRole.TOOL);
+        LlmMessage tool = messages.get(3);
+        assertThat(tool.role()).isEqualTo(LlmRole.TOOL);
         assertThat(tool.toolCallId()).isEqualTo("c1");
         assertThat(tool.content())
                 .contains("已经为了省上下文被清理")
@@ -419,7 +448,7 @@ class ContextAssemblerTest {
         append(new AssistantMessage("等于 42", "deepseek-reasoner",
                 "我先看看题目……嗯，看起来是 42"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(messages.get(2).content()).isEqualTo("等于 42");
         // 它是**展示**用途。各家对"回不回传"的要求是相反的（OpenAI 兼容阵营说不要回传，
@@ -434,10 +463,10 @@ class ContextAssemblerTest {
         append(new UserMessage("继续改订单服务"));
         append(new AgentNoteDelivered(SessionId.of("s-other"), UserId.of("u-li"), "我把锁加好了，你别重复改"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
-        ChatMessage note = messages.get(2);
-        assertThat(note.role()).isEqualTo(ChatRole.USER);
+        LlmMessage note = messages.get(2);
+        assertThat(note.role()).isEqualTo(LlmRole.USER);
         assertThat(note.content())
                 .contains("来自 小李")
                 .contains("我把锁加好了");
@@ -452,11 +481,11 @@ class ContextAssemblerTest {
         append(new ContextCompacted(3, "用户先问了一句，我答了一句"));
         append(new UserMessage("第三句"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // system, user(摘要), user(第三句) —— 前三件事全被那条摘要代表了
         assertThat(messages).hasSize(3);
-        assertThat(messages.get(1).role()).isEqualTo(ChatRole.USER);
+        assertThat(messages.get(1).role()).isEqualTo(LlmRole.USER);
         assertThat(messages.get(1).content()).contains("摘要").contains("我答了一句");
         assertThat(messages.get(2).content()).isEqualTo("第三句");
     }
@@ -470,7 +499,7 @@ class ContextAssemblerTest {
         append(new ContextCompacted(3, "第二次的摘要，已经涵盖了前面全部"));
         append(new UserMessage("最新的话"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         assertThat(messages).hasSize(3);
         assertThat(messages.get(1).content()).contains("第二次的摘要");
@@ -495,14 +524,14 @@ class ContextAssemblerTest {
         // 退到"第 0 轮结束"那个点
         append(new SessionRewound("sha1", afterFirst, UserId.of("u-li")));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 系统 + 第一轮的两条。**第二、三轮没了**——它们的代码确实退回去了。
         //
         // 这一条是这个投影最要紧的性质：若整段清空，第 0 轮聊过什么模型也一并忘了，
         // 而那一轮的代码还留在盘上 —— 模型面对自己刚写的东西却没有上下文。
         // Claude Code 的 /rewind 就是把这些留住的
-        assertThat(messages).extracting(ChatMessage::content)
+        assertThat(messages).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM, "第一轮", "我改了 A.java");
     }
 
@@ -521,7 +550,7 @@ class ContextAssemblerTest {
         append(new SessionRewound("base", veryBeginning, UserId.of("u-li")));
 
         assertThat(assemble()).singleElement()
-                .satisfies(m -> assertThat(m.role()).isEqualTo(ChatRole.SYSTEM));
+                .satisfies(m -> assertThat(m.role()).isEqualTo(LlmRole.SYSTEM));
     }
 
     @Test
@@ -542,7 +571,7 @@ class ContextAssemblerTest {
 
         // 按 sha 取**最早**那条匹配会退到"会话刚开始"，把用户选的第一轮之后的
         // 东西**也一起清掉**。认序号才退得到他指的那一条：第一轮的两条都留着
-        assertThat(assemble()).extracting(ChatMessage::content)
+        assertThat(assemble()).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM, "第一轮", "答一");
     }
 
@@ -562,7 +591,7 @@ class ContextAssemblerTest {
 
         // 拿 sha 去猜的话这里会退到"会话刚开始"那条 —— 而这个 sha 在这条会话里出现过两次，
         // 猜哪条都是猜。既然事件自己没记下退到哪儿，就退到最保守的位置
-        assertThat(assemble()).extracting(ChatMessage::content)
+        assertThat(assemble()).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM);
     }
 
@@ -578,13 +607,13 @@ class ContextAssemblerTest {
         // 这里用一个流里不存在的序号表示那种"查不到"（和 sha 在不在手上无关了）
         append(new SessionRewound("sha0", 999L, UserId.of("u-li")));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 查不到边界就退到 conversationStart —— 连摘要一起清掉。
         // 摘要描述的那些改动确实已经退回去了，留着它模型就会对着一个不存在的现状说话；
         // 而"退得比该退的多"只是少记一段，不会让它说错话
         assertThat(messages).singleElement()
-                .satisfies(m -> assertThat(m.role()).isEqualTo(ChatRole.SYSTEM));
+                .satisfies(m -> assertThat(m.role()).isEqualTo(LlmRole.SYSTEM));
     }
 
     @Test
@@ -618,11 +647,11 @@ class ContextAssemblerTest {
         append(new UserMessage("改一下"));
         append(new PlatformInstruction("你声明完成后，平台自动验证失败，请修正", "verification-failed"));
 
-        ChatMessage instruction = assemble().get(2);
+        LlmMessage instruction = assemble().get(2);
 
         // 角色上它确实占用户位（模型要按指令行动），但正文带来源标记 ——
         // 而事件流里它是独立类型，审计时不会跟真实的用户发言混起来
-        assertThat(instruction.role()).isEqualTo(ChatRole.USER);
+        assertThat(instruction.role()).isEqualTo(LlmRole.USER);
         assertThat(instruction.content())
                 .startsWith("[平台指令]")
                 .contains("平台自动验证失败");
@@ -638,11 +667,11 @@ class ContextAssemblerTest {
         append(new SessionRewound("c0ffee", 999L, UserId.of("u-li")));
         append(new UserMessage("这次换个做法"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 只剩系统提示词 + 回滚之后那一句
         assertThat(messages).hasSize(2);
-        assertThat(messages.getFirst().role()).isEqualTo(ChatRole.SYSTEM);
+        assertThat(messages.getFirst().role()).isEqualTo(LlmRole.SYSTEM);
         // **系统提示词要原样留着**：它不属于对话，一起清掉会让后续每一次调用都缓存未命中
         assertThat(messages.getFirst().content()).isEqualTo(SYSTEM);
         assertThat(messages.get(1).content()).isEqualTo("这次换个做法");
@@ -671,11 +700,11 @@ class ContextAssemblerTest {
                 new TodoListUpdated.Item("改三个文件", TodoListUpdated.State.IN_PROGRESS),
                 new TodoListUpdated.Item("跑测试", TodoListUpdated.State.PENDING))));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 状态用**模型自己的词**（和工具参数里那三个字符串一模一样）：它写进去、它读回来，
         // 中间不该经过一次翻译
-        assertThat(messages.getLast().role()).isEqualTo(ChatRole.USER);
+        assertThat(messages.getLast().role()).isEqualTo(LlmRole.USER);
         assertThat(messages.getLast().content())
                 .startsWith("[当前任务清单")
                 .contains("1. [in_progress] 改三个文件")
@@ -690,7 +719,7 @@ class ContextAssemblerTest {
         append(new TodoListUpdated(List.of(
                 new TodoListUpdated.Item("第二步", TodoListUpdated.State.IN_PROGRESS))));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 每一份都留在历史里的话，几十轮之后上下文里全是过期清单 ——
         // 白烧 token，而且破坏了"前缀不变"（每一轮的旧清单区都在变）
@@ -708,12 +737,12 @@ class ContextAssemblerTest {
         append(new ContextCompacted(cutoff, "前面聊过要做这几件事"));
         append(new UserMessage("继续"));
 
-        List<ChatMessage> messages = assemble();
+        List<LlmMessage> messages = assemble();
 
         // 水位线之前的东西由摘要代表……
-        assertThat(messages).extracting(ChatMessage::content)
+        assertThat(messages).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("前面聊过要做这几件事"));
-        assertThat(messages).extracting(ChatMessage::content)
+        assertThat(messages).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("好，我开始了"));
         // ……但清单**不在**被替换的那部分里：它照旧摆在最后。
         // 工具结果就做不到这一点（它会被 ToolResultsCleared 清掉），而计划丢了，
@@ -735,7 +764,7 @@ class ContextAssemblerTest {
 
         // 退到"还没写清单"那一刻，模型不该看见一个**还没发生**的计划 ——
         // 判据和对话那边一样：序号大于切点的那几份作废
-        assertThat(assemble()).extracting(ChatMessage::content)
+        assertThat(assemble()).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("当前任务清单"));
     }
 
@@ -747,7 +776,7 @@ class ContextAssemblerTest {
         // 而不是留着一份全打勾的）
         append(new TodoListUpdated(List.of()));
 
-        assertThat(assemble()).extracting(ChatMessage::content)
+        assertThat(assemble()).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("当前任务清单"));
     }
 
@@ -756,9 +785,9 @@ class ContextAssemblerTest {
     // ------------------------------------------------------------------
 
     /** 分几次喂给**同一条**投影；最后一次的结果必须和"一次喂完"逐字符相同。 */
-    private List<ChatMessage> inSteps(int... cuts) {
+    private List<LlmMessage> inSteps(int... cuts) {
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         for (int cut : cuts) {
             projection.advance(events.subList(0, cut), sink);
         }
@@ -780,7 +809,7 @@ class ContextAssemblerTest {
         // 增量投影最容易在这里走样（合成的那条落在哪、换的是哪一条）
         assertThat(inSteps(2, 4, 6)).isEqualTo(assemble());
         // 而且合成的那条最后**不在了**：真结果把它换掉了
-        assertThat(inSteps(2, 4, 6)).extracting(ChatMessage::content)
+        assertThat(inSteps(2, 4, 6)).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("没有留下结果"));
     }
 
@@ -790,9 +819,9 @@ class ContextAssemblerTest {
         append(new UserMessage("说句话"));
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         projection.advance(events, sink);
-        List<ChatMessage> once = List.copyOf(sink);
+        List<LlmMessage> once = List.copyOf(sink);
         projection.advance(events, sink);
 
         assertThat(sink).isEqualTo(once);
@@ -808,7 +837,7 @@ class ContextAssemblerTest {
         append(new AssistantMessage("答三", null));
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         // 前两条先推进一遍（这时还没有压缩）
         projection.advance(events.subList(0, 2), sink);
         // 压缩是**后来**才到的：它把前面一整段换成摘要 —— 已经投出去的前缀整段作废，
@@ -816,8 +845,8 @@ class ContextAssemblerTest {
         append(new ContextCompacted(cutoff, "前面聊过这些"));
         projection.advance(events, sink);
 
-        assertThat(sink).isEqualTo(assemble());
-        assertThat(sink).extracting(ChatMessage::content)
+        assertThat(viewOf(projection, sink)).isEqualTo(fedInOneGo());
+        assertThat(sink).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("前面聊过这些"));
     }
 
@@ -830,13 +859,13 @@ class ContextAssemblerTest {
         append(new AssistantMessage("读完了", null));
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         projection.advance(events.subList(0, 3), sink);
         append(new ToolResultsCleared(List.of("c1")));
         projection.advance(events, sink);
 
-        assertThat(sink).isEqualTo(assemble());
-        assertThat(sink).extracting(ChatMessage::content)
+        assertThat(viewOf(projection, sink)).isEqualTo(fedInOneGo());
+        assertThat(sink).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("很长的一大段文件内容"));
     }
 
@@ -849,14 +878,133 @@ class ContextAssemblerTest {
         append(new UserMessage("第二句"));
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         projection.advance(events.subList(0, 3), sink);
         append(new SessionRewound("base", base, UserId.of("u-li")));
         projection.advance(events, sink);
 
-        assertThat(sink).isEqualTo(assemble());
-        assertThat(sink).extracting(ChatMessage::content)
+        assertThat(viewOf(projection, sink)).isEqualTo(fedInOneGo());
+        assertThat(sink).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("第二句"));
+    }
+
+    @Test
+    @DisplayName("【读过的文件·回滚】切点之后才读的**作废**，之前读的照算")
+    void aRewindForgetsTheFilesReadAfterTheCheckpoint() {
+        append(new CheckpointCreated("sha0", 0));
+        append(new UserMessage("先读 A"));
+        append(new ToolCallRequested("c1", "read_file", "{\"path\":\"A.java\"}"));
+        append(new ToolResult("c1", true, "class A {}", false, 0, 5));
+        long cut = append(new CheckpointCreated("sha1", 1));
+        append(new UserMessage("再读 B"));
+        append(new ToolCallRequested("c2", "read_file", "{\"path\":\"B.java\"}"));
+        append(new ToolResult("c2", true, "class B {}", false, 0, 5));
+
+        // 热路径：先推进到回滚**之前**（两次读都进去了），回滚是后来才到的
+        ContextAssembler.Projection projection = assembler.projection(SYSTEM);
+        List<LlmMessage> sink = new ArrayList<>();
+        projection.advance(events.subList(0, 8), sink);
+        assertThat(projection.readPaths()).contains("A.java", "B.java");
+
+        append(new SessionRewound("sha0", cut, UserId.of("u-li")));
+        projection.advance(events, sink);
+
+        // 回滚把**代码**也退回去了（同一棵树）：切点之前读到的那份内容今天依然成立，
+        // 切点之后看到的那份代码已经不存在了 —— 该作废的正是那一段。
+        // 留下来的话，"读过才许覆盖"那道门会让模型覆盖一个它这条时间线上没读过的文件
+        assertThat(projection.readPaths()).contains("A.java").doesNotContain("B.java");
+    }
+
+    @Test
+    @DisplayName("【清单·热路径】先推进一段、再回滚 → 清单照样退回去（重折不会把旧账再记一遍）")
+    void aRewindOnTheHotPathAlsoTakesTheTodoListWithIt() {
+        long base = append(new CheckpointCreated("sha0", 0));
+        append(new UserMessage("做点事"));
+        append(todo("跑测试"));
+        append(new AssistantMessage("写完了", null));
+
+        ContextAssembler.Projection projection = assembler.projection(SYSTEM);
+        List<LlmMessage> sink = new ArrayList<>();
+        // 先推进到回滚之前 —— 清单这时候已经投出去一次了
+        projection.advance(events, sink);
+        assertThat(sink).extracting(LlmMessage::content)
+                .anyMatch(content -> content.contains("跑测试"));
+
+        append(new SessionRewound("sha0", base, UserId.of("u-li")));
+        projection.advance(events, sink);
+
+        // 为什么这一条要单独有（上面那条"回滚退到写清单之前"是一次喂完的）：
+        // 生产上跑的是**推进**这条（见 SessionProjections），而回滚进来时这条投影
+        // 已经把前面那些事件折过一遍了 —— 于是它走的是"清了重建"那条路，而不是从头折
+        assertThat(sink).extracting(LlmMessage::content)
+                .noneMatch(content -> content.contains("当前任务清单"));
+    }
+
+    @Test
+    @DisplayName("【回滚·孤儿】请求已经被砍掉的调用，不该再补一条「没有结果」")
+    void aRewindLeavesNoOrphanToolMessage() {
+        long base = append(new CheckpointCreated("sha0", 0));
+        append(new UserMessage("跑一下"));
+        append(new ToolCallRequested("c1", "run_command", "{\"command\":\"pwd\"}"));
+        append(new ToolApprovalRequested("c1", "这条要问你"));
+        append(new SessionRewound("sha0", base, UserId.of("u-li")));
+
+        // 那条调用请求了、一直没有结局，收尾时本来会给它补一条"没有结果"。可它的请求
+        // 已经被这次回滚砍掉了 —— 补出来就是一条**前面没有 tool_calls 的 tool 消息**，
+        // 下一次发给模型直接 400（"必须是对前面那条 tool_calls 的回应"）
+        assertThat(assemble()).extracting(LlmMessage::content)
+                .noneMatch(content -> content.contains("没有留下结果"));
+    }
+
+    @Test
+    @DisplayName("【回滚·下标】回滚之后再答复同一个调用 id，不会戳到被砍掉的那条消息上")
+    void aRewindInvalidatesThePositionsItCutAway() {
+        append(new CheckpointCreated("sha0", 0));
+        append(new UserMessage("先跑一次"));
+        append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"ls\"}"));
+        append(new ToolResult("call_1", true, "a.java", false, 0, 4));
+        append(new SessionRewound("sha0", 1L, UserId.of("u-li")));
+        // 新的时间线上，模型又用了同一个 id（它是模型生成的，重复是可能的）
+        append(new UserMessage("再跑一次"));
+        append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"pwd\"}"));
+        append(new ToolResult("call_1", true, "C:/x", false, 0, 5));
+
+        // 记着的位置要是不作废，这一次答复会原地替换到一条**已经不在对话里**的消息上：
+        // 越界就抛出去，下标还在范围内就是**静默覆盖别人的内容**
+        assertThat(assemble()).extracting(LlmMessage::content)
+                .anyMatch(content -> content.contains("C:/x"))
+                .noneMatch(content -> content.contains("a.java"));
+    }
+
+    @Test
+    @DisplayName("【挂起】正在等人批的那条调用，兜底说的是**真话** —— 它压根没跑过")
+    void anAwaitingApprovalCallIsNotToldItWasInterrupted() {
+        append(new CheckpointCreated("sha0", 0));
+        append(new ToolCallRequested("c1", "run_command", "{\"command\":\"rm -rf build\"}"));
+        append(new ToolApprovalRequested("c1", "这条要问你"));
+
+        // 那条 tool_calls 必须配一条 tool 消息（配对是 API 的硬要求），所以兜底**不能省**；
+        // 但说的得是真话：它没执行过，所以"不要直接重试、先确认文件现状"那句是反的
+        assertThat(assemble()).extracting(LlmMessage::content)
+                .anyMatch(text -> text != null && text.contains("还在等你批准"))
+                .noneMatch(text -> text != null && text.contains("中断了"));
+    }
+
+    @Test
+    @DisplayName("【挂起】批准之后它真的跑了，那句占位被**真结果**换掉 —— 一次调用只留一条 tool 消息")
+    void theAwaitingApprovalPlaceholderIsReplacedOnceItRuns() {
+        append(new CheckpointCreated("sha0", 0));
+        append(new ToolCallRequested("c1", "run_command", "{\"command\":\"rm -rf build\"}"));
+        append(new ToolApprovalRequested("c1", "这条要问你"));
+        append(new ToolResult("c1", true, "删掉了", false, 0, 12L));
+
+        List<LlmMessage> seen = assemble();
+
+        assertThat(seen).extracting(LlmMessage::content)
+                .anyMatch(text -> text != null && text.contains("删掉了"))
+                .noneMatch(text -> text != null && text.contains("等你批准"));
+        // 一个 tool_call_id 只能配一条 tool 消息，两条就是下一次请求 400
+        assertThat(seen).filteredOn(message -> message.role() == LlmRole.TOOL).hasSize(1);
     }
 
     @Test
@@ -868,7 +1016,7 @@ class ContextAssemblerTest {
                 new TodoListUpdated.Item("跑测试", TodoListUpdated.State.IN_PROGRESS))));
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
-        List<ChatMessage> sink = new ArrayList<>();
+        List<LlmMessage> sink = new ArrayList<>();
         projection.advance(events.subList(0, 1), sink);
         projection.advance(events, sink);
 
@@ -895,11 +1043,11 @@ class ContextAssemblerTest {
     @DisplayName("【缓存前提②】只追加不改前缀：新增事件后，原有消息逐条不变")
     void appendingEventsKeepsThePrefixStable() {
         seedSmallConversation();
-        List<ChatMessage> before = assemble();
+        List<LlmMessage> before = assemble();
 
         append(new UserMessage("再说一句"));
         append(new AssistantMessage("好的", null));
-        List<ChatMessage> after = assemble();
+        List<LlmMessage> after = assemble();
 
         // 这是 prompt 缓存能命中的前提：模型服务商按前缀匹配，
         // 前缀一旦被改动，整个前缀都要按未命中价重算

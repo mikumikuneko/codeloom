@@ -2,11 +2,13 @@ package com.codeloom.app.project;
 
 import com.codeloom.app.auth.CurrentUser;
 import com.codeloom.app.auth.ProjectAccess;
+import com.codeloom.app.web.PageLimits;
 import com.codeloom.domain.project.Project;
 import com.codeloom.domain.project.ProjectId;
 import com.codeloom.domain.user.User;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.http.ContentDisposition;
+import com.codeloom.domain.workspace.FileDiff;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -43,20 +45,19 @@ import java.util.List;
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class ProjectController {
 
-    /** 一页最多多少条。给得比"正常一屏"宽得多，它拦的是**没上限**，不是"翻页体验"。 */
-    private static final int MAX_PAGE = 200;
-
     private final CurrentUser currentUser;
     private final ProjectAccess access;
     private final ProjectService projects;
     private final ProjectArchive archives;
+    private final ProjectDiff diffs;
 
     public ProjectController(CurrentUser currentUser, ProjectAccess access, ProjectService projects,
-                             ProjectArchive archives) {
+                             ProjectArchive archives, ProjectDiff diffs) {
         this.currentUser = currentUser;
         this.access = access;
         this.projects = projects;
         this.archives = archives;
+        this.diffs = diffs;
     }
 
     @PostMapping
@@ -102,6 +103,26 @@ public class ProjectController {
     }
 
     /**
+     * 某一轮里某个文件改了什么 —— 一段 diff 正文。
+     *
+     * <p>成员限定，和上面那条一样：这两个动作都是"读这个项目的仓库"。
+     *
+     * <p>{@code commitSha} 来自 {@code WorkspaceChanges} 那条事件，{@code path} 是
+     * **项目相对**路径（事件里记的就是这个形状）。取不到就 404 —— 提交可能已经被回收，
+     * 而"问不出来"和"没改过"是两件事，界面上不该长得一样。
+     */
+    @GetMapping("/{projectId}/diff")
+    public FileDiffView diff(Principal principal,
+                             @PathVariable String projectId,
+                             @RequestParam String commitSha,
+                             @RequestParam String path) {
+        User me = currentUser.require(principal);
+        Project project = access.requireMember(me.id(), ProjectId.of(projectId));
+        FileDiff diff = diffs.of(project, commitSha, path);
+        return new FileDiffView(diff.text(), diff.truncated());
+    }
+
+    /**
      * 「我的项目」——只列这个人参与的，不是全库的。
      *
      * <p>**分页**：这个列表没有上限，而不分页的话，某个用户攒够几千个项目之后
@@ -114,9 +135,9 @@ public class ProjectController {
     @GetMapping
     public List<ProjectView> mine(Principal principal,
                                   @RequestParam(defaultValue = "0") int offset,
-                                  @RequestParam(defaultValue = "50") int limit) {
+                                  @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
-        return projects.listFor(me.id(), Math.clamp(limit, 1, MAX_PAGE), Math.max(0, offset));
+        return projects.listFor(me.id(), Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
     }
 
     @GetMapping("/{projectId}")
@@ -154,6 +175,14 @@ public class ProjectController {
     // 所以只保留邀请链接这一条。
 
     public record CreateProjectRequest(String name) {
+    }
+
+    /**
+     * @param text      统一的 diff 正文
+     * @param truncated 正文被截断了。**必须让界面看得见** —— 一份截断的 diff 与
+     *                  "只改了这么多"长得一模一样
+     */
+    public record FileDiffView(String text, boolean truncated) {
     }
 
 }

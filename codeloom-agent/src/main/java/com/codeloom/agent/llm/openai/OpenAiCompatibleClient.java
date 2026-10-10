@@ -1,7 +1,7 @@
 package com.codeloom.agent.llm.openai;
 
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.llm.LlmResult;
@@ -94,7 +94,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
     // ------------------------------------------------------------------
 
     @Override
-    public LlmResult stream(ChatRequest request, Consumer<StreamEvent> listener, CancellationToken cancellation) {
+    public LlmResult stream(LlmRequest request, Consumer<StreamEvent> listener, CancellationToken cancellation) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(listener, "listener");
         Objects.requireNonNull(cancellation, "cancellation");
@@ -116,7 +116,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
     // 请求构造
     // ------------------------------------------------------------------
 
-    private HttpRequest buildRequest(ChatRequest request) {
+    private HttpRequest buildRequest(LlmRequest request) {
         return HttpRequest.newBuilder(URI.create(endpoint))
                 .header("Content-Type", "application/json; charset=utf-8")
                 .header("Accept", "text/event-stream")
@@ -136,7 +136,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
         return key.strip();
     }
 
-    private byte[] encodeBody(ChatRequest request) {
+    private byte[] encodeBody(LlmRequest request) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", request.model());
         payload.put("stream", true);
@@ -157,7 +157,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
         }
     }
 
-    private Map<String, Object> wireMessage(ChatMessage message, String targetModel) {
+    private Map<String, Object> wireMessage(LlmMessage message, String targetModel) {
         Map<String, Object> node = new LinkedHashMap<>();
         node.put("role", switch (message.role()) {
             case SYSTEM -> "system";
@@ -166,7 +166,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
             case TOOL -> "tool";
         });
         node.put("content", message.textOrEmpty());
-        if (message.role() == com.codeloom.agent.llm.ChatRole.TOOL) {
+        if (message.role() == com.codeloom.agent.llm.LlmRole.TOOL) {
             node.put("tool_call_id", message.toolCallId());
         }
         if (message.hasToolCalls()) {
@@ -178,7 +178,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
         //（「The `reasoning_content` in the thinking mode must be passed back to the API.」）。
         //
         // 这个字段名只出现在**这一行**：领域的名字是中性的 reasoning，
-        // 见 ChatMessage#assistant。换一家叫别的，改这里一处就够。
+        // 见 LlmMessage#assistant。换一家叫别的，改这里一处就够。
         //
         // 没有就不发（而不是发一个空串）：不产思考的模型这一项永远是 null，
         // 于是这个字段对它们根本不存在 —— **不需要一张"哪家要回传"的表**。
@@ -223,7 +223,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
      *
      * @return 该发就是那段思考；不该发、或者压根没有，就是 null
      */
-    private static String reasoningToSend(ChatMessage message, String targetModel) {
+    private static String reasoningToSend(LlmMessage message, String targetModel) {
         String reasoning = message.reasoning();
         if (reasoning == null || message.model() == null) {
             return reasoning;

@@ -5,9 +5,11 @@ import com.codeloom.domain.event.CheckpointCreated;
 import com.codeloom.domain.event.ModelChanged;
 import com.codeloom.domain.event.PersistentEvent;
 import com.codeloom.domain.event.SessionRewound;
+import com.codeloom.domain.event.SessionStarted;
 import com.codeloom.domain.event.SessionStateChanged;
 import com.codeloom.domain.event.SessionSynced;
 import com.codeloom.domain.event.StoredEvent;
+import com.codeloom.domain.event.ToolInterrupted;
 import com.codeloom.domain.event.TurnTokensUsed;
 import com.codeloom.domain.event.WorkspaceChanges;
 import com.codeloom.domain.port.EventStore;
@@ -34,6 +36,10 @@ import java.util.Optional;
 
 /**
  * 「追加一条事件」与「推进它背后的那些行」的**唯一实现点**，两件事在同一个事务里。
+ *
+ * <p><b>落库之后的宣布也从这里走</b>（见 {@link Written}）：全项目只有这一个类往事件流里写，
+ * 所以"谁落库、谁负责让它被看到"这条义务有一个落点，而不是散在调用方的自觉里 ——
+ * 从前散着的时候，回滚、换模型、两条同步一次都没发过，而且不报错。
  *
  * <p>"背后的那些行"是两类，分得很清楚：
  * <ul>
@@ -73,26 +79,77 @@ public class SessionWriter {
     private final SessionRepository sessions;
     private final WorkspaceRepository workspaces;
     private final WorkspaceManager trees;
+    private final EventAnnouncer announcer;
 
     public SessionWriter(EventStore events, SessionRepository sessions, WorkspaceRepository workspaces,
-                         WorkspaceManager trees) {
+                         WorkspaceManager trees, EventAnnouncer announcer) {
         this.events = events;
         this.sessions = sessions;
         this.workspaces = workspaces;
         this.trees = trees;
+        this.announcer = announcer;
     }
 
     /**
      * 一次写入的产物：推进后的会话，以及**这次真正落库的事件**。
      *
-     * <p>事件是给调用方拿去做广播的 —— 而它**必须等这个方法返回之后**再发：
-     * 那时候事务已经提交了。在事务里发的话，订阅者可能先看到一条，然后事务回滚 ——
-     * 于是所有人的界面上都出现了一条**并不存在**的事实，而库里没有。
-     * 广播"提交后才发生"这件事，是靠这个返回值把时机交给调用方来保证的，
-     * 不是靠在这里注册 afterCommit 回调 —— 后者也能做，但那样广播就藏在事务管理器里，
-     * 读代码时看不出"什么时候会发出去"。
+     * <h2>构造它就是宣布它 —— 所以这个构造函数是私有的</h2>
+     * "落库的那几条事件必须送到正在看的人那里"这条义务挂在**构造**上
+     * （交给 {@link EventAnnouncer}，由它等到事务提交）：谁能新建一个 {@code Written}，
+     * 谁就已经把它交了出去。于是这个类里**没有"忘了推"这个状态** ——
+     * 想返回一次写入的结果，就绕不过构造函数。
+     *
+     * <p>它是个内部类而不是 {@code record}，唯一的原因就是这个：私有构造函数得够得着
+     * 外层那个 {@code announcer}。
+     *
+     * <p>{@link #events()} 于是**不再是一条义务**，只是"这次写了哪些"这个事实本身 ——
+     * 有人要拿它的 seq 当投影坐标（见 {@code TurnExecutor.applyOne}），
+     * 有人要从里面找这一轮新建的文件（见 {@code TurnExecutor.createdIn}）。
      */
-    public record Written(Session session, List<StoredEvent> events) {
+    public final class Written {
+
+        private final Session session;
+        private final List<StoredEvent> events;
+
+        private Written(Session session, List<StoredEvent> appended) {
+            this.session = session;
+            this.events = List.copyOf(appended);
+            announcer.announce(this.events);
+        }
+
+        public Session session() {
+            return session;
+        }
+
+        /** 这次真正落库的事件，按落库顺序。 */
+        public List<StoredEvent> events() {
+            return events;
+        }
+    }
+
+    /**
+     * 一条会话的开头：{@code SessionStarted} 和第 0 个 checkpoint，一次落下来。
+     *
+     * <p>两件事必须同一次写入 —— 它们是同一句话的"这棵树上来了条新会话"和"从哪儿开始数"。
+     *
+     * <p><b>第 0 个 checkpoint 为什么不能省</b>：**每轮结束才打下一个 checkpoint**，
+     * 没有它的话"撤销第一轮的全部改动"就没有可回的点，而那是回滚最常用的那一次。
+     * 它记的是这棵树**当时**的位置：同一个人的第二条会话，第 0 个点落在第一条会话干完之后
+     * 的地方，所以"撤销这一条会话的全部改动"退到的正是"它开始说话之前" ——
+     * 换会话本来就不该把代码退回去。
+     *
+     * <p>它不碰会话状态：这两条事件在 {@code TurnStates} 里都不映射迁移。
+     */
+    @Transactional
+    public Written startSession(Session session, Workspace workspace, LeaseToken token) {
+        Objects.requireNonNull(session, "session");
+        Objects.requireNonNull(workspace, "workspace");
+        List<StoredEvent> appended = new ArrayList<>();
+        appended.add(events.append(session.id(), new SessionStarted(
+                workspace.branch(), workspace.path().toString(), workspace.headCommit()), token));
+        appended.add(events.append(session.id(),
+                new CheckpointCreated(workspace.headCommit(), 0), token));
+        return new Written(session, appended);
     }
 
     /**
@@ -234,7 +291,11 @@ public class SessionWriter {
             // HEAD，拿它算出来的是**上一轮**的文件，于是同一个文件被每一轮反复报一遍
             //（见 TurnWorkspace.Commit.created）
             if (commit.created()) {
-                changesOf(session, commit.sha()).ifPresent(record ->
+                // ★ 传的是 `closed`，不是 `session` —— 这条事件和上面那条 checkpoint
+                //   必须记**同一个号**（那个号在 223 行算出来，见那段注释）。
+                //   从前传 `session` 看不出问题，只是因为这条事件当时压根没记号；
+                //   界面上"这一轮改了哪些文件"要挂到哪一轮，全看这个数
+                changesOf(closed, commit.sha()).ifPresent(record ->
                         appended.add(events.append(session.id(), record, token)));
             }
         }
@@ -259,7 +320,7 @@ public class SessionWriter {
         }
 
         sessions.save(closed);
-        return new Written(closed, List.copyOf(appended));
+        return new Written(closed, appended);
     }
 
     /**
@@ -322,12 +383,34 @@ public class SessionWriter {
             boolean truncated = files.size() > MAX_RECORDED_FILES;
             return Optional.of(new WorkspaceChanges(commitSha,
                     truncated ? List.copyOf(files.subList(0, MAX_RECORDED_FILES)) : files,
-                    truncated));
+                    truncated, session.turnIndex()));
         } catch (RuntimeException e) {
             log.warn("这一轮（提交 {}）的改动没能记下来，这一轮将没有改动的记录：{}",
                     commitSha, e.toString());
             return Optional.empty();
         }
+    }
+
+    /**
+     * 把崩溃时悬着的工具调用收成"被打断"，一条一个事件。
+     *
+     * <h2>为什么这里**不**用 {@link #append}</h2>
+     * 状态机把 {@code ToolInterrupted} 映射成回到 {@code THINKING}，那条映射服务的是
+     * "这一轮还在跑，回去接着想"。而崩溃恢复时**没有那一轮** —— 照那条映射写下去，
+     * 会话会挂在一个**没有任何执行者**的"正在跑"上面，而且不报错。
+     *
+     * <p>恢复的立场是"只补事实、不接着跑"（见那篇决策），所以这里只落事件，不碰状态。
+     *
+     * <p>这条和 {@link #startSession} 是同一个形状：**落一条事实，但状态机不该因此动**。
+     */
+    @Transactional
+    public Written interruptUnfinished(Session session, List<String> callIds, LeaseToken token) {
+        Objects.requireNonNull(session, "session");
+        List<StoredEvent> appended = new ArrayList<>();
+        for (String callId : callIds) {
+            appended.add(events.append(session.id(), new ToolInterrupted(callId), token));
+        }
+        return new Written(session, appended);
     }
 
     /**
@@ -367,7 +450,7 @@ public class SessionWriter {
         workspaces.save(workspaces.require(session.workspaceId()).withHeadCommit(toCommitSha));
         Session rewound = session.withTurnIndex(toTurnIndex);
         sessions.save(rewound);
-        // 把事件交出去广播 —— 它是"有人动了我正在看的那棵树"这件事，看的人该立刻看到
+        // 构造 Written 那一刻就宣布了：回滚是"有人动了我正在看的那棵树"，看的人该立刻看到
         return new Written(rewound, List.of(appended));
     }
 
@@ -388,7 +471,7 @@ public class SessionWriter {
                 new SessionSynced(fromHead, toHead), token);
 
         workspaces.save(workspaces.require(session.workspaceId()).withHeadCommit(toHead));
-        // 交出去广播：对方的代码刚进了这棵树，正在看的人该立刻知道
+        // 构造 Written 那一刻就宣布了：对方的代码刚进了这棵树，正在看的人该立刻知道
         return new Written(session, List.of(appended));
     }
 
@@ -434,6 +517,6 @@ public class SessionWriter {
                 new SessionStateChanged(session.state(), next, reason), token));
         Session advanced = session.withState(next);
         sessions.save(advanced);
-        return new Written(advanced, List.copyOf(appended));
+        return new Written(advanced, appended);
     }
 }

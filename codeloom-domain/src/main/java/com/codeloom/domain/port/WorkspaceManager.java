@@ -1,6 +1,7 @@
 package com.codeloom.domain.port;
 
 import com.codeloom.domain.workspace.FileChange;
+import com.codeloom.domain.workspace.FileDiff;
 import com.codeloom.domain.workspace.WorkspaceId;
 
 import java.nio.file.Path;
@@ -198,6 +199,23 @@ public interface WorkspaceManager {
      * @return 改动的文件，按路径排序。没有改动时是空表
      */
     List<FileChange> changesIntroducedBy(Path worktree, String commitSha);
+
+    /**
+     * 这个提交里**某一个文件**改了什么 —— 正文。
+     *
+     * <p>和 {@link #changesIntroducedBy} 是同一件事的两个粒度，问的是同一个区间
+     * （{@code <sha>^ <sha>}），所以两者不会对不上。
+     *
+     * <p><strong>按需取，不存进事件流。</strong>"这一轮改了什么"是每一处读取都要过一遍的东西
+     * （断线补齐、回放、崩溃恢复），而正文只有人点开某一个文件时才需要 ——
+     * 把它塞进事件，等于让每一处读事件的地方都为它买单。
+     *
+     * @param gitPath  git 看得懂的路径（**仓库根相对**）。界面上给的是项目路径，
+     *                 翻那一道在 {@code ProjectLayout#toGitPath}
+     * @param maxChars 正文字符上限。超了**截断并如实标记**，不报错 ——
+     *                 一份被截断的 diff 仍然有用，而"打不开"没有任何用
+     */
+    FileDiff diffOfFile(Path worktree, String commitSha, String gitPath, int maxChars);
 
     // ------------------------------------------------------------------
     // 冲突裁决

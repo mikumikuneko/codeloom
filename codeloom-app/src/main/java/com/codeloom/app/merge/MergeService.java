@@ -8,7 +8,6 @@ import com.codeloom.app.turn.SessionWriter;
 import com.codeloom.domain.event.VerificationResult;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommandExecutor;
-import com.codeloom.domain.port.EventStore;
 import com.codeloom.domain.port.ExecutionLease;
 import com.codeloom.domain.port.LeaseToken;
 import com.codeloom.domain.port.MergeResult;
@@ -66,7 +65,6 @@ public class MergeService {
 
     private final ProjectMerger merger;
     private final ExecutionLease leases;
-    private final EventStore events;
     private final CommandExecutor commands;
     private final SessionCheckpoints checkpoints;
     private final SessionWriter writer;
@@ -75,7 +73,6 @@ public class MergeService {
 
     public MergeService(ProjectMerger merger,
                         ExecutionLease leases,
-                        EventStore events,
                         CommandExecutor commands,
                         SessionCheckpoints checkpoints,
                         SessionWriter writer,
@@ -83,7 +80,6 @@ public class MergeService {
                         WorkspaceRepository workspaces) {
         this.merger = merger;
         this.leases = leases;
-        this.events = events;
         this.commands = commands;
         this.checkpoints = checkpoints;
         this.writer = writer;
@@ -228,7 +224,7 @@ public class MergeService {
         // 输出上限、截断方式、"命令没跑起来"的说法都只定义一次
         VerificationResult evidence = VerificationRunner.run(plan, callId, projectRoot, commands,
                 CancellationToken.none()).evidence();
-        events.append(session.id(), evidence, token);
+        writer.append(session, evidence, token);
 
         if (!evidence.passed()) {
             // 合并**已经成功了**，只是结果不可信。这条日志是给运维看的；

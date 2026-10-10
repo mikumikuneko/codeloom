@@ -1,34 +1,21 @@
 package com.codeloom.agent.context;
 
-import com.codeloom.agent.llm.ChatMessage;
+import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.ToolCall;
-import com.codeloom.domain.event.CheckpointCreated;
 import com.codeloom.domain.event.ContextCompacted;
-import com.codeloom.domain.event.Event;
 import com.codeloom.domain.event.SessionRewound;
-import com.codeloom.domain.event.SessionStateChanged;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.TodoListUpdated;
-import com.codeloom.domain.event.ToolApprovalResolved;
-import com.codeloom.domain.event.ToolCallRequested;
-import com.codeloom.domain.event.ToolCancelled;
-import com.codeloom.domain.event.ToolInterrupted;
-import com.codeloom.domain.event.ToolResult;
 import com.codeloom.domain.event.ToolResultsCleared;
-import com.codeloom.domain.event.TurnTokensUsed;
 import com.codeloom.domain.user.UserId;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * 把会话的事件流**投影**成给模型的消息列表。
@@ -74,11 +61,12 @@ public final class ContextAssembler {
      */
     private final Function<UserId, String> displayNameOf;
 
-    /** 没有查名字这一层时的装配器（测试、以及任何不关心留言来源的调用方）。 */
-    public ContextAssembler() {
-        this(id -> null);
-    }
-
+    /**
+     * <p><b>这一层必须由调用方给出来</b>（没有"默认不带名字"的构造）：装配出来的东西
+     * 就是发给模型的那份输入，而"这句话是谁说的"在里面是**承重**的 ——
+     * 一个悄悄漏掉这一层的装配器不会报错，只会让模型分不清自己用户的要求和别人的留言。
+     * 不要名字的地方就明写 {@code id -> null}（那时{@code MessageFold} 会回退成"协作者"）。
+     */
     public ContextAssembler(Function<UserId, String> displayNameOf) {
         this.displayNameOf = Objects.requireNonNull(displayNameOf, "displayNameOf");
     }
@@ -88,8 +76,8 @@ public final class ContextAssembler {
      * @param systemPrompt 会话级系统提示词。**里面不能放每次都变的内容**
      *                     （比如当前时间戳），否则每一轮都会缓存未命中
      */
-    public List<ChatMessage> assemble(List<StoredEvent> events, String systemPrompt) {
-        List<ChatMessage> messages = new ArrayList<>();
+    public List<LlmMessage> assemble(List<StoredEvent> events, String systemPrompt) {
+        List<LlmMessage> messages = new ArrayList<>();
         assembleInto(events, systemPrompt, messages);
         // 复制一份再交出去 —— 返回值不可变是这个类的契约
         return List.copyOf(messages);
@@ -103,7 +91,7 @@ public final class ContextAssembler {
      * 不会各写一遍然后慢慢分叉。
      */
     public void assembleInto(List<StoredEvent> events, String systemPrompt,
-                             List<ChatMessage> messages) {
+                             List<LlmMessage> messages) {
         projection(systemPrompt).advance(events, messages);
     }
 
@@ -122,8 +110,26 @@ public final class ContextAssembler {
      * 而 seq 是它唯一稳定的坐标。
      */
     public Projection projection(String systemPrompt) {
-        return new Projection(systemPrompt, displayNameOf);
+        return new Projection(systemPrompt, displayNameOf, null);
     }
+
+    /**
+     * 同上，另给它一条**重新取到整条流**的路。
+     *
+     * <p>给"分页喂"的调用方用：那种调用方每次只递一片，而投影遇到改写类事件要推倒重来时，
+     * 需要的是**整条流**而不是那一片 —— 没这条来源，它就只能拿那一片凑，
+     * 结果是前面那一整段静默消失。见 {@link Projection#fold}。
+     *
+     * @param wholeStream 取当前整条事件流。**每次重来都会调一次**，所以它得是"去读最新的"，
+     *                    不是一份事先拍下来的快照
+     */
+    public Projection projection(String systemPrompt, Supplier<List<StoredEvent>> wholeStream) {
+        return new Projection(systemPrompt, displayNameOf,
+                Objects.requireNonNull(wholeStream, "wholeStream"));
+    }
+
+    /** UTF-16 下一个字符最多占的字节数。见 {@code Projection#approximateSizeBytes}。 */
+    private static final int BYTES_PER_CHAR_WORST_CASE = 2;
 
     /** 一条可以往前推进的投影，见 {@link #projection(String)}。 */
     public static final class Projection {
@@ -132,12 +138,18 @@ public final class ContextAssembler {
 
         /** 见 {@link ContextAssembler#displayNameOf} —— 投影是静态嵌套类，所以这里各持一份。 */
         private final Function<UserId, String> displayNameOf;
+
+        /**
+         * 推倒重来时去哪取**整条流**。null 表示调用方保证递进来的每次都是整条流（或它的前缀）——
+         * 一次装配整条流的调用方就是这样，它们不用给。
+         */
+        private final Supplier<List<StoredEvent>> wholeStream;
         /** 已经处理过的事件里最大的那个 seq。0 = 一条都还没处理（seq 从 1 开始，见 EventEnvelope）。 */
         private long foldedUpTo;
         /** 把事件折成消息的那一个。推倒重来时会换一个新的（见 {@link #begin}）。 */
         private MessageFold messageFold;
         /** 投影的产出：交给模型的那串消息。**只往尾部追加** —— 前缀逐字节不变是缓存的前提（见类注释）。 */
-        private final List<ChatMessage> messages = new ArrayList<>();
+        private final List<LlmMessage> messages = new ArrayList<>();
         /**
          * 压缩的水位线：**序号不超过它的事件不再投影** —— 它们已经被摘要替换掉了
          * （见 {@code ContextCompacted}）。0 = 没压过。
@@ -145,22 +157,28 @@ public final class ContextAssembler {
         private long watermark;
         /** 清单现在的样子。**不受水位线约束**：它每一轮都被重新注入，"压缩之后计划还在"正是它的用处。 */
         private final TodoTracker todos = new TodoTracker();
-
         /** 这条对话里 {@code read_file} 读过哪些文件（工作区相对路径），见 {@link #readPaths()}。 */
-        private final Set<String> readPaths = new LinkedHashSet<>();
-        /** 每个调用 id 最后一次请求长什么样，见 {@link #pendingApprovedCall()}。 */
-        private final Map<String, ToolCall> requests = new LinkedHashMap<>();
-        /** 已经有**结局**的那些调用（跑完了 / 被取消 / 被中断）。 */
-        private final Set<String> settled = new HashSet<>();
-        /**
-         * 尾部那只**改变对话形状**的事件是什么 —— {@link #benignAtTheTail} 那条白名单
-         * 之外的事件都会把它改写。
-         */
-        private Event shapeTail;
+        private final ReadPathTracker reads = new ReadPathTracker();
+        /** 尾部那次批准了、但还没补跑的调用，见 {@link #pendingApprovedCall()}。 */
+        private final PendingCallTracker approvals = new PendingCallTracker();
 
-        private Projection(String systemPrompt, Function<UserId, String> displayNameOf) {
+        /**
+         * 上面那几份事实的**全部**。
+         *
+         * <p>它存在的理由只有一条：**"全部"只写在这里** —— 折事件时遍历它、推倒重来时也
+         * 遍历它，于是那两份动作不可能漏掉某一份。一个一个点名（先前那种写法）迟早会有人
+         * 添了一份、却只更新了这两处之一，**而那不会报错** —— 只会让它带着被退掉的那段
+         * 时间的痕迹活下来。
+         *
+         * <p>顺序无所谓：几份事实之间没有依赖，各自看各自的事件。
+         */
+        private final List<Derived> derived = List.of(todos, reads, approvals);
+
+        private Projection(String systemPrompt, Function<UserId, String> displayNameOf,
+                           Supplier<List<StoredEvent>> wholeStream) {
             this.systemPrompt = systemPrompt;
             this.displayNameOf = displayNameOf;
+            this.wholeStream = wholeStream;
         }
 
         /**
@@ -178,94 +196,43 @@ public final class ContextAssembler {
         }
 
         /**
+         * 这串消息**大致**占多少字节 —— 只给"这张表最多占多少内存"画个界用，不求精确。
+         *
+         * <p>算正文与工具参数：它们是投影里唯一会长的部分。
+         *
+         * <p>**按最坏情况算**（一个字符两个字节）：中文在内存里就是两字节，
+         * 而这是个上界 —— 宁可高估。高估的后果是早淘汰一次，低估的后果是内存没有边界。
+         */
+        public long approximateSizeBytes() {
+            long bytes = 0;
+            for (LlmMessage message : messages) {
+                if (message.content() != null) {
+                    bytes += message.content().length();
+                }
+                for (ToolCall call : message.toolCalls()) {
+                    bytes += call.argumentsJson().length();
+                }
+            }
+            return bytes * BYTES_PER_CHAR_WORST_CASE;
+        }
+
+        /**
          * 这条对话里读过哪些文件（工作区相对路径）。
          *
-         * <p>"读过才许覆盖"这条规则就是拿它重建的：一个文件的改动权限来自**这条对话里
-         * 它被读过**，而那是历史里的既成事实。
-         *
-         * <p>参数解析不了的那次调用跳过（不是跳过整条账）：模型偶尔写出不合法的参数，
-         * 那一次本来就没读成。
+         * <p>"读过才许覆盖"这条规则就是拿它重建的，见 {@link ReadPathTracker}。
          */
         public Set<String> readPaths() {
-            return Set.copyOf(readPaths);
+            return reads.paths();
         }
 
         /**
          * 上一轮里**批准了、但还没补跑**的那次调用。
          *
-         * <p>它就是"挂起等人批 → 用户点了批准 → 进程在那之后退出了"那条路的入口：
-         * 整段历史里那次调用没有结局，而尾部那只改变形状的事件正是批准答复。
-         *
-         * <p>这个状态是**跟着事件走**的（不是每次回头扫一遍历史）：
-         * 尾部那只事件是不是批准答复、那个调用有没有结局、那个调用请求长什么样 ——
-         * 三件事各自记住就够了。白名单外的事件都会把"尾部"改写掉
-         *（所以回滚、新的用户消息一来，它就自己清了）。
+         * <p>它就是"挂起等人批 → 用户点了批准 → 进程在那之后退出了"那条路的入口。
+         * 判据见 {@link PendingCallTracker}。
          */
         public Optional<ToolCall> pendingApprovedCall() {
-            if (shapeTail == null
-                    || !(shapeTail instanceof ToolApprovalResolved resolved)
-                    || !resolved.approved()) {
-                return Optional.empty();
-            }
-            String callId = resolved.callId();
-            if (settled.contains(callId)) {
-                return Optional.empty();
-            }
-            return Optional.ofNullable(requests.get(callId));
-        }
-
-        /** 尾部那些**不改变对话形状**的事件。 */
-        private static boolean benignAtTheTail(Event event) {
-            return event instanceof SessionStateChanged
-                    || event instanceof TurnTokensUsed
-                    || event instanceof CheckpointCreated
-                    || event instanceof ContextCompacted;
-        }
-
-        /**
-         * 更新那几份派生状态 —— **这五份只在这里写**（清零在 {@link #startOver()} 里做）：
-         * 任务清单、读过哪些文件、每次工具请求长什么样、已经有结局的调用、
-         * 尾部那只改变对话形状的事件。
-         *
-         * <p>两条约束：**每条事件都要喂一遍**（包括不产出消息的那些）；**同一条只能喂一遍** ——
-         * 清单是无条件追加的，喂两遍它记两份，而其余几项幂等、看不出问题，这种错不会露头。
-         */
-        private void derive(StoredEvent stored) {
-            Event event = stored.event();
-            todos.accept(stored);
-
-            if (event instanceof ToolCallRequested(String id, String toolName, String argumentsJson)) {
-                requests.put(id, new ToolCall(id, toolName,
-                        argumentsJson));
-                if ("read_file".equals(toolName)) {
-                    readPathOf(argumentsJson).ifPresent(readPaths::add);
-                }
-            } else if (event instanceof ToolResult result) {
-                settled.add(result.callId());
-            } else if (event instanceof ToolCancelled(String callId)) {
-                settled.add(callId);
-            } else if (event instanceof ToolInterrupted(String callId)) {
-                settled.add(callId);
-            }
-
-            if (!benignAtTheTail(event)) {
-                shapeTail = event;
-            }
-        }
-
-        /**
-         * 从一次调用的参数里取出它读的是哪个文件 —— 取不到就当这次没读过，见 {@link #readPaths()}。
-         *
-         * <p>{@code path} 这个键名是**硬写的**，得和 ReadFileTool 的 JSON schema 一致：
-         * 那边把参数改名而这里没跟着改，这笔账就静默地不再记。
-         */
-        private static Optional<String> readPathOf(String argumentsJson) {
-            try {
-                String path = MAPPER.readTree(argumentsJson).path("path").asText("");
-                return path.isBlank() ? Optional.empty() : Optional.of(path);
-            } catch (JsonProcessingException e) {
-                return Optional.empty();
-            }
+            return approvals.pendingApprovedCall();
         }
 
         /**
@@ -274,7 +241,7 @@ public final class ContextAssembler {
          * <p>{@code events} 是**同一条不断变长的流**（调用方每轮往里追加），
          * 这里只折 seq 比上次大的那些。
          */
-        public void advance(List<StoredEvent> events, List<ChatMessage> sink) {
+        public void advance(List<StoredEvent> events, List<LlmMessage> sink) {
             fold(events);
 
             sink.clear();
@@ -286,7 +253,7 @@ public final class ContextAssembler {
             // 这也正是它比"一条工具结果"值钱的地方 —— 工具结果会被压缩清掉，它不会
             TodoListUpdated current = todos.current();
             if (current != null && !current.items().isEmpty()) {
-                sink.add(ChatMessage.user(TODO_HEADER + renderTodos(current.items())));
+                sink.add(LlmMessage.user(TODO_HEADER + renderTodos(current.items())));
             }
         }
 
@@ -295,6 +262,12 @@ public final class ContextAssembler {
          *
          * <p>给"养着一条跨轮投影"的调用方用：它每轮只需要让投影追上库里最新的一条，
          * 上下文等真要发给模型时再 {@link #advance} 要。
+         *
+         * <p>{@code events} **可以只是一片**（分页喂的调用方就是这么喂的）—— 但遇到
+         * 改写类事件要推倒重来时，重来要的是**整条流**，所以那时会用构造时给的那条来源
+         * 重新取一遍（见 {@link ContextAssembler#projection(String, Supplier)}）。
+         * 没给来源的调用方只能在 {@code events} 上重来：那**只在"递进来的就是整条流"时**
+         * 才成立。
          */
         public void fold(List<StoredEvent> events) {
             List<StoredEvent> fresh = new ArrayList<>();
@@ -306,8 +279,11 @@ public final class ContextAssembler {
             if (rewritesHistory(fresh)) {
                 startOver();
                 // ★ 重来就是**整条流**再来一遍，不是"接着折新来的那批" ——
-                // 只折新的等于把前面全丢了
-                fresh = events;
+                // 只折新的等于把前面全丢了。
+                //
+                // 而分页喂时递进来的这一片**不是整条流**：拿它当整条流，前面那一整段会静默消失
+                //（实测：601 条事件里前 500 条直接没了），所以要回去问那条来源
+                fresh = wholeStream != null ? wholeStream.get() : events;
             }
             if (messageFold == null) {
                 begin(events);
@@ -315,8 +291,10 @@ public final class ContextAssembler {
 
             for (StoredEvent stored : fresh) {
                 // 派生事实看**所有**事件 —— 压缩的水位线管不着它们（"压缩之后计划还在"
-                // 正是清单存在的理由），但回滚管得着（见 TodoTracker）
-                derive(stored);
+                // 正是清单存在的理由）；而回滚管得着，那由它们各自消化（见 Derived）
+                for (Derived fact : derived) {
+                    fact.accept(stored);
+                }
                 if (stored.seq() > watermark) {
                     messageFold.accept(stored);
                 }
@@ -339,20 +317,15 @@ public final class ContextAssembler {
          * 把投影退回"一条都还没处理"：清完之后下一个喂进来的必须是**整条流**
          *（{@link #fold(List)} 就是这么用的 —— 清完立刻 {@link #begin(List)} 重建）。
          *
-         * <p>它和 {@link #derive} 是一对：那边写的那五份派生状态，这里一份都不能漏 ——
-         * **漏了不会报错**，那笔账会带着被退掉的那段时间的痕迹活过来（比如 {@code readPaths}
-         * 里留着一条这条时间线上没读过的文件，模型于是能覆盖它）。
+         * <p>那几份派生事实由 {@link #derived} 那一个遍历清掉：它们各自还留着上一次折的
+         * 结果，不清的话这次重折会在旧账上再记一遍。**一份都不能漏**，所以这里不点名。
          */
         private void startOver() {
             messages.clear();
             messageFold = null;
             foldedUpTo = 0;
             watermark = 0;
-            todos.clear();
-            readPaths.clear();
-            requests.clear();
-            settled.clear();
-            shapeTail = null;
+            derived.forEach(Derived::clear);
         }
 
         /**
@@ -365,7 +338,7 @@ public final class ContextAssembler {
          */
         private void begin(List<StoredEvent> events) {
             if (systemPrompt != null && !systemPrompt.isBlank()) {
-                messages.add(ChatMessage.system(systemPrompt));
+                messages.add(LlmMessage.system(systemPrompt));
             }
             // 被清过正文的那些调用必须**在遍历之前**扫出来：清理事件排在它清的那些
             // 结果**后面**，边遍历边应用就得回头改已经投影出去的消息
@@ -378,9 +351,6 @@ public final class ContextAssembler {
                 watermark = compaction.droppedUpToSeq();
             }
         }
-
-        /** 派生那几份状态时要看工具调用的参数（读过哪个文件），所以这里也要会读 JSON。 */
-        private static final ObjectMapper MAPPER = new ObjectMapper();
 
         /** 清单消息的开头。同样得点明"这是状态，不是谁刚说的一句话"。 */
         private static final String TODO_HEADER = "[当前任务清单 —— 你自己列的，用 todo_write 更新它]\n";

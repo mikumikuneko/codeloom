@@ -5,6 +5,7 @@ import com.codeloom.domain.event.Event;
 import com.codeloom.domain.event.EventType;
 import com.codeloom.domain.event.PersistentEvent;
 import com.codeloom.domain.event.StoredEvent;
+import com.codeloom.domain.event.TurnTokensUsed;
 import com.codeloom.domain.port.EventDiscard;
 import com.codeloom.domain.port.EventStore;
 import com.codeloom.domain.port.LeaseToken;
@@ -23,6 +24,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalInt;
 
 /**
  * {@link EventStore} 的持久化实现。
@@ -129,6 +131,19 @@ public class MyBatisEventStore implements EventStore, EventDiscard {
     @Override
     public long lastSeq(SessionId sessionId) {
         return mapper.lastSeq(sessionId.value());
+    }
+
+    @Override
+    public OptionalInt lastContextTokens(SessionId sessionId) {
+        EventRow row = mapper.findLastOfType(sessionId.value(), EventType.TURN_TOKENS_USED.name());
+        if (row == null) {
+            return OptionalInt.empty();
+        }
+        // 最后一条收尾可能压根没调过模型（被取消），那种读数就是空 —— 按"问不出来"处理，
+        // 由调用方决定退回去算一遍还是继续
+        return toStoredEvent(row).event() instanceof TurnTokensUsed used && used.hasContext()
+                ? OptionalInt.of(used.contextTokens())
+                : OptionalInt.empty();
     }
 
     /**

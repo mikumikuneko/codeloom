@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError, sessions, type Session } from '@/lib/api'
-import { turnChanges, type StreamItem, type TurnChanges } from '@/lib/sessionStream'
+import { changeTotals, changesByTurnIndex, type StreamItem, type TurnFiles } from '@/lib/sessionStream'
 
 /** 一次能看见几条。上下再多了就折叠成「↑ N more」。 */
 const WINDOW = 6
@@ -19,7 +19,7 @@ interface Entry {
   mark: Mark
   /** 这个位置**后面**那句话（= 选中它会撤销的第一句）。`(current)` 那条没有 —— 它说的是"此刻在哪" */
   said: string | null
-  change: TurnChanges | null
+  change: TurnFiles | null
   isNow: boolean
 }
 
@@ -106,8 +106,24 @@ export function RewindPicker({
     //
     // 所以编号 k 那个位置（第 k 次交互结束）配的是**第 k+1 句话**，而最后一个位置
     // 没有"后面那句话" —— 它就是"我现在在这儿"，单独成一行 (current)。
+    // 每一行配的"那句话"：**按用户消息的顺序取**（第 k 号的位置配第 k+1 句）。
+    //
+    // 号是"到这儿为止完成了几次交互"（见 CheckpointCreated），而**一次交互就是一句用户消息**
+    // —— 挂着等人批不算跑完、号不推；批准之后续跑**仍然是同一句的那一轮**，跑完才推。
+    // 所以"完成 k 次"和"说过 k 句"永远对得上，按消息顺序取就是按号取。
+    //
+    // **按用户消息的顺序取**（而不是去数流里的块）：这一列的行是**后端的号**
+    //（它们列的是 checkpoint），而"说过 k 句"和那个号**同源** —— 一次交互就是一句话。
+    // 块号现在虽然也等于"第几条用户消息"（见 groupIntoTurns），但那是那边的事，
+    // 这里跟的是号本身的来源
     const said = items.flatMap((item) => (item.kind === 'user' ? [item.text] : []))
-    const changes = turnChanges(items)
+
+    // **改动按后端那个号取，不按位置推。**
+    //
+    // 这一列的行本来就是一个后端号（它列的是 checkpoint），而"这一轮改了哪些文件"
+    // 那条事件现在也带着同一个号（见后端的 `WorkspaceChanges.turnIndex`）——
+    // 两边都是那个号，谁也不去数第二遍，也就没有"两套编号错开"这回事。
+    const changes = changesByTurnIndex(items)
 
     // 「现在」取的是**流里最后一个标记**，而不是"编号最大的那个位置"。两者一般是一回事，
     // 但一轮正挂在审批上时不是：那个位置在编号上属于**上一次交互结束**（这一轮还没跑完，
@@ -282,12 +298,11 @@ function More({ count, down = false }: { count: number; down?: boolean }) {
  *
  * <p>改动太多时后端只记下了前一批，那个数字如实带个"+" —— 不拿一个偏小的数当完整的报。
  */
-function describe(change: TurnChanges | null): string {
+function describe(change: TurnFiles | null): string {
   if (change === null || change.files.length === 0) {
     return '没有代码改动'
   }
-  const added = change.files.reduce((sum, file) => sum + file.added, 0)
-  const deleted = change.files.reduce((sum, file) => sum + file.deleted, 0)
+  const { added, deleted } = changeTotals(change.files)
   return `${change.files.length}${change.truncated ? '+' : ''} 个文件 · +${added} −${deleted}`
 }
 
@@ -299,8 +314,8 @@ function describe(change: TurnChanges | null): string {
  * 而每一轮改动的 {@code turn} 数是"第几条用户消息"（从 0 起）。两个都是**每次交互 +1**，
  * 所以位置 {@code at} 后面那句话就是第 {@code at} 条用户消息（0 起），两者**直接相等**。
  */
-function changeOfTurn(changes: TurnChanges[], at: number): TurnChanges | null {
-  return changes.find((entry) => entry.turn === at) ?? null
+function changeOfTurn(changes: Map<number, TurnFiles>, at: number): TurnFiles | null {
+  return changes.get(at) ?? null
 }
 
 /**

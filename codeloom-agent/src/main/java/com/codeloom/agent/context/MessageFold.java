@@ -1,6 +1,6 @@
 package com.codeloom.agent.context;
 
-import com.codeloom.agent.llm.ChatMessage;
+import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.ToolCall;
 import com.codeloom.domain.event.AgentNoteDelivered;
 import com.codeloom.domain.event.AssistantDelta;
@@ -52,7 +52,7 @@ import java.util.function.Function;
  */
 final class MessageFold {
 
-    private final List<ChatMessage> messages;
+    private final List<LlmMessage> messages;
     /** 正文已经被清掉的那些调用 id（由 {@link ContextAssembler.Projection} 在折之前扫出来）。 */
     private final Set<String> clearedCallIds;
     /** 见 {@link ContextAssembler} 的那个查名字的办法 —— 它只用在一处（别人捎来的留言）。 */
@@ -88,7 +88,7 @@ final class MessageFold {
      *
      * <p>一次回复可能被投影成**多条** assistant 消息（模型一次发了两个工具调用、执行时按批切开，
      * {@code ToolCallRequested} 是分批落库的），而带 {@code tool_calls} 的消息**必须**带上当时的
-     * {@code reasoning_content}（见 {@link com.codeloom.agent.llm.ChatMessage#assistant}）——
+     * {@code reasoning_content}（见 {@link com.codeloom.agent.llm.LlmMessage#assistant}）——
      * 在第一条 flush 时清掉的话，第二条发出去就是 400：
      * 「The `reasoning_content` in the thinking mode must be passed back to the API.」
      *
@@ -127,6 +127,15 @@ final class MessageFold {
     private final Set<String> openCallIds = new LinkedHashSet<>();
 
     /**
+     * 已经问了、还没答复的那些调用。
+     *
+     * <p>兜底那条合成消息（见 {@link #closeOpenCalls()}）要**分开说**：
+     * "执行到一半中断了"是给真中断的调用说的，而**正在等人批**的那条压根没跑过 ——
+     * 对它说"不要直接重试，先确认相关文件的当前状态"，方向是反的。
+     */
+    private final Set<String> awaitingApproval = new LinkedHashSet<>();
+
+    /**
      * 每个 {@code tool_call_id} 的答复已经落在消息列表的哪个下标上，见 {@link #answerCall}。
      *
      * <p>存**下标**而不是消息本身，是因为要的是"原地换掉" —— 位置必须留在
@@ -134,7 +143,7 @@ final class MessageFold {
      */
     private final Map<String, Integer> toolMessageAt = new HashMap<>();
 
-    MessageFold(List<ChatMessage> messages, Set<String> clearedCallIds,
+    MessageFold(List<LlmMessage> messages, Set<String> clearedCallIds,
                 Function<UserId, String> displayNameOf) {
         this.messages = messages;
         this.clearedCallIds = clearedCallIds;
@@ -180,7 +189,10 @@ final class MessageFold {
             }
             // 审批请求本身**不进上下文**："模型请求了这次调用"已经由上面的
             // ToolCallRequested 表达了，再来一条只会让模型以为有两回事
-            case ToolApprovalRequested ignored -> {
+            case ToolApprovalRequested asked -> {
+                // 只是记下"这条在等人" —— 挂起那一刻它的兜底说法和真中断的不一样，
+                // 见 closeOpenCalls。这条事件本身**不进上下文**（理由见下面那段）
+                awaitingApproval.add(asked.callId());
             }
             case ToolApprovalResolved resolved -> {
                 // 答复要进 —— 模型必须知道那个调用是被批了还是被拒了，
@@ -192,6 +204,7 @@ final class MessageFold {
                 // 回答同一个 tool_call_id —— 下一次请求直接 400。
                 flush();
                 openCallIds.remove(resolved.callId());
+                awaitingApproval.remove(resolved.callId());
                 answerCall(resolved.callId(), answerTo(resolved));
             }
             // 拒绝的**收尾标记**。**不进上下文** —— 模型要听的那句话已经由上面那条答复
@@ -202,7 +215,7 @@ final class MessageFold {
             }
             case UserMessage user -> {
                 flush();
-                messages.add(ChatMessage.user(user.text()));
+                messages.add(LlmMessage.user(user.text()));
             }
             case AgentNoteDelivered note -> {
                 // **来源必须标出来**。消息格式里没有"第三方"这个角色，所以别人的留言
@@ -210,7 +223,7 @@ final class MessageFold {
                 // 不标的话，它会照着**别人的请求**去改自己这边的代码，
                 // 而那很可能违背它自己用户的意图
                 flush();
-                messages.add(ChatMessage.user(
+                messages.add(LlmMessage.user(
                         "[来自 " + senderOf(displayNameOf, note.fromUserId()) + " 的 agent 的留言]\n"
                                 + note.text()));
             }
@@ -219,7 +232,7 @@ final class MessageFold {
                 // 模型要能分清"用户说的"和"平台说的"，而且它在事件流里
                 // 也是独立类型，审计时不会跟用户发言混起来
                 flush();
-                messages.add(ChatMessage.user("[平台指令] " + instruction.text()));
+                messages.add(LlmMessage.user("[平台指令] " + instruction.text()));
             }
             case AssistantMessage assistant -> {
                 flush();
@@ -318,7 +331,38 @@ final class MessageFold {
      */
     private void truncateTo(Long checkpointSeq) {
         Integer boundary = checkpointSeq == null ? null : checkpointIndexes.get(checkpointSeq);
-        messages.subList(boundary == null ? conversationStart : boundary, messages.size()).clear();
+        int from = boundary == null ? conversationStart : boundary;
+        messages.subList(from, messages.size()).clear();
+
+        // 那三张表记的都是**消息里的位置**，而尾巴刚被砍掉了 —— 砍完不收拾，它们的下标
+        // 就指到别的东西身上去：
+        //
+        //   · toolMessageAt：同一个调用 id 再被答复时，原地替换会**覆盖一条无关的消息**，
+        //     下标要是越了界就直接抛出去
+        //   · checkpointIndexes：再回滚一次会按旧下标截，截错地方
+        //   · openCallIds：收尾时会给一个"请求都已经不在对话里"的调用补一条结果 ——
+        //     那条 tool 消息前面没有对应的 tool_calls，下一次请求直接 400
+        toolMessageAt.values().removeIf(at -> at >= from);
+        checkpointIndexes.values().removeIf(at -> at >= from);
+        openCallIds.removeIf(callId -> !requestedWithin(callId, from));
+        awaitingApproval.removeIf(callId -> !requestedWithin(callId, from));
+    }
+
+    /**
+     * 这次调用的**请求**还留在切点之前吗。
+     *
+     * <p>问的是消息里还在不在，而不是另记一张表：一次调用的请求落在哪条 assistant 消息上，
+     * 已经从 {@code messages} 本身读得出来。
+     */
+    private boolean requestedWithin(String callId, int from) {
+        for (LlmMessage message : messages.subList(0, from)) {
+            for (ToolCall call : message.toolCalls()) {
+                if (call.id().equals(callId)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -333,7 +377,7 @@ final class MessageFold {
      * <p>附带的理由：摘要讲的是"之前聊过什么"，那本来就属于**对话**，不是"这次要遵守的设定"。
      */
     void acceptSummary(String summary) {
-        messages.add(ChatMessage.user(SUMMARY_HEADER + summary));
+        messages.add(LlmMessage.user(SUMMARY_HEADER + summary));
     }
 
     /**
@@ -349,11 +393,15 @@ final class MessageFold {
      */
     void closeOpenCalls() {
         for (String callId : openCallIds) {
-            answerCall(callId,
-                    "（这次调用没有留下结果 —— 那一轮在它执行期间中断了。"
+            // **两种处境两句话**：等人批的那条**压根没跑过** —— 对它说"不要直接重试，
+            // 先确认相关文件的当前状态"是反的（那条命令还没执行）
+            answerCall(callId, awaitingApproval.contains(callId)
+                    ? "（这次调用还在等你批准，没有结果。）"
+                    : "（这次调用没有留下结果 —— 那一轮在它执行期间中断了。"
                             + "不要直接重试，先确认相关文件的当前状态。）");
         }
         openCallIds.clear();
+        awaitingApproval.clear();
     }
 
     /**
@@ -368,7 +416,7 @@ final class MessageFold {
      * 的 assistant 消息后面，挪了反而配不上对。
      */
     private void answerCall(String callId, String content) {
-        ChatMessage message = ChatMessage.toolResult(callId, content);
+        LlmMessage message = LlmMessage.toolResult(callId, content);
         Integer at = toolMessageAt.get(callId);
         if (at == null) {
             toolMessageAt.put(callId, messages.size());
@@ -388,8 +436,8 @@ final class MessageFold {
         // 同一回复的下一个批次还要用它，清了的话那一条就是一个 400。
         // `responseModel` 同理：它和那份思考是一体的
         messages.add(pendingCalls.isEmpty()
-                ? ChatMessage.assistant(text, responseModel, responseReasoning)
-                : ChatMessage.assistantWithToolCalls(text, List.copyOf(pendingCalls),
+                ? LlmMessage.assistant(text, responseModel, responseReasoning)
+                : LlmMessage.assistantWithToolCalls(text, List.copyOf(pendingCalls),
                         responseModel, responseReasoning));
         pendingText = null;
         pendingCalls.clear();

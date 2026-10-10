@@ -73,6 +73,17 @@ public interface EventMapper {
     long lastSeq(@Param("sessionId") String sessionId);
 
     /**
+     * 这条会话**最后一条**指定类型的事件；一条都没有时返回 null。
+     *
+     * <p>走 {@code (session_id, id)} 那条索引**倒着**扫：问它的都是"最近怎么样"，
+     * 而它要找的那类事件通常每轮都写，所以几行之内就命中。
+     */
+    @Select("SELECT " + EventRow.COLUMNS
+            + " FROM `event` WHERE session_id = #{sessionId} AND `type` = #{type}"
+            + " ORDER BY id DESC LIMIT 1")
+    EventRow findLastOfType(@Param("sessionId") String sessionId, @Param("type") String type);
+
+    /**
      * 删掉这条会话的全部事件 —— 见类注释，这是两条 DELETE 里按会话的那一条。
      *
      * <p>它**除了让 seq 出现空洞，不做任何事**：删掉的那段 seq 不会再被分配给别人，

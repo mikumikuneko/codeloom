@@ -104,6 +104,13 @@ codeloom:
   # 别调太小：一个跑构建的长工具调用会在中途失去锁。
   lease-ttl: ${CODELOOM_LEASE_TTL:30s}
 
+  # 进程内存里常驻多少条会话投影（见 SessionProjections）。两条上限**取先到的那条**：
+  # 条数、以及它们大致占的字节。超了就把最久没用过的放下 —— 它下次被用到时从事件流重建。
+  #
+  # 字节那条不能省：一条 500 轮的会话和一条 2 轮的差几个数量级，只看条数等于没有内存边界。
+  live-projections: ${CODELOOM_LIVE_PROJECTIONS:128}
+  live-projections-bytes: ${CODELOOM_LIVE_PROJECTIONS_BYTES:32MB}
+
   # 崩溃恢复没有开关：启动时把"执行到一半的工具调用"补写成 ToolInterrupted（防止重放），
   # 到此为止 —— 不自动接着跑。见 CrashRecovery 的类注释。
 
@@ -213,4 +220,7 @@ management:
 
 logging:
   level:
-    com.codeloom: DEBUG
+    # 默认 INFO。**别默认开 DEBUG**：那一档下 MyBatis 会把每条 SQL 的绑定参数打出来，
+    # 而参数里有用户 API Key 的密文、口令哈希、以及事件的 payload（也就是整段会话正文）。
+    # 要看 SQL 时临时开：LOGGING_LEVEL_COM_CODELOOM=DEBUG
+    com.codeloom: INFO

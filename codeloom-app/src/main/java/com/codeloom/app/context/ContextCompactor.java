@@ -1,8 +1,8 @@
 package com.codeloom.app.context;
 
 import com.codeloom.agent.context.ContextAssembler;
-import com.codeloom.agent.llm.ChatMessage;
-import com.codeloom.agent.llm.ChatRequest;
+import com.codeloom.agent.llm.LlmMessage;
+import com.codeloom.agent.llm.LlmRequest;
 import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.agent.llm.LlmResult;
@@ -30,6 +30,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -50,6 +51,10 @@ import java.util.regex.Pattern;
  * <h2>触发看的是"估算和真实读数里较大的那个"</h2>
  * 这一轮要发的请求确实还没有真实数字，但**上一轮收尾时服务商亲口报过一个**
  * （{@code TurnTokensUsed.contextTokens}），而中间只隔了一条回复 —— 它是**手边就有的**。
+ *
+ * <p>这条读数还兼着一道**便宜的闸**：只要有值、又离水位还远，这一轮连历史都不用读
+ * （见 {@link #compactIfNeeded}）。它会漏掉的只有"上一轮收尾之后新添的那点内容"，
+ * 而压缩点在一轮开始、那时用户那句话**还没落库**。
  *
  * <p>两个参考实现（Claude Code、deepseek harness）都是这个方向，而且都不是"纯估算"：
  * Claude Code 的文档明说判断依据是**最近一次响应回报的 token 数**；
@@ -162,11 +167,19 @@ public class ContextCompactor {
     private static final Pattern ANALYSIS_BLOCK =
             Pattern.compile("<analysis>.*?</analysis>", Pattern.DOTALL);
 
-    private static final ContextAssembler ASSEMBLER = new ContextAssembler();
-
     private final EventStore events;
     private final LlmClientProvider clients;
     private final SessionWriter writer;
+
+    /**
+     * 装配历史那一个 —— **注入进来的**，不自己造一份。
+     *
+     * <p>它的配置（有没有"按 id 查用户名"那一层）只在装配它的地方定，见
+     * {@code ContextAssemblyConfig}。这里自己造一份的话，那就是"同一个概念的第二套配置"
+     * 的起点 —— 而它俩的差别**在代码里看不出来**：装出来的东西一个带着谁说的、一个带着
+     * "协作者"，而后者会被写进摘要、**顶替整段历史**。
+     */
+    private final ContextAssembler assembler;
 
     /**
      * 每条会话连续失败了几次，见 {@link #compactIfNeeded}。
@@ -178,10 +191,12 @@ public class ContextCompactor {
 
     public ContextCompactor(EventStore events,
                             LlmClientProvider clients,
-                            SessionWriter writer) {
+                            SessionWriter writer,
+                            ContextAssembler assembler) {
         this.events = events;
         this.clients = clients;
         this.writer = writer;
+        this.assembler = assembler;
     }
 
     /**
@@ -218,12 +233,25 @@ public class ContextCompactor {
      * <p>调用点在**一轮开始之前**：压缩会改变这一轮模型看到的历史，
      * 所以必须赶在组装上下文之前做完。
      *
-     * @return 真压了的话返回这次写入（调用方拿去广播）；没压返回空
+     * @return 真压了的话返回这次写入；没压返回空
      */
     public Optional<SessionWriter.Written> compactIfNeeded(Session session,
                                                            Trigger trigger,
                                                            CancellationToken cancellation,
                                                            LeaseToken token) {
+        // **先看一手读数，再决定要不要读整条流。** 绝大多数轮次到这儿就结束了 ——
+        // 估算的另一个输入（按字符估）系统性低估中文，所以真正拍板的通常就是这个读数。
+        //
+        // 它会漏掉的只有"上一轮收尾之后新添的内容"：压缩点在一轮开始、用户那句话还没落库
+        //（见 TurnExecutor 里那段"为什么压缩必须排在落库之前"），中间只隔着几条状态变更事件。
+        if (trigger == Trigger.PRESSURE) {
+            OptionalInt measured = events.lastContextTokens(session.id());
+            if (measured.isPresent() && measured.getAsInt() < microThreshold(session)) {
+                consecutiveFailures.remove(session.id());
+                return Optional.empty();
+            }
+        }
+
         List<StoredEvent> history = events.readAll(session.id());
         if (history.isEmpty()) {
             return Optional.empty();
@@ -400,7 +428,7 @@ public class ContextCompactor {
      * <p>剩下的误差只有"上一轮结束之后新添的那点内容"，而它相对整段历史很小；
      * 下一轮收尾时又会被一个新的真值覆盖掉。
      */
-    static int estimatedTokens(List<StoredEvent> history, Session session) {
+    int estimatedTokens(List<StoredEvent> history, Session session) {
         return Math.max(byCharacters(history, session), lastMeasuredContext(history));
     }
 
@@ -433,9 +461,9 @@ public class ContextCompactor {
      * <p>它**系统性低估中文**（见 {@link #estimatedTokens}），所以从来不是单独用的那个数；
      * 单独用它只发生在会话的第一轮，那时还没有任何真实读数。
      */
-    private static int byCharacters(List<StoredEvent> history, Session session) {
+    private int byCharacters(List<StoredEvent> history, Session session) {
         int chars = 0;
-        for (ChatMessage message : ASSEMBLER.assemble(history, session.model().systemPrompt())) {
+        for (LlmMessage message : assembler.assemble(history, session.model().systemPrompt())) {
             chars += message.content() == null ? 0 : message.content().length();
             for (ToolCall call : message.toolCalls()) {
                 chars += call.argumentsJson().length();
@@ -450,21 +478,31 @@ public class ContextCompactor {
      * <p>用**同一个模型**，不另配一个：换模型意味着这份摘要的风格和口径都和后续
      * 对话对不上，而用户配的那把 key 也只对应这个端点。
      */
-    private static String summarize(LlmClient client, List<StoredEvent> history, Session session,
-                                    CancellationToken cancellation) {
-        // 用 assembleInto 装进自己的可变 list，**不要**用 assemble()：
-        // 后者返回的是不可变快照（那是它对外承诺的契约），往上面 add 会当场抛
-        List<ChatMessage> messages = new ArrayList<>();
-        ASSEMBLER.assembleInto(history, session.model().systemPrompt(), messages);
-        messages.add(ChatMessage.user(SUMMARY_PROMPT));
-
+    private String summarize(LlmClient client, List<StoredEvent> history, Session session,
+                             CancellationToken cancellation) {
         // 工具清单传空：摘要这件事不该动手，而且少传一份工具定义也少占一点上下文
-        ChatRequest request = new ChatRequest(session.model().modelId(), messages, List.of(),
-                SUMMARY_MAX_TOKENS);
+        LlmRequest request = new LlmRequest(session.model().modelId(), summaryInput(history, session),
+                List.of(), SUMMARY_MAX_TOKENS);
 
         LlmResult result = client.stream(request, event -> {
         }, cancellation);
         return stripDraft(result.text());
+    }
+
+    /**
+     * 喂给摘要模型的那份输入：整段历史 + 摘要指令。
+     *
+     * <p>**它装出来的东西会顶替整段历史** —— 摘要落下去之后，之前那些事件就不再进上下文了。
+     * 所以"这句话是谁说的"在这里就必须是对的：错一次，之后每一次调用都跟着错，
+     * 而且看不出是从哪儿错起的。
+     */
+    List<LlmMessage> summaryInput(List<StoredEvent> history, Session session) {
+        // 用 assembleInto 装进自己这个可变 list，**不要**用 assemble()：
+        // 后者返回的是不可变快照（那是它对外承诺的契约），往上面 add 会当场抛
+        List<LlmMessage> messages = new ArrayList<>();
+        assembler.assembleInto(history, session.model().systemPrompt(), messages);
+        messages.add(LlmMessage.user(SUMMARY_PROMPT));
+        return messages;
     }
 
     /**

@@ -6,6 +6,7 @@ import com.codeloom.domain.event.AssistantMessage;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.ToolCallRequested;
 import com.codeloom.domain.event.ToolResult;
+import com.codeloom.domain.event.TurnTokensUsed;
 import com.codeloom.domain.event.UserMessage;
 import com.codeloom.domain.event.VerificationResult;
 import com.codeloom.domain.port.EventStore;
@@ -86,6 +87,36 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         // 这正是 append 该返回信封而不是只返回 seq 的理由：广播出去的那一条，
         // 必须和后来断线重连拉回来的那一条是同一个东西，否则订阅者两次会看到"两条"。
         assertThat(events.readAll(session.id())).isEqualTo(appended);
+    }
+
+    @Test
+    @DisplayName("【便宜的闸】lastContextTokens 读的是最后一条收尾的读数；那条没有读数就问不出来")
+    void lastContextTokensReadsTheNewestSettledReading() {
+        Session session = savedSession();
+
+        assertThat(events.lastContextTokens(session.id()))
+                .as("一次收尾都还没有 —— 新会话就该问不出来")
+                .isEmpty();
+
+        events.append(session.id(), List.of(new UserMessage("第一轮"), settledWith(12_345)),
+                acquire(session));
+        assertThat(events.lastContextTokens(session.id())).hasValue(12_345);
+
+        // 这一轮被取消了，它落下的收尾**没有读数**，而"最后一条"正是它 —— 于是问不出来。
+        // 这是刻意的降级：调用方退回"读整条流、自己继续往前找"，代价是慢这一次，
+        // 而不是拿一个过期的数把判断糊弄过去
+        events.append(session.id(), List.of(settledWithoutReading()), acquire(session));
+        assertThat(events.lastContextTokens(session.id())).isEmpty();
+    }
+
+    /** 一次收尾，带上下文读数。 */
+    private static TurnTokensUsed settledWith(int contextTokens) {
+        return new TurnTokensUsed(100, 20, 0, 0, contextTokens, 64_000, "deepseek-flash");
+    }
+
+    /** 一次收尾，**没有读数**：这一轮一次模型都没调成（被取消、或服务商没报用量）。 */
+    private static TurnTokensUsed settledWithoutReading() {
+        return new TurnTokensUsed(100, 20, 0, 0, null, null, "deepseek-flash");
     }
 
     @Test

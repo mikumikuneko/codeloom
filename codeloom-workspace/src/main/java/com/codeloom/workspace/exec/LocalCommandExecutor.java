@@ -23,8 +23,8 @@ import java.util.Objects;
  *   <li><b>能不能跑</b> —— 由人决定。审批那一层把命令和理由摆给人看，人点是或否。</li>
  *   <li><b>能不能免审批</b> —— 由 {@code CommandPolicy}（程序名）和
  *       {@code CommandPathScope}（路径）判，判完再把命令交到这里。</li>
- *   <li><b>能碰到什么</b> —— 由工作区决定。文件工具走 {@code WorkspacePathGuard}，
- *       命令以工作区为工作目录。</li>
+ *   <li><b>能碰到什么</b> —— 文件由工作区决定（文件工具走 {@code WorkspacePathGuard}，
+ *       命令以工作区为工作目录），环境变量由 {@link ProcessRunner} 清过再递给子进程。</li>
  * </ul>
  *
  * <p>它**不能**拿可执行文件白名单当"准入"：那个白名单同时被用作"要不要问人"的判据
@@ -49,7 +49,9 @@ import java.util.Objects;
  *
  * <h2>要诚实的地方</h2>
  * 这只是"边界在工作区"的一半。文件工具是真的被关在里面的，命令不是 ——
- * 子进程能碰这台机器上它能碰到的一切（含网络）。真隔离要 cgroup + mount namespace +
+ * 子进程能碰这台机器上的文件和网络，走到哪儿算哪儿。唯一的收窄在**环境变量**上
+ * （见 {@link ProcessRunner}）：凭据形状的名字不递过去，所以它读不到
+ * {@code CODELOOM_SECRET_KEY} 那一类东西。真隔离要 cgroup + mount namespace +
  * 只读挂载，那要等容器实现（接口不用变）。在那之前，
  * **批准一条命令等于把这条命令交给它执行**，这是使用者要知道的事。
  * 参考实现里 deepseek-harness 是唯一真做了这层的：它的沙箱按文件效果分三档

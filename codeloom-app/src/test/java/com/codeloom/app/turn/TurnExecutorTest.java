@@ -1,7 +1,7 @@
 package com.codeloom.app.turn;
 
 import com.codeloom.agent.context.ContextAssembler;
-import com.codeloom.agent.llm.ChatMessage;
+import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.LlmCallException;
 import com.codeloom.agent.llm.LlmResult;
 import com.codeloom.agent.llm.TokenUsage;
@@ -282,7 +282,7 @@ class TurnExecutorTest {
         assertThat(compacted.droppedUpToSeq()).isPositive();
 
         // 用干净的装配器投影整条事件流，得到的就是这一轮模型看到的样子
-        List<ChatMessage> seen = new ContextAssembler()
+        List<LlmMessage> seen = new ContextAssembler(userId -> null)
                 .assemble(events.readAll(session.id()), MODEL.systemPrompt());
         assertThat(seen).anySatisfy(m -> assertThat(m.content()).contains("这就是摘要"));
         // 原文一个字都不该再送出去
@@ -329,7 +329,7 @@ class TurnExecutorTest {
         // 不标来源的话，模型会把别人的请求当成自己用户的指示，照着去动自己这边的代码。
         // 名字是**投影时按 id 现查**的（事件里只有 id，见 AgentNoteDelivered）——
         // 所以这里给它接上真的用户表，而不是自己编一个名字
-        List<ChatMessage> seen = new ContextAssembler(
+        List<LlmMessage> seen = new ContextAssembler(
                         id -> users.findById(id).map(User::displayName).orElse(null))
                 .assemble(events.readAll(session.id()), MODEL.systemPrompt());
         assertThat(seen).anySatisfy(m -> assertThat(m.content())
@@ -446,7 +446,7 @@ class TurnExecutorTest {
         }
 
         // 它出现在模型看到的历史里，而且**取代**了那个"没有结果的调用"
-        List<ChatMessage> seen = new ContextAssembler()
+        List<LlmMessage> seen = new ContextAssembler(userId -> null)
                 .assemble(events.readAll(session.id()), MODEL.systemPrompt());
         assertThat(seen).anySatisfy(m -> assertThat(m.content()).contains("批准了这次调用"));
         assertThat(seen).noneSatisfy(m -> assertThat(m.content()).contains("没有留下结果"));
@@ -656,6 +656,18 @@ class TurnExecutorTest {
                 .orElseThrow(() -> new AssertionError("这一轮没有落下改动的记录"));
 
         assertThat(record.truncated()).isFalse();
+        // ★ 它记的轮次号必须和**同一次收尾那条 checkpoint** 记的是同一个数。
+        //   界面上"这一轮改了哪些文件"挂到哪一轮，全看它 —— 两者算的是同一个 `closed`，
+        //   传错一个（比如传了推进前的 session）就会整体错一格，而那看起来完全像真的
+        assertThat(record.turnIndex())
+                .isNotNull()
+                .isEqualTo(events.readAll(session.id()).stream()
+                        .map(StoredEvent::event)
+                        .filter(CheckpointCreated.class::isInstance)
+                        .map(CheckpointCreated.class::cast)
+                        .reduce((first, second) -> second)
+                        .orElseThrow(() -> new AssertionError("这一轮没有落下 checkpoint"))
+                        .turnIndex());
         assertThat(record.files()).anySatisfy(file -> {
             // 路径已经是**项目相对**的（git 说的仓库路径在记录之前就翻过一道）
             assertThat(file.path()).isEqualTo("AuthService.java");
@@ -1005,10 +1017,12 @@ class TurnExecutorTest {
     }
 
     @Test
-    @DisplayName("【实时观战】跑一轮的同时，订阅者按顺序收到了落库的事件，还有那半截流式增量")
-    void subscribersSeeTheTurnAsItHappens() throws Exception {
-        // 这是整条链路的兑现点：执行器跑一轮 → 事件逐条落库 → 广播 → 订阅者收到。
-        // 前面每个环节都有各自的测试，这一条验的是它们**接在一起**还成立
+    @DisplayName("【不提前推】事务还没提交，落库的事件一条都不推出去 —— 只推那半截流式增量")
+    void nothingPersistedIsPushedWhileTheTransactionIsStillOpen() throws Exception {
+        // 这个类整个跑在测试事务里，而那个事务**永远不会提交**（跑完回滚），
+        // 于是它天然是这条不变量的反例现场：事件照常落库，但一条都不该被推出去 ——
+        // 推了的话，订阅者会看到一条库里根本不会存在的事实。
+        // 「提交之后确实会推」那一半在真提交的 SessionWriterAnnouncementTest 里。
         Session session = prepareSession("README.md", "codeloom 演示项目\n");
         model.script(
                 ScriptedLlm.toolCall("call_1", "read_file", "{\"path\":\"README.md\"}"),
@@ -1024,20 +1038,10 @@ class TurnExecutorTest {
             subscription.close();
         }
 
-        // 已落库的那些都带 seq，而且**必须按顺序到** —— 订阅端曾默认每条消息起一个线程
-        // 派发，于是 601 会排在 602 后面到（修在 BusConfig 的单线程派发器上）。
-        // 顺序一乱，前端的消息列表就会时不时跳一下
-        assertThat(received).filteredOn(envelope -> envelope.seq() != null)
-                .extracting(EventEnvelope::seq).isSorted();
-        // 用户那句话推给了订阅者
-        assertThat(received).anySatisfy(envelope ->
-                assertThat(envelope.event()).isEqualTo(new UserMessage("看一下 README")));
-        // 工具真的跑了，结果也推了过去
-        assertThat(received).filteredOn(envelope -> envelope.event() instanceof ToolResult)
-                .singleElement()
-                .satisfies(envelope -> assertThat(((ToolResult) envelope.event()).output())
-                        .contains("codeloom 演示项目"));
-        // 还有流式增量：它**没有 seq**，所以客户端不会拿它当续传游标
+        // 这一轮确实写了不少（见这一个类里其余的断言），但带 seq 的一条都没推
+        assertThat(readStream(session.id())).isNotEmpty();
+        assertThat(received).filteredOn(envelope -> envelope.seq() != null).isEmpty();
+        // 流式增量照推 —— 它不过事务，也不该等事务（丢的半截字下次刷新就用落库的那份补上）
         assertThat(received).filteredOn(envelope -> envelope.seq() == null)
                 .isNotEmpty()
                 .allSatisfy(envelope -> assertThat(envelope.seq()).isNull());

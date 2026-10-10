@@ -15,7 +15,8 @@ import java.util.Set;
  * 回来的却是「命令被拒绝: javac，允许的可执行文件 [python, node, mvn, …]」。
  *
  * <p>所以名单只有一个身份。能不能跑由**人**决定（审批那一层把命令和理由摆出来），
- * 能碰到什么由**工作区**决定。见 {@link LocalCommandExecutor} 的类注释。
+ * 能碰到什么由**工作区**决定（文件那一条），环境变量另在 {@link ProcessRunner} 那里清过。
+ * 见 {@link LocalCommandExecutor} 的类注释。
  *
  * <h2>所以它该收什么</h2>
  * 收**高频且无害**的：看目录、构建、跑测试这些一条命令一件事的操作。
