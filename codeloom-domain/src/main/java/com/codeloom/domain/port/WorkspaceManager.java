@@ -115,8 +115,8 @@ public interface WorkspaceManager {
      * <p>**每一轮跑完之后**自动调用一次（在 {@code TurnExecutor} 收尾之前）。
      * 回滚 = 代码 reset 到这个 commit，**加上**对话历史截断到这条 checkpoint 的位置，
      * 两者绑死。截断点是**那条 checkpoint 的事件序号**，不是这个 sha ——
-     * 一轮什么都没改时返回的还是上一个 HEAD，于是同一个 sha 在一条会话里出现好几次，
-     * 靠它定位会退到最早那个位置。见 {@link com.codeloom.domain.event.SessionRewound}。
+     * 靠 sha 定位会退到最早那个位置（一个 sha 对多条 checkpoint 的理由见
+     * {@link com.codeloom.domain.event.CheckpointCreated}）。
      *
      * @param identity 提交署名。必须是**会话所有者**，这样 git log 里能看出
      *                 每笔提交是哪位用户的哪条会话产出的 —— 这是可审计性的落点。

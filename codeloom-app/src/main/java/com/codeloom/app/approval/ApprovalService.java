@@ -97,10 +97,10 @@ public class ApprovalService {
             if (!approved) {
                 // **拒绝 = 这次调用到此为止**，得给它记一条收尾。
                 //
-                // 少了它会怎样：所有消费端判"这次调用结束了没有"，用的都是同一句话 ——
-                // 有没有一条收尾记录。于是界面上那条调用会永远停在"正在跑"的样子
+                // 少了它会怎样：界面上那条调用会永远停在"正在跑"的样子
                 // （实际用出来的症状：拒绝之后那一行一直闪），
                 // 而事件流里也留下一个答不出"它后来怎么了"的调用。
+                // 哪些事件算终局，由域层那一处说（见 ToolCallLifecycle）。
                 //
                 // 不带理由：那是"决定"的一部分，已经在上面那条答复里了。见 ToolRejected
                 latest = writer.append(written.session(), new ToolRejected(callId), token);

@@ -100,7 +100,8 @@ public enum EventType {
      * {@code ToolRejected}。这条**不进上下文** —— 模型要听的那句话（"用户拒绝了…
      * 停下等指示"）由上面那条答复表达，这里再进一条只会让它以为有两回事。
      *
-     * <p>它的用处全在**消费端**：判"这次调用结束了没有"靠的就是有没有一条收尾记录。
+     * <p>它是不是一次调用的**终局**，由域层那一处说 ——
+     * 见 {@link com.codeloom.domain.session.ToolCallLifecycle}。
      */
     TOOL_REJECTED,
 

@@ -39,7 +39,7 @@ final class PendingCallTracker implements Derived {
     /** 每个调用 id 最后一次请求长什么样，以及它落在哪个序号上。 */
     private final Map<String, Request> requests = new LinkedHashMap<>();
 
-    /** 已经有**结局**的那些调用（跑完了 / 被取消 / 被中断）→ 那条收尾记录的序号。 */
+    /** 已经有**结局**的那些调用 → 那条收尾记录的序号。 */
     private final Map<String, Long> settled = new HashMap<>();
 
     /**

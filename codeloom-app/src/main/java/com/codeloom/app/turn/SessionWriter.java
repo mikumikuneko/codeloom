@@ -343,22 +343,16 @@ public class SessionWriter {
     }
 
     /**
-     * 这一次提交引入了哪些改动，**项目相对路径**。
+     * 这一次提交引入了哪些改动，**项目相对路径**；**算不出来时返回空**
+     * （也就是那一轮不记这条事件）。
      *
-     * <h2>为什么问 git，而不是数模型调了几次写文件</h2>
-     * 因为命令也会改文件（格式化器、代码生成、{@code sed -i}、编译产物）——
-     * 只数文件工具的话，一轮里跑过 {@code mvn spotless:apply} 改了十二个文件，
-     * 界面上会说"这一轮没改什么"。
-     *
-     * <h2>算不出来时返回空 —— 也就是**不记这条事件**</h2>
-     * 算不出来（git 挂了、工作区不在了）就放弃这一轮的记录：**如实"没有记录"**，
-     * 而不是记一条"什么都没改"—— 那是在编。代价是两者在界面上长得一样，
-     * 这一条写在 {@link WorkspaceChanges} 上。
+     * <p>为什么这么定 —— 问 git 而不是数文件工具、算不出来时宁可没有记录也不记一条
+     * "什么都没改" —— 都写在 {@link WorkspaceChanges} 的类注释上。
      *
      * <p>**"这一轮什么都没改"不归这里管**：那种轮次连问都不会问一次，见 {@link #settle}。
      *
      * <p><b>它有界</b>：任何异常都吞在这一层，收尾照常进行 —— 记不下这一轮的改动，
-     * 不该让整轮失败 —— 算不出来就放弃这一轮的记录。
+     * 不该让整轮失败。
      */
     private Optional<WorkspaceChanges> changesOf(Session session, String commitSha) {
         Optional<Workspace> workspace = trees.find(session.workspaceId());

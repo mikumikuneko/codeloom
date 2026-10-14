@@ -210,7 +210,7 @@ final class MessageFold {
             // 拒绝的**收尾标记**。**不进上下文** —— 模型要听的那句话已经由上面那条答复
             // 说了（"用户拒绝了这次调用…停下等指示"），这里再进一条，
             // 同一件事就会在消息列表里出现两遍。
-            // 它存在的意义在消费端：判"这次调用结束了没有"靠的是有没有收尾记录
+            // 它是不是终局，由域层那一处说（见 ToolCallLifecycle）
             case ToolRejected ignored -> {
             }
             case UserMessage user -> {

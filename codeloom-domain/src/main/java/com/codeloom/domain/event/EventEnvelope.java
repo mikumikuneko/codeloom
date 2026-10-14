@@ -1,7 +1,6 @@
 package com.codeloom.domain.event;
 
 import com.codeloom.domain.session.SessionId;
-
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;

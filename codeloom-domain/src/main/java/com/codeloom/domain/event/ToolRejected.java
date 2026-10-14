@@ -11,9 +11,9 @@ package com.codeloom.domain.event;
  * {@link ToolResult}；而拒绝之后**什么都不会再来了**。
  *
  * <h2>为什么必须有一条这样的记录</h2>
- * 所有消费端判"这次调用结束了没有"用的都是同一句话：**有没有一条收尾的记录**。
  * 缺了它，界面上那条调用会永远停在"正在跑"的样子 —— 实际用出来的症状就是
  * "拒绝了之后那行一直闪"，因为它的判据正是"没有结果、也没有'没跑成'"。
+ * 哪些事件算终局，由域层那一处说 —— 见 {@link com.codeloom.domain.session.ToolCallLifecycle}。
  *
  * <p>**不带理由**：理由是那个"决定"的一部分，已经在
  * {@link ToolApprovalResolved#reason()} 里了。这条只管一件事 —— 它结束了。
