@@ -119,7 +119,22 @@ public class SessionStreamController {
         // 客户端消失有好几种方式（正常关、超时、写失败），每一种都得把订阅关掉 ——
         // 漏掉任何一个，订阅表就会随着"历史上连过的连接数"一直长
         emitter.onCompletion(() -> close(subscription));
-        emitter.onTimeout(() -> close(subscription));
+        emitter.onTimeout(() -> {
+            // ★ **超时不能只关订阅，还要把 emitter 收掉。**
+            //
+            //   这条连接背后是一个带超时的 DeferredResult（见
+            //   ResponseBodyEmitterReturnValueHandler）。超时回调跑完之后，只要结果**还没被设置**，
+            //   框架就会给它设一个 AsyncRequestTimeoutException —— 于是走错误分派，拿一个已经
+            //   定死 text/event-stream 的响应去渲染 JSON 错误体（日志里"No converter for
+            //   LinkedHashMap with preset Content-Type 'text/event-stream'"就是这么来的），
+            //   顺带把 Spring Session 的过滤器再跑一遍（"Session was invalidated" 出自那里）。
+            //
+            //   complete() 正是"由应用把这次请求正常结束掉"的那一下（见它自己的 javadoc），
+            //   结果一被设置，上面那条错误路径就不会走
+            close(subscription);
+            emitter.complete();
+        });
+        // 这里**不要** complete()：上面那条注记写着，send 出错之后不该再调它
         emitter.onError(cause -> close(subscription));
 
         Consumer<EventEnvelope> sink = envelope -> {
