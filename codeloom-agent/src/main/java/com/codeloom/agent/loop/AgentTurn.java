@@ -987,8 +987,8 @@ public final class AgentTurn {
             // 提示语里带上**多大**：模型得先知道值不值得读回来。只说"已存到 X"的话，
             // 它要么白读一遍（才几行），要么以为很大而放弃（其实就几十行）
             String body = persist(call.id(), output)
-                    .map(path -> "（这一轮的工具输出总量已达上限。完整内容（共 " + output.length()
-                            + " 字符）已存到 " + path + "，可以用 read_file 读回）\n\n"
+                    .map(path -> "（这一轮的工具输出总量已达上限。存到 " + path + " 的那一份有 "
+                            + output.length() + " 字符，可以用 read_file 读回）\n\n"
                             + "开头和结尾如下：\n" + retained)
                     .orElse("（这一轮的工具输出总量已达上限，且落盘失败，只留下头尾）\n\n" + retained);
             toolOutputChars += body.length();
