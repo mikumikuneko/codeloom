@@ -3,7 +3,6 @@ package com.codeloom.workspace.exec;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommandTermination;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -18,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -303,40 +303,112 @@ public final class ProcessRunner {
     }
 
     /**
-     * 把流读到结尾或达到上限。
+     * 把流读到结尾，只留**最后** {@code limit} 个字符。
      *
      * <p><strong>先收字节、读完再解码</strong>，而不是一边读一边按固定字符集解。
      * 理由是解码字符集事先不知道：同一台机器上，{@code node} 吐 UTF-8 而裸 JVM 吐 GBK，
      * 只有拿到（一段）字节之后才判断得了。判断规则见 {@link #decode(byte[], Charset)}。
      *
+     * <p><strong>保尾，不保头。</strong> 这是一条命令的输出，而命令的结论在结尾 ——
+     * 报错、堆栈、构建失败那一行。同仓的 {@code VerificationRunner} 出于同一个理由也保尾，
+     * {@code run_command} 给模型看的工具描述里写的也是这条。开头被丢掉这件事本身由
+     * {@link ProcessOutcome#truncated()} 报出去，由调用方说给模型听。
+     *
      * <p>注意进程被杀时流会异常关闭，那是**预期路径**，不当错误处理。
+     *
+     * <p>{@code static} 且包级可见是为了能拿一段**构造好的**字节流去断言它，
+     * 见 {@link ProcessRunnerTest} —— 同 {@link #decode(byte[], Charset)}。
      */
-    private static Captured capture(InputStream in, int limit, Charset fallback) {
-        ByteArrayOutputStream kept = new ByteArrayOutputStream();
+    static Captured capture(InputStream in, int limit, Charset fallback) {
+        if (limit <= 0) {
+            // 上限是 0 意味着什么都不要。但流**照样要读到结尾** ——
+            // 不读完的话子进程会阻塞在写满的管道上，而父进程正等着它退出
+            drain(in);
+            return new Captured("", true);
+        }
         int byteCap = byteCapFor(limit);
+        // 环：第 p 个字节住在 ring[p % byteCap]，于是最后 byteCap 个字节总是齐的
+        byte[] ring = new byte[byteCap];
+        long total = 0;
         byte[] buffer = new byte[8192];
-        boolean truncated = false;
         try {
             int read;
             // 一直读到结尾：不读完的话子进程会阻塞在写满的管道上，而父进程正等着它退出
             while ((read = in.read(buffer)) != -1) {
-                int room = byteCap - kept.size();
-                if (room > 0) {
-                    kept.write(buffer, 0, Math.min(read, room));
+                // 单次读也可能比整个环还长 —— 那就只留它自己的尾巴
+                for (int i = Math.max(0, read - byteCap); i < read; i++) {
+                    ring[(int) ((total + i) % byteCap)] = buffer[i];
                 }
-                if (read > room) {
-                    truncated = true;
-                }
+                total += read;
             }
         } catch (IOException ignored) {
             // 进程被杀时流被强制关闭，这是预期路径
         }
 
-        String text = decode(kept.toByteArray(), fallback);
+        boolean truncated = total > byteCap;
+        byte[] bytes = retained(ring, total, byteCap);
+        // 切的是开头，所以第一个字节可能落在某个多字节字符的中间 —— 见 utf8Boundary
+        int boundary = truncated ? utf8Boundary(bytes) : 0;
+        String text = decode(Arrays.copyOfRange(bytes, boundary, bytes.length), fallback);
         if (text.length() > limit) {
-            return new Captured(text.substring(0, limit), true);
+            return new Captured(tailChars(text, limit), true);
         }
         return new Captured(text, truncated);
+    }
+
+    /** 读到结尾再丢掉 —— 上限为 0 时用，流仍然必须被读完。 */
+    private static void drain(InputStream in) {
+        byte[] buffer = new byte[8192];
+        try {
+            while (in.read(buffer) != -1) {
+                // 读完就行，内容不要
+            }
+        } catch (IOException ignored) {
+            // 进程被杀时流被强制关闭，这是预期路径
+        }
+    }
+
+    /** 从环里按顺序取出保留下来的那一段。 */
+    private static byte[] retained(byte[] ring, long total, int byteCap) {
+        int size = (int) Math.min(total, byteCap);
+        // 环转满时，最早那个保留下来的字节在 total % byteCap 上；没转满就是从 0 开始
+        int start = size == byteCap ? (int) (total % byteCap) : 0;
+        byte[] out = new byte[size];
+        for (int i = 0; i < size; i++) {
+            out[i] = ring[(start + i) % byteCap];
+        }
+        return out;
+    }
+
+    /**
+     * 头被切掉之后，第一个字节可能只是某个多字节字符的中间一截 —— 挪到字符边界上。
+     *
+     * <p>不挪就直接解，严格解码会**当场失败**，于是整段退回去按兜底字符集解：
+     * 一段本来完全正确的 UTF-8 中文会整段变成乱码，而原因只是开头少了那两个字节。
+     * （这和"结尾那半截不该触发兜底"是同一件事的两头，见 {@link #decodeOrNull}。）
+     *
+     * <p>UTF-8 的续字节长这样：{@code 10xxxxxx}，所以最多往前挪 3 个。
+     */
+    private static int utf8Boundary(byte[] bytes) {
+        int at = 0;
+        while (at < bytes.length && (bytes[at] & 0xC0) == 0x80) {
+            at++;
+        }
+        return at;
+    }
+
+    /**
+     * 留最后 {@code limit} 个字符。
+     *
+     * <p>切点落在**低代理**上时要再往后一个：那说明它的高代理被切掉了，
+     * 剩下半对谁也不认识，只会在消息里变成一个孤立的 {@code \ud83d}。
+     */
+    private static String tailChars(String text, int limit) {
+        int from = text.length() - limit;
+        if (Character.isLowSurrogate(text.charAt(from))) {
+            from++;
+        }
+        return text.substring(from);
     }
 
     /**
@@ -417,6 +489,12 @@ public final class ProcessRunner {
         }
     }
 
-    private record Captured(String text, boolean truncated) {
+    /**
+     * 一个流收下来的那一段。
+     *
+     * @param text      解码之后的文本，**保尾**（见 {@link #capture}）
+     * @param truncated 开头被丢掉了吗
+     */
+    record Captured(String text, boolean truncated) {
     }
 }

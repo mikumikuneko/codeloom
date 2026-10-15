@@ -36,6 +36,15 @@ public final class RunCommandTool implements Tool {
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
     private static final int MAX_OUTPUT_CHARS = 100_000;
 
+    /**
+     * 输出被截断时贴在**开头**的一句话。
+     *
+     * <p>贴开头、不贴结尾：跟在它后面那段正是"保留下来的最后一段"，得先说清它前面少了东西，
+     * 不然模型会把眼前这段当成输出的全部。
+     */
+    private static final String HEAD_DROPPED_NOTICE =
+            "（这条命令的输出太长，**开头**已被丢掉，下面是保留下来的最后一段）\n";
+
     @Override
     public String name() {
         return "run_command";
@@ -132,11 +141,16 @@ public final class RunCommandTool implements Tool {
         }
 
         // **谁结束了它**，决定这次调用报什么失败 —— 三种情形对模型的含义完全不同
-        return switch (result.termination()) {
+        ToolOutcome outcome = switch (result.termination()) {
             case COMPLETED -> completed(result);
             case TIMED_OUT -> timedOut(timeout, result);
             case CANCELLED -> cancelled(result);
         };
+        // 截断了就必须说清丢的是哪一头，否则模型会把剩下这段当成全部。
+        // 第一层保的是尾部（见 ProcessRunner.capture），所以丢的一律是开头
+        return result.truncated()
+                ? outcome.withOutput(HEAD_DROPPED_NOTICE + outcome.output())
+                : outcome;
     }
 
     /** 命令自己跑完了。退出码是什么由调用方解释，这里原样交给模型。 */

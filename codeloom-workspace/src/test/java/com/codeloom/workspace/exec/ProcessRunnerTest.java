@@ -4,6 +4,7 @@ import com.codeloom.domain.port.CancellationToken;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -58,15 +59,53 @@ class ProcessRunnerTest {
     }
 
     @Test
-    @DisplayName("【截断边界】结尾正好切在多字节字符中间，**不该**整段退回兜底字符集")
+    @DisplayName("【截断边界】结尾那半截字，**不该**让整段退回兜底字符集")
     void aTrailingPartialCharacterDoesNotTriggerTheFallback() {
-        // 输出被字节上限切断时，最后一个字常常只剩半截。要是那半截被判成"不是 UTF-8"，
-        // 整段（本来完全正确的中文）就会改用 GBK 解 —— 满屏乱码，
-        // 而原因只是最后一字节不完整
+        // 进程被杀在写到一半时，最后一个字就只剩半截（截断本身切的是开头，见 keepsTheTail）。
+        // 要是那半截被判成"不是 UTF-8"，整段（本来完全正确的中文）就会改用 GBK 解 ——
+        // 满屏乱码，而原因只是最后一字节不完整
         byte[] full = "构建完成".getBytes(StandardCharsets.UTF_8);
         byte[] cut = Arrays.copyOf(full, full.length - 1);
 
         assertThat(ProcessRunner.decode(cut, GBK)).isEqualTo("构建完");
+    }
+
+    @Test
+    @DisplayName("【保尾】超上限时留下的是结尾 —— 命令的结论在那儿")
+    void keepsTheTail() {
+        ProcessRunner.Captured captured = ProcessRunner.capture(
+                new ByteArrayInputStream("0123456789ABCDEFGHIJ".getBytes(StandardCharsets.UTF_8)),
+                10, GBK);
+
+        assertThat(captured.text()).isEqualTo("ABCDEFGHIJ");
+        assertThat(captured.truncated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("【保尾·边界】开头切在多字节字符中间，**不该**整段退回兜底字符集")
+    void aLeadingPartialCharacterDoesNotTriggerTheFallback() {
+        // 切的是开头，所以第一个字节可能只是某个汉字的中间一截
+        //（0xBB 是「建」的续字节）。不挪到字符边界就直接解，严格解码当场失败 →
+        // 整段改用 GBK 解 → 一段本来完全正确的中文满屏乱码
+        byte[] bytes = "构建完成".getBytes(StandardCharsets.UTF_8);
+
+        ProcessRunner.Captured captured = ProcessRunner.capture(
+                new ByteArrayInputStream(bytes), 2, GBK);
+
+        assertThat(captured.text())
+                .as("每个汉字 3 字节：上限 2 字符 → 字节窗口 8 字节，正好从「建」的中间开始")
+                .isEqualTo("完成");
+        assertThat(captured.truncated()).isTrue();
+    }
+
+    @Test
+    @DisplayName("正好等于上限时不算截断 —— 少切一刀")
+    void doesNotTruncateExactlyAtTheLimit() {
+        ProcessRunner.Captured captured = ProcessRunner.capture(
+                new ByteArrayInputStream("ABCDEFGHIJ".getBytes(StandardCharsets.UTF_8)), 10, GBK);
+
+        assertThat(captured.text()).isEqualTo("ABCDEFGHIJ");
+        assertThat(captured.truncated()).isFalse();
     }
 
     @Test

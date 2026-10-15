@@ -153,4 +153,10 @@ public record ToolOutcome(boolean success,
         return new ToolOutcome(success, output, truncated, exitCode, millis, failure, mutated,
                 todoUpdate);
     }
+
+    /** 换掉给模型看的那段文本，其余字段原样带过来（同上，一个字段都不许漏）。 */
+    public ToolOutcome withOutput(String text) {
+        return new ToolOutcome(success, text, truncated, exitCode, durationMs, failure, mutated,
+                todoUpdate);
+    }
 }
