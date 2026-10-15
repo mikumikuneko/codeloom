@@ -16,7 +16,8 @@ import java.util.Objects;
  * @param toolCalls    拼好的工具调用（参数已完整）
  * @param usage        token 用量
  * @param reasoning    这一轮的**思考过程**（推理模型才有），中性名，不用任何一家的字段名。
- *                     <strong>只用于展示</strong> —— 具体回不回传给模型由 provider 适配层决定
+ *                     <strong>它同时是回传协议的一部分</strong> —— 要跟着这条消息带回去，
+ *                     少带了下一次请求会被拒；具体发不发由 provider 适配层按来源模型决定
  */
 public record LlmResult(String model,
                         String finishReason,

@@ -76,7 +76,7 @@ public interface ProjectMapper {
     /**
      * 加锁读出项目行，给"改动共享主干"的操作（合并）做互斥用。
      *
-     * <p>{@code FOR UPDATE} 不能去掉，理由和 {@code SessionMapper#lockFencingToken} 一样：
+     * <p>{@code FOR UPDATE} 不能去掉，理由和 {@code WorkspaceMapper#lockFencingToken} 一样：
      * 普通查询读到的东西在事务提交前就可能过期，而锁会一直挡到事务结束。
      *
      * @return 项目 id；项目不存在时为 null

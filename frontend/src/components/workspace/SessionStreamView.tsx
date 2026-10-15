@@ -241,13 +241,6 @@ export function SessionStreamView({
    * <p>现在这份记录是**后端在收尾时算一次、落进事件流**的（见后端的 {@code WorkspaceChanges}），
    * 于是它跟着 {@code items} 一起来 —— 和屏幕上那些消息**同出一份 fold**，
    * 不可能出现"上面显示改了 a.txt、下面那一行说没改"这种事。
-   *
-   * <h2>什么时候重新拉</h2>
-   * 收到一条用量就等于**这一轮跑完了** —— 那也正是它的改动落定的时候
-   *（后端每轮收尾写 checkpoint，改动按 checkpoint 算）。所以拿"有几条用量"
-   * 当依赖：它一变就重拉一次。
-   *
-   * <p>不用"事件条数"当依赖：那个每一帧都在变，会把这条接口打成轮询。
    */
   const changesByTurn = new Map(turnChanges(turns).map((entry) => [entry.turn, entry]))
 
@@ -815,7 +808,6 @@ function ChangesRow({
   )
 }
 
-/** 一轮的起止时间。**两个都来自服务端**，所以它们的差不受浏览器时钟影响。 */
 /**
  * 一轮里那几条用量结算合成一条。
  *
@@ -855,6 +847,7 @@ function mergedUsage(usages: StreamItem[]): Extract<StreamItem, { kind: 'usage' 
   return merged
 }
 
+/** 一轮的起止时间。**两个都来自服务端**，所以它们的差不受浏览器时钟影响。 */
 function turnSpan(turn: StreamItem[]): { startedAt: string | null; endedAt: string | null } {
   const opening = turn.find((item) => item.kind === 'user')
   // 用量那条是**每轮收尾才写的**（后端 finishTurn 里和 checkpoint、状态迁移一起落），
@@ -1826,8 +1819,8 @@ function diffOf(
 /**
  * 打算等多久，说成人话。
  *
- * <p>不到一秒的说毫秒：{@code 0} 和 {@code 500} 都落在这一档，而"约 0.5 秒后重试"
- * 比"约 500 毫秒后重试"读起来快一点。
+ * <p>不到一秒的说毫秒：{@code 0} 和 {@code 500} 都落在这一档，而"约 500 毫秒后重试"
+ * 比"约 0.5 秒后重试"读起来快一点。
  */
 function formatDelay(delayMs: number): string {
   return delayMs < 1_000 ? `${delayMs} 毫秒` : `${(delayMs / 1_000).toFixed(1)} 秒`

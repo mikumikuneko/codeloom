@@ -9,7 +9,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * **这一轮对话里读过哪些文件，读到的是什么版本。**
+ * **这条对话（会话）里读过哪些文件，读到的是什么版本。**
  *
  * <h2>它为什么存在：把"不许覆盖"换成"读过才许覆盖"</h2>
  * {@link WriteFileTool} 从前是**只在文件不存在时工作**。那条规矩的理由没错

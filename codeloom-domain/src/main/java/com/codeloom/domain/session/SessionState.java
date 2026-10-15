@@ -15,6 +15,7 @@ import java.util.Set;
  *                            │                                 ↑
  *                            └──→ AWAITING_APPROVAL ───────────┘
  *
+ *   WAITING_USER ──→ THINKING（用户说下一句）
  *   任意状态 ──→ FAILED ──→ IDLE（用户重试）
  * </pre>
  *

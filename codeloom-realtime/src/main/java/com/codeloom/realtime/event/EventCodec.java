@@ -93,7 +93,8 @@ public final class EventCodec {
      *
      * <p>之所以是两条信息一起返回，是因为两个调用方都要这一对：
      * 写库时要填 {@code event} 表的 {@code type} 与 {@code payload} 两列；
-     * SSE 下行时要把类型名放进帧的 {@code event:} 字段、payload 放进 {@code data:}。
+     * SSE 下行时把这一对写进帧的 {@code data:}（那个 JSON 的 {@code type} 与
+     * {@code payload} 两个键）—— **不用** {@code event:} 字段。
      */
     public record EncodedEvent(EventType type, String payload) {
 

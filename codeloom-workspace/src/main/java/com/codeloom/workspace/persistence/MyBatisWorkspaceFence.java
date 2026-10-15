@@ -11,8 +11,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * {@link WorkspaceFence} 的实现：把 {@code workspace.fencing_token} 那一列当作权威。
  *
- * <p>本类是这一列在**校验路径**上的唯一写入者（另一个是 {@link WorkspaceMapper#save}，
- * 而它刻意不碰这一列）。这正是机制能成立的原因，见 {@link WorkspaceFence} 的类注释。
+ * <p>推这一列前进的只有 {@link #issue} 一处（{@link WorkspaceMapper#save} 刻意不碰它）。
+ * 校验路径（{@link #assertValid}）只加锁读，不写。这正是机制能成立的原因，
+ * 见 {@link WorkspaceFence} 的类注释。
  *
  * <h2>两个方法的传播行为都是有讲究的</h2>
  * <ul>

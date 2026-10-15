@@ -53,9 +53,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * </pre>
  *
  * <h2>为什么它必须住在 app</h2>
- * 它要同时用四个模块：租约与事件（realtime）、worktree 与命令（workspace）、
- * 循环与工具（agent）、会话与项目仓储（workspace）。按现在的模块图，
- * {@code app} 是唯一合法能同时看到这四边的地方 —— 别处都会需要新增一条依赖边。
+ * 它要同时用三个模块：租约与事件（realtime）、worktree 与命令 + 会话与项目仓储
+ * （workspace）、循环与工具（agent）。按现在的模块图，
+ * {@code app} 是唯一合法能同时看到这三边的地方 —— 别处都会需要新增一条依赖边。
  *
  * <h2>它现在**不**干哪些事</h2>
  * 有三块独立成协作者（都在本包）：{@link TurnInputFactory}（这一轮喂什么给模型）、

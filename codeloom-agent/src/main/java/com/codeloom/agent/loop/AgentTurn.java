@@ -232,9 +232,9 @@ public final class AgentTurn {
     /**
      * 这条会话里读过哪些文件。见 {@link ReadLedger} —— 判断能不能覆盖已读文件时用它。
      *
-     * <p>挂在这儿而不是塞进 {@code TurnInput}：**一条会话一个 {@code AgentTurn}**
-     *（{@code TurnExecutor} 每轮 new 一个），所以这个字段天然就是"这条会话"的范围；
-     * 而 {@code TurnInput} 是个 record，加一个组件要改十几处构造点。
+     * <p>挂在这儿而不是塞进 {@code TurnInput}：{@code TurnInput} 是个 record，
+     * 加一个组件要改十几处构造点。**但它只活一轮**（{@code TurnExecutor} 每轮 new 一个
+     * {@code AgentTurn}），跨轮的账靠 {@code seedReadLedger} 每轮从投影补进来。
      */
     private final ReadLedger reads = new ReadLedger();
 

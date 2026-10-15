@@ -13,7 +13,7 @@ package com.codeloom.domain.event;
  */
 public enum EventType {
 
-    /** 会话开起来、工作区就位。事件流的第 0 条 —— 有它，「回放一条会话」才有起点。**不进上下文**。 */
+    /** 会话开起来、工作区就位。事件流的头一条 —— 有它，「回放一条会话」才有起点。**不进上下文**。 */
     SESSION_STARTED,
 
     /**

@@ -120,7 +120,7 @@ public class RedisExecutionLease implements ExecutionLease {
     public Optional<LeaseToken> tryAcquire(Session session) {
         Objects.requireNonNull(session, "session");
         // 入参是会话、锁的键是它所在的那棵树 —— 这个换算只在这里做一次，
-        // 见 ExecutionLease 类注释「为什么键是会话而锁是树」
+        // 见 ExecutionLease 类注释「入参是会话，锁的是树」
         WorkspaceId workspaceId = session.workspaceId();
         String key = keyFor(workspaceId);
         String holderId = instanceId + "/" + UUID.randomUUID();

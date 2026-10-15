@@ -7,7 +7,8 @@ import com.codeloom.domain.session.SessionId;
  * 一轮执行的结果。
  *
  * <p>这些情况各自分开，而不是揉成一个"成功/失败"：它们要触发**完全不同的上层反应**。
- * 尤其 {@link Busy} —— 它根本不是错误，是"这一刻轮不到你"（同一条会话已经有执行者了）。
+ * 尤其 {@link Busy} —— 它根本不是错误，是"这一刻轮不到你"（这棵树上已经有执行者在跑了，
+ * 可能是他另一条会话）。
  * 把它报成失败会让用的人以为是 bug，去重试，而重试只会一直失败。
  */
 public sealed interface TurnResult {

@@ -25,7 +25,7 @@ import java.util.Objects;
  *                         还得先判断这行命令看不看得懂。**由调用方注入**：那个判据住在
  *                         workspace 模块，而 agent 模块刻意不依赖它 —— 判据只能从上面传下来，
  *                         不能让工具反向去拿。见 {@link CommandApproval}（为什么是理由而不是布尔）
- * @param reads            这一轮对话里读过哪些文件。见 {@link ReadLedger}。
+ * @param reads            这条对话（会话）里读过哪些文件。见 {@link ReadLedger}。
  *                         **它是有状态的**（工具往里记一笔），而 {@code ToolContext} 每次
  *                         工具调用都新造一个 —— 所以账本身挂在调用方那里，这里只拿一个引用
  */

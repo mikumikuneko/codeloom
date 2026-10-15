@@ -46,7 +46,7 @@ public class ApiExceptionHandler {
     /**
      * 把 {@code ResponseStatusException} 转成和上面一样的形状。
      *
-     * <h2>为什么不接这一步，客户端就只能看到一个光秃秃的状态码</h2>
+     * <h2>不接这一步，客户端就只能看到一个光秃秃的状态码</h2>
      * Boot 的 {@code server.error.include-message} 默认是 {@code never} ——
      * 框架抛出的异常消息**不会**进响应体。那是好的默认（它拦住了内部信息泄露），
      * 但它同样拦掉了我们自己写的那句 reason，于是：

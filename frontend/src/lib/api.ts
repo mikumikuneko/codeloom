@@ -497,8 +497,8 @@ export const messages = {
    * <p>所以进度**不从这个响应里看**：那一轮的过程同时从 SSE 那条通道推过来
    *（见 `useSessionStream`）。这个响应只负责最后给个结论。
    *
-   * @param clientMessageId 挡住"同一个请求被处理两次"。**同一句话重发必须用同一个值** ——
-   *                        所以它由内容的哈希决定，而不是每次点击新生成一个
+   * @param clientMessageId 挡住"同一个请求被处理两次"。**每次发送都新生成一个** ——
+   *                        不能由内容决定：打断之后原样再发一次，会被当成重复请求挡回去
    */
   send: (sessionId: string, text: string, clientMessageId: string) =>
     api<unknown>(`/api/sessions/${sessionId}/messages`, {

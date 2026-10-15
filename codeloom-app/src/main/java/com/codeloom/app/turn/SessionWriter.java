@@ -292,7 +292,7 @@ public class SessionWriter {
             //（见 TurnWorkspace.Commit.created）
             if (commit.created()) {
                 // ★ 传的是 `closed`，不是 `session` —— 这条事件和上面那条 checkpoint
-                //   必须记**同一个号**（那个号在 223 行算出来，见那段注释）。
+                //   必须记**同一个号**（那个号在 settle 开头算出来，见那段注释）。
                 //   从前传 `session` 看不出问题，只是因为这条事件当时压根没记号；
                 //   界面上"这一轮改了哪些文件"要挂到哪一轮，全看这个数
                 changesOf(closed, commit.sha()).ifPresent(record ->

@@ -132,7 +132,7 @@ public class LlmCallException extends RuntimeException {
     public String shortReason() {
         return switch (kind) {
             case RATE_LIMITED -> "限流";
-            case SERVER_ERROR -> "服务端故障";
+            case SERVER_ERROR -> "服务商故障";
             case NETWORK -> "网络错误";
             case CONTEXT_EXCEEDED -> "上下文超长";
             case AUTH -> "密钥无效";

@@ -6,7 +6,9 @@ package com.codeloom.domain.workspace;
  * <p>粒度是"这一步"，不是"这个文件从开天辟地到现在"。所以它回答的是
  * "刚才那一下动了什么"，而那个问题在翻旧账时才有意义。
  *
- * @param path    相对工作区根目录的路径
+ * @param path    路径。**两条产出路径基点不同**：{@code changesIntroducedBy} 给的是仓库根
+ *                相对（形如 {@code untitled/a.txt}）；落进 {@code WorkspaceChanges} 之前
+ *                已由 {@code ProjectLayout.toProjectPath} 翻成**项目相对**（{@code a.txt}）
  * @param added   新增行数。二进制文件是 0，见 {@link #binary}
  * @param deleted 删除行数。同上
  * @param binary  二进制文件 —— git 对它给不出行数，只能告诉你"它变了"。

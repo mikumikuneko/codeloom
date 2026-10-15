@@ -92,7 +92,7 @@ public class ProjectService {
         this.sessions = sessions;
         this.leases = leases;
         this.departure = departure;
-        // 空 = 自动推导（项目根下的 codeloom-app/repos）。**不要在这里自己拼相对路径** ——
+        // 空 = 自动推导（<项目根>/data/repos）。**不要在这里自己拼相对路径** ——
         // 那样"数据放哪儿"会取决于从哪个目录启动。见 DataPaths
         this.reposRoot = DataPaths.locate(reposRoot, "repos");
         this.provisioner = provisioner;

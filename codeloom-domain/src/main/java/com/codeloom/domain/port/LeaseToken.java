@@ -17,7 +17,7 @@ import java.util.Objects;
  * 必然存在时延**。所以做法是：不只锁"进入"，还要校验"写入"。
  *
  * <ul>
- *   <li>每次抢到锁，Redis 原子地返回一个**单调递增**的序号 → {@code fencingToken}</li>
+ *   <li>每次抢到锁，由 {@link WorkspaceFence} 发一个**单调递增**的序号 → {@code fencingToken}</li>
  *   <li>所有产生副作用的写入都带上它（见 {@link EventStore#append}）</li>
  *   <li>写入路径校验它是否仍是当前有效值，不是就**拒绝**</li>
  * </ul>
