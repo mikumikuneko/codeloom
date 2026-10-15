@@ -1,6 +1,7 @@
-import { History } from 'lucide-react'
+import { History, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -42,6 +43,7 @@ export function SessionHistoryDialog({
   selectedId,
   onSelect,
   onOpen,
+  onDiscard,
   title,
 }: {
   sessions: Session[]
@@ -50,9 +52,24 @@ export function SessionHistoryDialog({
   onSelect: (sessionId: string) => void
   /** 打开时补拉一次列表 —— 为什么见下面 `onOpenChange` 那段 */
   onOpen?: () => void
+  /**
+   * 丢弃一条会话（**真删**，见后端的 `discard`）。
+   *
+   * <p>界面上管它叫「**删除**」—— 那是给用户看的词，跟着另外两个确认框走
+   *（删文件、删密钥）；代码里跟后端叫 `discard`。
+   *
+   * <p>**不给就没有这个入口** —— 对方那条列表就是这样：后端要驱动权，别人的会话点了
+   * 必然失败，那就不该放一个永远按不动的按钮。
+   *
+   * <p>返回一句给人看的错误、或者 {@code null} 表示成功（同 {@link ConfirmDialog}）：
+   * 后端「这条会话正在执行中」那条 409 就是从这里上来的。
+   */
+  onDiscard?: (sessionId: string) => Promise<string | null>
   title: string
 }) {
   const [open, setOpen] = useState(false)
+  /** 等着确认的那一条。为 null 就没在问 */
+  const [discarding, setDiscarding] = useState<Session | null>(null)
 
   return (
     <Dialog
@@ -86,16 +103,21 @@ export function SessionHistoryDialog({
           {sessions.map((session) => {
             const selected = session.id === selectedId
             return (
-              <li key={session.id}>
+              // 底色和圆角挂在 li 上、不挂在按钮上：行尾多了一个删除键，
+              // 两个按钮各自带底色的话，鼠标移到删除键上时整行的底色会断掉
+              <li
+                key={session.id}
+                className={`flex items-center rounded hover:bg-accent ${
+                  selected ? 'bg-selected' : ''
+                }`}
+              >
                 <button
                   type="button"
                   onClick={() => {
                     onSelect(session.id)
                     setOpen(false)
                   }}
-                  className={`flex w-full items-baseline gap-2 rounded px-2 py-2 text-left text-sm hover:bg-accent ${
-                    selected ? 'bg-selected' : ''
-                  }`}
+                  className="flex min-w-0 flex-1 items-baseline gap-2 px-2 py-2 text-left text-sm"
                 >
                   <span
                     className={`inline-block size-1.5 shrink-0 self-center rounded-full ${
@@ -113,10 +135,41 @@ export function SessionHistoryDialog({
                     {session.turnIndex > 0 && ` · 第 ${session.turnIndex} 轮`}
                   </span>
                 </button>
+                {/* 平时是次要色，指上去才变红 —— 和右键菜单里那条一样：
+                    破坏性动作该被认出来，但不该先喊（见 ContextMenu 的 danger） */}
+                {onDiscard && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    title="删除这条会话"
+                    aria-label="删除这条会话"
+                    className="mr-1 shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => setDiscarding(session)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                )}
               </li>
             )
           })}
         </ul>
+
+        {discarding && onDiscard && (
+          <ConfirmDialog
+            title="删除后，这条会话找不回来"
+            description="它记下的回滚位置也跟着没。代码不受影响。"
+            confirmLabel="删除这条会话"
+            onClose={() => setDiscarding(null)}
+            onConfirm={async () => {
+              const problem = await onDiscard(discarding.id)
+              if (problem === null) {
+                setDiscarding(null)
+              }
+              return problem
+            }}
+          />
+        )}
       </DialogContent>
     </Dialog>
   )

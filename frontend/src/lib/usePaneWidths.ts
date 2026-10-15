@@ -27,10 +27,10 @@ export interface PaneWidths {
 }
 
 /** 左栏默认宽度。它是一条导航，不该跟着窗口变胖。 */
-export const DEFAULT_LEFT = 224
+export const DEFAULT_LEFT = 256
 
 /** 右栏默认宽度。一段可读文本的行宽，再宽就开始费眼睛了。 */
-export const DEFAULT_RIGHT = 416
+export const DEFAULT_RIGHT = 480
 
 /** 两栏各自的下限。再窄的话，树里一行文件名都要被截掉，那就不如不给拖。 */
 const MIN_LEFT = 160

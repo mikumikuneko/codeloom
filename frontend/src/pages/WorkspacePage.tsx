@@ -266,8 +266,23 @@ export function WorkspacePage() {
   const wantsFresh = useRef(false)
 
   useEffect(() => {
-    if (mine.length === 0 || wantsFresh.current) return
-    setMySession((current) => current ?? remembered(projectId) ?? mine[0].id)
+    if (wantsFresh.current) return
+    setMySession((current) => {
+      // ★ **选中的那条可能已经不在了**（被删掉、或者列表刚刷新过），留着它不行：
+      //   右栏会一直去连一条不存在的会话，服务端回 404，浏览器就永远在重连、
+      //   界面上挂着一条消不掉的"连接断了"。所以这里**不能只填空、也要能清**。
+      if (current !== null && mine.some((s) => s.id === current)) {
+        return current
+      }
+      if (mine.length === 0) {
+        return null
+      }
+      // 记住的那条同理：它也可能是一条已经删掉的
+      const rememberedId = remembered(projectId)
+      return rememberedId !== null && mine.some((s) => s.id === rememberedId)
+        ? rememberedId
+        : mine[0].id
+    })
   }, [mine, projectId])
 
   useEffect(() => {
@@ -307,6 +322,38 @@ export function WorkspacePage() {
     } catch {
       // 隐私模式下 localStorage 会抛。那不是错误，只是"记不住"而已（同 remembered）
     }
+  }
+
+  /**
+   * 丢弃一条会话。对话没了，**代码留着** —— 树属于「人 + 项目」，不属这条会话。
+   *
+   * <p>**删掉的正好是"记住的那条"时，要连那条记录一起清**：不清的话刷新之后它又被捡回来
+   *（上面那个自动选中的 effect 看的就是它），而那条会话已经不存在了，右栏会停在一个
+   * 读不到的东西上。清掉之后它会自己落到剩下的第一条；一条都不剩时右栏回到"还没有会话"。
+   *
+   * <p>**不在这里拦"正在跑"**：后端抢的是**那棵树**的租约，所以"正在执行中"也可能是
+   * 这个人**另一条**会话在跑 —— 光看这一行的状态看不出来。与其时灵时不灵地禁用，
+   * 不如让它如实报回来（那句话会原样显示在确认框里）。
+   */
+  async function discardSession(sessionId: string): Promise<string | null> {
+    try {
+      await sessionsApi.discard(sessionId)
+    } catch (e) {
+      return e instanceof ApiError ? e.message : '连不上服务器'
+    }
+    if (mySession === sessionId) {
+      try {
+        localStorage.removeItem(rememberKey(projectId))
+      } catch {
+        // 同上：隐私模式下会抛，那只是"记不住"
+      }
+    }
+    // **这里不要顺手 setMySession(null)。** 此刻 `mine` 还是刷新之前那份、**里面还有刚删的这条**，
+    // 而下面那个 effect 是"空着就从 mine 里挑一条" —— 于是它会把这条刚删掉的又选回来，
+    // 之后列表刷新了也再没人去纠正它（那句只填空不清）。让选中的那条先留着，
+    // 等 reload 回来 `mine` 里没有它了，那个 effect 会自己把选择挪到一条还在的上
+    all.reload()
+    return null
   }
 
   return (
@@ -402,7 +449,7 @@ export function WorkspacePage() {
       {/* 三栏这一行。左右两栏的宽度是**拖出来的**（见 usePaneWidths），
           所以它们的宽度走 inline style，而中间那一片靠 flex-1 吃掉剩下的 */}
       <div ref={row} className="flex min-h-0 flex-1">
-        {/* 左：树。它是一条导航，宽度由人拖出来 —— 默认那 224px 只是起点。
+        {/* 左：树。它是一条导航，宽度由人拖出来 —— 默认的那一档只是起点。
             这一栏的**头和身子整块归 FileTree**：头上有两个作用在整棵树上的动作
             （刷新、全部折叠），把状态留在树里比从这一层往下传干净 */}
         <aside className="flex min-h-0 shrink-0 flex-col" style={{ width: panes.left }}>
@@ -546,6 +593,7 @@ export function WorkspacePage() {
                   slots={slots}
                   selectedId={mySession}
                   onSelect={choose}
+                  onDiscard={discardSession}
                   // 列表只在打开项目时拉过一次（见上面那个 useAsync）—— 标题是服务端算的，
                   // 所以要打开时补一次，否则刚说的第一句话要刷新页面才看得见
                   onOpen={() => all.reload()}

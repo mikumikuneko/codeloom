@@ -91,9 +91,11 @@ function DialogContent({
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
+    // gap-4：这个框内部的别的缝都是 16 或 20（内容之间 gap-4、卡片内边距 p-5），
+    // 只有标题与描述之间原来是 8 —— 那个值是**漏出来的**，不是有意留窄
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2", className)}
+      className={cn("flex flex-col gap-4", className)}
       {...props}
     />
   )
@@ -108,10 +110,18 @@ function DialogFooter({
   showCloseButton?: boolean
 }) {
   return (
+    // **页脚不画分隔线、也不铺底。** 它原来带 border-t + bg-muted/40，而在这套令牌下
+    // 那层底是画不出来的（--muted #1d1d22 落在 --popover #1a1a1f 上，差 3/255）——
+    // 于是屏幕上只剩一条横贯的线，卡片看着像被拦腰截断、按钮掉到了外面。
+    // 这里要的是"按钮在卡片里"，不是"卡片下面接了个条"
+    //
+    // **也不加 mt。** 加了它，页脚上面那条缝就比别处宽（grid 的 gap-4 再加这一截），
+    // 于是"标题—描述—按钮"三段里，描述是**贴着标题**的、不在中间。
+    // 不加，上下两条缝一样宽，它自然落在正中
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-5 -mb-5 mt-2 flex flex-col-reverse gap-2 rounded-b-2xl border-t bg-muted/40 px-5 py-4 sm:flex-row sm:justify-end",
+        "-mx-5 -mb-5 flex flex-col-reverse gap-2 px-5 py-4 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
@@ -134,7 +144,9 @@ function DialogTitle({
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "font-heading text-base leading-none font-medium",
+        // leading-snug 而不是 leading-none：行高等于字号时，标题的下沿**紧贴着字底**，
+        // 于是它和下面那行之间的缝看起来比实际值小一截。给标题一点行高，两段才分得开
+        "font-heading text-base leading-snug font-medium",
         className
       )}
       {...props}
