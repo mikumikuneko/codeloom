@@ -1,6 +1,6 @@
 ---
 name: codeloom-comment-standard
-description: Use when writing, reviewing, trimming, or auditing comments and javadoc anywhere in the codeloom repo — Java main and test sources, the frontend's TypeScript, and configuration or SQL comments
+description: Use when writing, reviewing, trimming, or auditing comments and javadoc anywhere in the codeloom repo — Java main and test sources, the frontend's TypeScript, and configuration or SQL comments. Not string literals — those are behavior (see codeloom-prompt-standard and codeloom-ui-standard)
 ---
 
 # codeloom 的注释判据

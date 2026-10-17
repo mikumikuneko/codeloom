@@ -1,6 +1,6 @@
 ---
 name: codeloom-ui-standard
-description: Use when changing anything a user sees in the frontend — layout and spacing, where feedback appears, overlay and menu behavior, loading and empty states, or user-visible copy
+description: Use when changing anything a user sees in the frontend — layout and spacing, where feedback appears, overlay and menu behavior, loading and empty states, or user-visible copy. Not code comments (see codeloom-comment-standard) or model-facing text (see codeloom-prompt-standard)
 ---
 
 # codeloom 的界面判据

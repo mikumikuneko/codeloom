@@ -1,6 +1,6 @@
 ---
 name: codeloom-prompt-standard
-description: Use when writing or changing text the model reads — a tool's name, description or parameter schema, a platform-injected instruction, or a tool-result notice (spill path, truncation, approval answer, synthesized result). Not comments (see codeloom-comment-standard) and not user-facing copy
+description: Use when writing or changing text the model reads — a tool's name, description or parameter schema, a platform-injected instruction, or a tool-result notice (spill path, truncation, approval answer, synthesized result). Not comments (see codeloom-comment-standard) and not user-facing copy (see codeloom-ui-standard)
 ---
 
 # codeloom 的提示词判据
