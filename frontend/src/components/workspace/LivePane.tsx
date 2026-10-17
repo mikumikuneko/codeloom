@@ -33,6 +33,7 @@ export function LivePane({
   progress,
   footer,
   rail,
+  visible = true,
   children,
 }: {
   /** 连接断了。正常时传 false —— **那时什么都不显示** */
@@ -41,6 +42,14 @@ export function LivePane({
   progress: string
   /** 贴在底部那条固定的东西（输入框） */
   footer?: React.ReactNode
+  /**
+   * 这一栏现在看不看得见。
+   *
+   * <p>聊天室被标签页藏起来时**仍然挂着连接**（不然收不到对方的字），但它同时
+   * 也是 `display: none` —— 那种状态下 `scrollIntoView` 什么都不做。所以切回来
+   * 的那一刻要自己再落一次底，否则人看到的是"上一条"而不是"最新一条"。
+   */
+  visible?: boolean
   /**
    * 钉在右边缘的一条细导航（轮次导航），它**不跟着内容滚**。
    *
@@ -54,6 +63,13 @@ export function LivePane({
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
   const [awayFromBottom, setAwayFromBottom] = useState(false)
+
+  // 从藏起来变回看得见：补一次落底（见 visible 的注释）
+  useEffect(() => {
+    if (visible) {
+      bottom.current?.scrollIntoView({ block: 'end' })
+    }
+  }, [visible])
 
   useEffect(() => {
     const node = scroller.current

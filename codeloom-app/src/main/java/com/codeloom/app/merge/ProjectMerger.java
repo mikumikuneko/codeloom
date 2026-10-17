@@ -73,6 +73,21 @@ public class ProjectMerger {
                                      boolean requireUpToDate) {
         projects.lock(project.id());
 
+        // **未收尾的合并会把下一次合并变成 500。**
+        //
+        // git 不会让同一块工作区里同时存在两个未完成的合并；第二次 `merge` 直接以
+        // 非零退出，而那在 GitClient 里是一个 GitCommandException —— 没有翻译的话，
+        // 客户端看到的就是一句"请求失败（HTTP 500）"。这里把它说成 409，并给出下一步。
+        //
+        // 两处都要看：冲突可能留在**这棵树的工作区**（同步那一步），也可能留在
+        // **主干**（合回那一步）。见 pendingMerge 的注释。
+        Path sessionWorktree = workspaceOf(session).path();
+        if (workspaces.mergeInProgress(sessionWorktree)
+                || workspaces.mergeInProgress(mainOf(project))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "有一笔合并还没收尾：先在中间裁决冲突，或者放弃合并");
+        }
+
         // ★ 过期检查放在**锁里面**：锁到手了主干就不会动，此刻查才有意义。
         //   放在锁外面查的话，查完到合之间还有一段窗口 —— 而那正是它要消灭的东西。
         //

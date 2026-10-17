@@ -59,6 +59,7 @@ export function SessionStreamView({
   nameOf,
   canApprove = false,
   footer,
+  emptyHint,
   onOpenFile,
   onOpenDiff,
 
@@ -101,9 +102,18 @@ export function SessionStreamView({
    */
   footer?: (items: StreamItem[]) => React.ReactNode
   /**
-   * 点流里提到的文件，在中栏打开它。
+   * 观战栏空着时的说法。
    *
-   * <p>**观战时也传**：看别人的 agent 改了一个文件，正是最想打开看的时候。
+   * <p>三种空法不是同一件事：还没有队友 / 队友还没有会话 / 正在打开。
+   * 写死成一句"对方还没有会话。把邀请链接发给对方"会对已经进来的人说错话 ——
+   * 而"列表还没刷新"的时候还会把人往"他是不是没进来"的方向带。
+   */
+  emptyHint?: string
+  /**
+   * 点流里提到的文件。
+   *
+   * <p>看自己的会话时是"在中栏打开它"；观战时文件在**对方的树**里，调用方给的
+   * 是另一种动作（说明它还没合并，而不是去读一棵里面没有它的树）。
    */
   onOpenFile?: (path: string) => void
   onOpenDiff?: (commitSha: string, path: string) => void
@@ -300,7 +310,9 @@ export function SessionStreamView({
           // 观战没有输入框，上面那句话没有东西可指 —— 那就回到全站统一的空状态：
           // 落在正中间（"这里本来就没有东西"），不贴顶（"内容没加载出来"的样子）
           <div className="pane-absent h-full">
-            <p className="text-muted-foreground">对方还没有会话。把邀请链接发给对方，他就能进来。</p>
+            <p className="text-muted-foreground">
+              {emptyHint ?? '对方还没有会话。把邀请链接发给对方，他就能进来。'}
+            </p>
           </div>
         )
       ) : (
@@ -448,6 +460,7 @@ function Item({
           args={item.args}
           outcome={item.outcome}
           unfinished={item.unfinished}
+          speaker={speaker}
           onOpenFile={onOpenFile}
 
         />
@@ -470,12 +483,14 @@ function Item({
             callId={item.callId}
             reason={item.reason}
             canApprove={canApprove}
+            speaker={speaker}
           />
         )
       }
       // **答复之后不画一行"某某批准了那次调用"**：能批的只有这条会话的主人自己，
       // 观战的人本来就按不动 —— 那行字等于在告诉你"你刚才点了一下"。
-      // 拒绝也不用单独说：那条调用自己的行上写着"你拒绝了"（见 ToolLine 的结局词）
+      // 拒绝也不用单独说：那条调用自己的行上写着"X 拒绝了"（见 ToolLine 的结局词，
+      // 观战时 X 是会话主人的名字，不是正在看的人）
       return null
 
     case 'notice': {
@@ -1387,12 +1402,15 @@ function PendingApproval({
   callId,
   reason,
   canApprove,
+  speaker,
 }: {
   sessionId: string | null
   callId: string
   /** 后端为什么要问。空串 = 老事件里没这一项（那时它还不存在） */
   reason: string
   canApprove: boolean
+  /** 等的是**谁的**批准。观战时是会话主人的名字 —— 不是正在看的人 */
+  speaker: string
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1415,7 +1433,8 @@ function PendingApproval({
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
       {/* 不是 loom-faint：这一刻 agent 是**停着的**，这一行是全屏唯一在做事的入口 */}
-      <span className="text-xs text-muted-foreground">等你批准一次调用</span>
+      {/* **等谁批**要说对：观战的人没有按钮，对他说"等你批准"是一句他做不到的话 */}
+      <span className="text-xs text-muted-foreground">等{speaker}批准一次调用</span>
 
       {/* **为什么问你。** 这一句是后端判据说的（见 CommandApproval）——
           三种情况要人过目的东西完全不同（不认识那个程序 / 动了工作区外面的路径 /
@@ -1485,6 +1504,7 @@ function ToolLine({
   args,
   outcome,
   unfinished,
+  speaker,
   onOpenFile,
 }: {
   name: string
@@ -1492,6 +1512,8 @@ function ToolLine({
   outcome: ToolOutcome | null
   /** 非空 = 它存在过、但没有结果。见 {@link Unfinished} */
   unfinished: Unfinished | null
+  /** 这条会话的主人怎么称呼。拒绝是**他**做的，不是正在看的人 */
+  speaker: string
   /** 点那个路径打开它。不传就只是一行字（观战时不留一个点了没反应的入口） */
   onOpenFile?: (path: string) => void
 
@@ -1530,7 +1552,9 @@ function ToolLine({
   // 行首那个红点已经把"这一行没成"说完了，右端再写"没跑成"是用两种记号说同一件事
   const suffix =
     unfinished !== null
-      ? UNFINISHED_WORD[unfinished]
+      ? unfinished === 'rejected'
+        ? `${speaker}拒绝了`
+        : UNFINISHED_WORD[unfinished]
       : failed && outcome !== null && outcome.exitCode !== null
         ? `退出码 ${outcome.exitCode}`
         : null
@@ -1547,7 +1571,7 @@ function ToolLine({
             running={running}
             failed={failed}
             unfinished={unfinished !== null}
-            label={stateWord(outcome, unfinished)}
+            label={stateWord(outcome, unfinished, speaker)}
           />
         </span>
 
@@ -2461,9 +2485,15 @@ const UNFINISHED_STATE_WORD: Record<Unfinished, string> = {
 }
 
 /** 状态说给人听（也是说给读屏器听）。**记号画得出来，但读不出来。** */
-function stateWord(outcome: ToolOutcome | null, unfinished: Unfinished | null): string {
+function stateWord(
+  outcome: ToolOutcome | null,
+  unfinished: Unfinished | null,
+  speaker: string,
+): string {
   if (unfinished !== null) {
-    return UNFINISHED_STATE_WORD[unfinished]
+    return unfinished === 'rejected'
+      ? `${speaker}拒绝了这次调用，没有结果`
+      : UNFINISHED_STATE_WORD[unfinished]
   }
   if (outcome === null) return '运行中'
   if (outcome.success) return '已完成'

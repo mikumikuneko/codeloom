@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Folder } from 'lucide-react'
 
@@ -28,6 +28,33 @@ import { useAuth } from '@/stores/auth'
 export function ProjectsPage() {
   const { data: mine, error, loading, reload } = useAsync(() => projects.mine(), [])
   const [open, setOpen] = useState(false)
+
+  /**
+   * 这一页也**安静地**自己刷：成员名是"谁在这个项目里"，对方刚通过邀请链接加入时，
+   * 这里的卡片也应该跟上（和 {@code WorkspacePage} 的轮询是同一个理由）。
+   *
+   * <p>用 `quiet` 重拉：这一页的 loading 会在列表上面挂一句"正在读取…" ——
+   * 每 5 秒闪一次比不刷新更糟。
+   */
+  const liveReload = useRef(reload)
+  useEffect(() => {
+    liveReload.current = reload
+  })
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === 'visible') {
+        liveReload.current(true)
+      }
+    }
+    const timer = window.setInterval(tick, 5000)
+    window.addEventListener('focus', tick)
+    document.addEventListener('visibilitychange', tick)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', tick)
+      document.removeEventListener('visibilitychange', tick)
+    }
+  }, [])
 
   return (
     <div className="space-y-8">

@@ -83,6 +83,20 @@ public class SessionSyncService {
     public SyncOutcome sync(Session session, LeaseToken token) {
         Workspace workspace = workspaceOf(session);
 
+        // **上一次冲突还没收尾时，不要再起一次合并。**
+        //
+        // git 在同一块工作区里不允许两个未完成的合并：第二次 `merge main` 会直接
+        // 以非零退出，而那在 GitClient 里是一个 GitCommandException —— 到这里的
+        // 表现就是 500（对用户来说只有一句"请求失败"）。把它说清楚：409，并且
+        // 告诉他下一步该做什么。
+        //
+        // 为什么这一步放在**读 HEAD 之前**：此时读到的 HEAD 属于那次未完成的合并，
+        // 拿它去写事件只会把一个中间状态记成事实。
+        if (workspaces.mergeInProgress(workspace.path())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "这棵树里有一笔合并还没收尾：先在中间裁决冲突，或者放弃合并");
+        }
+
         // 从**磁盘**读，不是从 session 那一列 —— 我们要记的正是"我把它从哪儿挪到了哪儿"
         String fromHead = workspace.headCommit();
 

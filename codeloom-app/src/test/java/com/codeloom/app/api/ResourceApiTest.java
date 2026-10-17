@@ -832,6 +832,20 @@ class ResourceApiTest {
         assertThat(alice.post("/api/sessions/" + mine.value() + "/sync", "{}").statusCode())
                 .isEqualTo(409);
 
+        // ★ **冲突没收尾时，同步和合并都不该是 500。**
+        //   git 不允许同一块工作区里有两个未完成的合并；第二次 merge 会以非零退出，
+        //   没有翻译的话客户端只会看到"请求失败（HTTP 500）" —— 那是把
+        //   "你还有一步没做"说成了"服务器坏了"。两条都必须是 409，而且说清楚原因。
+        HttpResponse<String> syncAgain = alice.post(
+                "/api/sessions/" + mine.value() + "/sync", "{}");
+        assertThat(syncAgain.statusCode()).isEqualTo(409);
+        assertThat(syncAgain.body()).contains("还没收尾");
+
+        HttpResponse<String> mergeWhilePending = alice.post(
+                "/api/sessions/" + mine.value() + "/merge", "{}");
+        assertThat(mergeWhilePending.statusCode()).isEqualTo(409);
+        assertThat(mergeWhilePending.body()).contains("还没收尾");
+
         // ★ 裁决端点不需要知道冲突在哪块工作区 —— 它自己去找
         //   （主干上也有过冲突的旧路径，所以"在哪"这件事由后端回答，不该让客户端记）
         JsonNode envelope = conflictsEnvelope(alice, mine);

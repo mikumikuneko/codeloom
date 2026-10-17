@@ -17,6 +17,7 @@ import { Button } from '@/components/ui/button'
 import { ApiError, errorText, merge, projects, sessions as sessionsApi, type Conflicts } from '@/lib/api'
 import { personDot, slotsOf, type PersonSlot } from '@/lib/people'
 import type { NoticeTone } from '@/lib/sessionStream'
+import { trackTheirSessions } from '@/lib/sessionUnread'
 import { readStorage, removeStorage } from '@/lib/storage'
 import { useAsync } from '@/lib/useAsync'
 import { usePaneWidths } from '@/lib/usePaneWidths'
@@ -103,6 +104,57 @@ export function WorkspacePage() {
   const [busy, setBusy] = useState(false)
 
   /**
+   * 聊天室里有几条是**我没看的时候**来的。
+   *
+   * <p>ChatPanel 现在**一直挂着**（切到别的标签也不卸载）—— 连接得一直开着，
+   * 否则"对方说话"这件事只有我切回去的那一刻才知道。它每次消息条数变化都报一声，
+   * 这里拿"上一次看见的条数"作差。
+   *
+   * <p>`chatSeen === null` 表示还没拿到第一次历史：那一批不算未读 ——
+   * 否则每次进项目都会凭空多一个点。
+   */
+  const [chatUnread, setChatUnread] = useState(0)
+  const chatCount = useRef(0)
+  const chatSeen = useRef<number | null>(null)
+
+  // `active` 由 ChatPanel 一起报上来 —— 它手上的那个值就是**这一帧**的事实，
+  // 比在这里再维护一个 tab ref 少一次同步，也没有"effect 还没跑"的那个窗口
+  const onChatMessages = useCallback((count: number, active: boolean) => {
+    chatCount.current = count
+    if (chatSeen.current === null) {
+      chatSeen.current = count
+      return
+    }
+    if (active) {
+      chatSeen.current = count
+      setChatUnread(0)
+      return
+    }
+    setChatUnread(Math.max(0, count - chatSeen.current))
+  }, [])
+
+  // 换项目：未读的基准归零。上一个项目的"看到第几条"对新项目没有意义，
+  // 留着的话新项目的历史会被算成未读
+  useEffect(() => {
+    chatSeen.current = null
+    chatCount.current = 0
+    setChatUnread(0)
+  }, [projectId])
+
+  /** 切标签。切到聊天 = 已读；切到会看**别人**的标签时顺手重拉一次列表（见下面的轮询）。 */
+  function openTab(next: 'session' | 'chat' | 'watch') {
+    setTab(next)
+    if (next === 'chat') {
+      chatSeen.current = chatCount.current
+      setChatUnread(0)
+    }
+    if (next !== 'session') {
+      project.reload(true)
+      all.reload(true)
+    }
+  }
+
+  /**
    * 磁盘上又变了一版。**看着磁盘的两样东西都吃它**：左边那棵树、和中栏打开的那份文件。
    * 它们自己都看不见磁盘 —— 见 {@link refreshWorkspace}。
    */
@@ -178,6 +230,60 @@ export function WorkspacePage() {
     [mySession],
   )
 
+  /** 冲突还没裁决完。两个动作此刻都不该再发出去 —— 后端也会拒（409），但按钮该先说话 */
+  const conflictPending = (pending.data?.conflicts.length ?? 0) > 0
+
+  /**
+   * 这次冲突是**点哪个按钮**撞出来的。
+   *
+   * <p>后端给的方向（INTO_SESSION / INTO_MAIN）说的是"冲突落在哪一步"，而合并会
+   * **先同步**一次 —— 于是点「合并」撞出的冲突方向也是 INTO_SESSION，裁决页却写着
+   * "同步时撞上的"。用户刚点的是合并，那句话让他以为点错了按钮。
+   *
+   * <p>只在这一次点击里有效；刷新之后退回按方向说（那时确实分不出来）。
+   */
+  const [conflictTrigger, setConflictTrigger] = useState<'SYNC' | 'MERGE' | null>(null)
+
+  /**
+   * 两个人的列表**自己会变**：对方进来、开了一条新会话、删了一条会话。
+   *
+   * <p>这些事实没有一条会推给另一侧（SSE 是**每条会话**一条的，而我们连
+   * "对方开了一条新会话"这件事都不知道，更别说订阅它）。所以这里每 5 秒重拉一次
+   * 项目（成员）和会话列表，页面不可见时不拉。
+   *
+   * <p>用 `quiet` 重拉：不能每 5 秒闪一次"正在打开…"，也不能让一次网络抖动
+   * 把整页换成报错。内容没变时 useAsync 也不会换 data 的引用，所以不会白渲染。
+   */
+  const liveReload = useRef<() => void>(() => {})
+  // 在 effect 里写 ref（而不是渲染期间）。第一次 tick 要等到 5 秒后，那时它已经就位了
+  useEffect(() => {
+    liveReload.current = () => {
+      project.reload(true)
+      all.reload(true)
+    }
+  })
+
+  useEffect(() => {
+    const tick = () => {
+      if (document.visibilityState === 'visible') {
+        liveReload.current()
+      }
+    }
+    const timer = window.setInterval(tick, 5000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        liveReload.current()
+      }
+    }
+    window.addEventListener('focus', onVisible)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
   async function signOut() {
     await logout()
     navigate('/login', { replace: true })
@@ -206,7 +312,11 @@ export function WorkspacePage() {
    *   <li><b>会话正在跑</b> → 等它跑完</li>
    * </ul>
    */
-  async function act(what: () => Promise<unknown>, done: (status: string) => Notice) {
+  async function act(
+    trigger: 'SYNC' | 'MERGE',
+    what: () => Promise<unknown>,
+    done: (status: string) => Notice,
+  ) {
     setBusy(true)
     setNotice(null)
     try {
@@ -218,6 +328,7 @@ export function WorkspacePage() {
         const behind = e.problem.commitsBehind
         const conflicting = e.problem.conflictingPaths
         if (conflicting && conflicting.length > 0) {
+          setConflictTrigger(trigger)
           setNotice({ tone: 'plain', text: `${conflicting.length} 个文件冲突了，在中间裁决` })
           // 撞在冲突上时，磁盘也已经变了 —— `git merge --no-commit` 把冲突标记
           // 写进了文件里。中栏之所以不跟着变，是因为它只认"人选定了一份内容"；
@@ -236,7 +347,10 @@ export function WorkspacePage() {
     }
   }
 
-  const members = project.data?.members ?? []
+  // 三份派生数组都 memo 住：`useAsync` 在内容没变时保住了 `data` 的引用，
+  // 但 `.filter`/`?? []` 每次渲染都会造一个新数组 —— 而它们正是下面几个 effect
+  // 和 `nameOf` 的依赖。不 memo 的话，整条会话流会跟着父组件每次渲染重算一遍。
+  const members = useMemo(() => project.data?.members ?? [], [project.data])
 
   /**
    * 按 id 查一个人叫什么。事件流里带的都是 **用户 id**（用户名会变，唯一只说"此刻没重名"），
@@ -250,9 +364,60 @@ export function WorkspacePage() {
     const byId = new Map(members.map((member) => [member.id, member.displayName]))
     return (id: string) => byId.get(id) ?? null
   }, [members])
-  const mine = all.data?.filter((s) => s.ownerId === me?.id) ?? []
+  const mine = useMemo(
+    () => all.data?.filter((s) => s.ownerId === me?.id) ?? [],
+    [all.data, me?.id],
+  )
   const teammate = members.find((m) => m.id !== me?.id)
-  const theirs = all.data?.filter((s) => s.ownerId === teammate?.id) ?? []
+  const theirs = useMemo(
+    () => all.data?.filter((s) => s.ownerId === teammate?.id) ?? [],
+    [all.data, teammate?.id],
+  )
+
+  /**
+   * 观战栏空着时说什么。
+   *
+   * <p>从前它只有一句"对方还没有会话。把邀请链接发给对方，他就能进来" ——
+   * 对一个**已经在项目里**的人说这句话是错的；而"对方开了一条新会话，只是列表还没
+   * 刷新"的时候，它还会把人往错误的方向带（以为对方没进来）。三种情况分开说。
+   */
+  const watchHint =
+    teammate === undefined
+      ? '还没有队友。把邀请链接发给对方，他加入之后这里会显示他的会话。'
+      : theirs.length === 0
+        ? `${teammate.displayName} 还没有会话。他说话之后，这里会实时显示。`
+        : '正在打开对方的会话…'
+
+  /**
+   * 对方**新开**的会话，在我没看观战栏时点一个未读点。
+   *
+   * <p>会话列表每 5 秒自己刷（见上面的轮询），所以"对方开工了"这件事能出现；
+   * 但如果我停在会话/聊天标签上，它只是安静地躺在另一边。这一颗点就是那句话。
+   * 正在看观战栏时不算未读 —— 人就在那儿。
+   */
+  const [watchUnread, setWatchUnread] = useState(false)
+  const theirSeen = useRef<Set<string> | null>(null)
+  const theirSeenProject = useRef(projectId)
+
+  useEffect(() => {
+    // 换项目：上一个项目的"看过哪些"对新项目没有意义
+    if (theirSeenProject.current !== projectId) {
+      theirSeenProject.current = projectId
+      theirSeen.current = null
+      setWatchUnread(false)
+      return
+    }
+    if (all.data === null) {
+      return
+    }
+    const next = trackTheirSessions(
+      theirSeen.current,
+      theirs.map((s) => s.id),
+      tab === 'watch',
+    )
+    theirSeen.current = next.seen
+    setWatchUnread(next.unread)
+  }, [projectId, all.data, theirs, tab])
 
   // 默认选中哪条：**记住上次看的那条**，记不住就退回列表第一条。
   //
@@ -293,6 +458,21 @@ export function WorkspacePage() {
       setTheirSession((current) => current ?? theirs[0].id)
     }
   }, [theirs])
+
+  /**
+   * 正在看的那条**对方的**会话没了（他删了它，或者他退出了项目）。
+   *
+   * <p>不清掉的话，右栏会一直去连一条不存在的会话：服务端回 404，EventSource
+   * 就一直"连接断了，正在重连…"，而列表里那条要等刷新才消失。清掉并**说出来** ——
+   * 空状态那句话说的是"对方还没有会话"，而真实原因是"你正在看的那条刚被删了"。
+   */
+  useEffect(() => {
+    if (theirSession === null || theirs.some((s) => s.id === theirSession)) {
+      return
+    }
+    setTheirSession(theirs[0]?.id ?? null)
+    setNotice({ tone: 'plain', text: '对方的这条会话已经不在了' })
+  }, [theirs, theirSession])
 
   if (project.loading) return <Centered>正在打开…</Centered>
   if (project.error) return <Centered tone="error">{project.error}</Centered>
@@ -396,10 +576,11 @@ export function WorkspacePage() {
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={busy}
+                disabled={busy || conflictPending}
+                title={conflictPending ? '先裁决冲突，或者放弃合并' : undefined}
                 className="text-muted-foreground"
                 onClick={() =>
-                  void act(() => merge.sync(mySession), (status) => ({
+                  void act('SYNC', () => merge.sync(mySession), (status) => ({
                     tone: 'plain',
                     text: status === 'UP_TO_DATE' ? '主干没有新东西' : '已经同步到最新',
                   }))
@@ -410,9 +591,10 @@ export function WorkspacePage() {
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy}
+                disabled={busy || conflictPending}
+                title={conflictPending ? '先裁决冲突，或者放弃合并' : undefined}
                 onClick={() =>
-                  void act(() => merge.intoMain(mySession), (status) => ({
+                  void act('MERGE', () => merge.intoMain(mySession), (status) => ({
                     tone: 'plain',
                     text: status === 'FAST_FORWARD' ? '合进主干了' : '合进主干了（有一笔合并提交）',
                   }))
@@ -423,7 +605,7 @@ export function WorkspacePage() {
             </>
           )}
 
-          <CollaboratorsDialog project={data} />
+          <CollaboratorsDialog project={data} onOpen={() => project.reload(true)} />
           <Button variant="ghost" size="icon-sm" asChild className="text-muted-foreground">
             <Link to="/settings" title="设置">
               <Settings className="size-4" />
@@ -493,6 +675,7 @@ export function WorkspacePage() {
             <ConflictResolver
               sessionId={mySession}
               conflicts={pending.data as Conflicts}
+              trigger={conflictTrigger}
               onResolved={(outcome) => {
                 // 裁决就是把冲突标记从文件里抹掉并落盘 —— 磁盘变了
                 rereadWorkspace()
@@ -511,7 +694,7 @@ export function WorkspacePage() {
                 )
               }}
               onAbort={() =>
-                void act(() => merge.abort(mySession), () => ({
+                void act('MERGE', () => merge.abort(mySession), () => ({
                   tone: 'plain',
                   text: '放弃这次合并了，工作区回到合并前',
                 }))
@@ -548,24 +731,40 @@ export function WorkspacePage() {
         {/* 右：会话 */}
         <section className="flex shrink-0 flex-col" style={{ width: panes.right }}>
           <header className="pane-head gap-1 px-3">
-            <TabButton active={tab === 'session'} onClick={() => setTab('session')}>
+            <TabButton active={tab === 'session'} onClick={() => openTab('session')}>
               {/* 名字前那个点是"谁"—— 全站那两个人的颜色，每一处都在回答同一个问题 */}
               <span className={`mr-1.5 inline-block size-1.5 rounded-full align-middle ${personDot[mySlot]}`} />
               会话
             </TabButton>
-            <TabButton active={tab === 'chat'} onClick={() => setTab('chat')}>
+            <TabButton active={tab === 'chat'} onClick={() => openTab('chat')}>
               聊天
+              {/* 不在聊天标签时对方说的话，用一个点说出来。
+                  颜色用**那个人的**颜色 —— 全站"谁是谁"就是这一对，未读也是"他说话了" */}
+              {chatUnread > 0 && (
+                <span
+                  role="img"
+                  aria-label="有新消息"
+                  className={`ml-1.5 inline-block size-1.5 rounded-full align-middle ${personDot[theirSlot]}`}
+                />
+              )}
             </TabButton>
             {/* **观战始终在**，哪怕项目里现在只有你一个。
                 让它忽隐忽现（只有存在队友时才出现）看起来像"这个功能坏了"，
                 而它恰恰是这个产品的卖点 —— 它该一直看得见，点进去说清"还没有人可看"。 */}
-            <TabButton active={tab === 'watch'} onClick={() => setTab('watch')}>
+            <TabButton active={tab === 'watch'} onClick={() => openTab('watch')}>
               <span
                 className={`mr-1.5 inline-block size-1.5 rounded-full align-middle ${
                   teammate ? personDot[theirSlot] : 'bg-loom-faint'
                 }`}
               />
               观战
+              {watchUnread && (
+                <span
+                  role="img"
+                  aria-label="对方开始了新的会话"
+                  className={`ml-1.5 inline-block size-1.5 rounded-full align-middle ${personDot[theirSlot]}`}
+                />
+              )}
             </TabButton>
 
             {tab === 'session' && mine.length > 0 && (
@@ -589,8 +788,8 @@ export function WorkspacePage() {
                   selectedId={mySession}
                   onSelect={choose}
                   onDiscard={discardSession}
-                  // 列表只在打开项目时拉过一次（见上面那个 useAsync）—— 标题是服务端算的，
-                  // 所以要打开时补一次，否则刚说的第一句话要刷新页面才看得见
+                  // 列表每 5 秒会自己刷（见上面的轮询），但打开时还是补一次 ——
+                  // 标题是服务端按第一句话算的，刚说完的那句不该等下一个 tick 才变身
                   onOpen={() => all.reload()}
                 />
               </div>
@@ -611,18 +810,19 @@ export function WorkspacePage() {
           </header>
 
           <div className="min-h-0 flex-1">
-            {tab === 'chat' && (
+            {/* **聊天室一直挂着，只是藏起来。**
+                卸载它 = 断开 WebSocket，于是停留在别的标签时对方说的话要等到
+                切回来才拉历史 —— 而人不知道什么时候该切回来。挂着之后连接不断，
+                标签上的未读点才有东西可点。 */}
+            <div className={tab === 'chat' ? 'h-full' : 'hidden'}>
               <ChatPanel
                 project={data}
                 meId={me?.id}
                 nameOf={nameOf}
-
-
-
-
-
+                active={tab === 'chat'}
+                onMessages={onChatMessages}
               />
-            )}
+            </div>
             {tab === 'session' && (
               // 输入框走 footer 交给流本身，**不再当它的兄弟节点** ——
               // 两个兄弟各自撑高度的话，加起来必然超过容器，输入框就被顶出去看不见了
@@ -696,7 +896,17 @@ export function WorkspacePage() {
                 sessionId={theirSession}
                 speaker={teammate?.displayName ?? '对方'}
                 nameOf={nameOf}
-                onOpenFile={setSelectedFile}
+                emptyHint={watchHint}
+                // **不要把别人的文件路径接到"我的树"上。**
+                // 那个文件在对方的树里，还没合并到我这里；直接 setSelectedFile 会让中栏
+                // 去读我的工作区，然后报"不是一个普通文件" —— 一句和真实原因无关的话。
+                // 想看这一轮的改动，走下面那个 onOpenDiff（"改了 N 个文件"）。
+                onOpenFile={(path) =>
+                  setNotice({
+                    tone: 'plain',
+                    text: `${path} 在${teammate?.displayName ?? '对方'}的树里，还没合并。看这一轮的改动请点「改了 N 个文件」`,
+                  })
+                }
                 // 观战那一栏也一样：对方改了什么，正是最想看的
                 onOpenDiff={openDiff}
                 // 观战这栏**不给引用入口**：引用是"把我自己 agent 的某一步交接出去"，

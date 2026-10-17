@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { chat, type ChatMessage } from '@/lib/api'
+import { readChatOutbox, writeChatOutbox, type KeyValueStore } from '@/lib/chatOutbox'
+
+/** `sessionStorage` 在隐私模式/被禁用时可能连读取都抛 —— 拿不到就退回"只在内存里"。 */
+function safeSessionStore(): KeyValueStore | null {
+  try {
+    return typeof window === 'undefined' ? null : window.sessionStorage
+  } catch {
+    return null
+  }
+}
 
 /**
  * 项目聊天室的连接。
@@ -26,6 +36,13 @@ interface ChatConnection {
   messages: ChatMessage[]
   /** 连接断了。正常时**不显示任何状态** —— 一个常绿的"已连接"只是在占地方 */
   disconnected: boolean
+  /**
+   * 这个项目的**第一批历史**到了没有。
+   *
+   * <p>未读计数靠它：历史那一批不该算"新消息"。等它到了再开始数，
+   * 否则切换项目/重新挂载时那一屏旧消息会凭空变成一个未读点。
+   */
+  loaded: boolean
   send: (text: string) => void
 }
 
@@ -51,8 +68,25 @@ const RECONNECT_MAX_MS = 30_000
 export function useProjectChat(projectId: string): ChatConnection {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [disconnected, setDisconnected] = useState(false)
+  const [loaded, setLoaded] = useState(false)
   const socket = useRef<WebSocket | null>(null)
   const delay = useRef(RECONNECT_MIN_MS)
+  /** `sessionStorage` 的句柄。拿不到时 outbox 退回只在内存里（见 safeSessionStore） */
+  const store = safeSessionStore()
+  /**
+   * 连接还没 OPEN 时发的话。
+   *
+   * <p>从前面这里直接 `return` —— 而那是一个**静默的丢消息**：输入框清空了、
+   * 界面上一条都不多、历史里也没有。换项目、刷新页面都会让 ChatPanel 重新挂载，
+   * 所以"刚打开聊天就打字"不是边角情况。
+   *
+   * <p>排队到 onopen 再发。代价是消息可能晚几百毫秒到；但"晚到"比"没到"好，
+   * 而人看不出这几百毫秒。
+   *
+   * <p>队列**按项目写进 `sessionStorage`**（见 chatOutbox）：刷新一次（人连不上时最常
+   * 做的动作）不该把刚打的话抹掉。换项目时读的是这个项目自己那一份，不会串台。
+   */
+  const outbox = useRef<string[]>([])
 
   const merge = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => {
@@ -65,6 +99,11 @@ export function useProjectChat(projectId: string): ChatConnection {
   // 历史拉一次就够 —— 依赖里只放 projectId
   useEffect(() => {
     let cancelled = false
+    // 换项目：上一个项目的消息不属于这里；**没发出去的话按项目分别存着**，
+    // 切回来时会重新读出来（见 chatOutbox）
+    setMessages([])
+    setLoaded(false)
+    outbox.current = store ? readChatOutbox(store, projectId) : []
     chat
       .history(projectId)
       .then((history) => {
@@ -74,10 +113,13 @@ export function useProjectChat(projectId: string): ChatConnection {
         // 历史拉不到不该block住实时的那条通道：连接照建，只是前面那段看不到。
         // 所以这里**不设 error 状态** —— 那会把"聊天室不可用"和"看不到旧消息"混成一件事
       })
+      .finally(() => {
+        if (!cancelled) setLoaded(true)
+      })
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, store])
 
   useEffect(() => {
     let closed = false
@@ -98,6 +140,15 @@ export function useProjectChat(projectId: string): ChatConnection {
         setDisconnected(false)
         // 连上了就把退避重置回最短 —— 否则一次偶发的断线会让之后每次重连都等 30 秒
         delay.current = RECONNECT_MIN_MS
+        // 把连上之前打的那些话补发出去（见 outbox 的注释）。发完才清掉落盘的那一份 ——
+        // 没发出去就刷新/关页的话，下一次打开还会再试
+        const queued = outbox.current.splice(0)
+        for (const text of queued) {
+          ws.send(JSON.stringify({ text, anchorEventSeq: null, anchorText: null }))
+        }
+        if (store) {
+          writeChatOutbox(store, projectId, outbox.current)
+        }
       }
       ws.onmessage = (event) => {
         try {
@@ -128,17 +179,23 @@ export function useProjectChat(projectId: string): ChatConnection {
       socket.current?.close()
       socket.current = null
     }
-  }, [projectId, merge])
+  }, [projectId, merge, store])
 
   const send = useCallback((text: string) => {
-    const ws = socket.current
-    if (ws?.readyState !== WebSocket.OPEN) {
-      return
-    }
     // 锚点那两个字段照旧发 null：后端的列和接口都还在（引用那套界面撤了，
     // 但数据这一层留着），一个普通消息本来就是"没有锚点"
-    ws.send(JSON.stringify({ text, anchorEventSeq: null, anchorText: null }))
-  }, [])
+    const ws = socket.current
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ text, anchorEventSeq: null, anchorText: null }))
+      return
+    }
+    // 还没连上 —— 排着，onopen 时补发。**不要在这里静默 return**
+    outbox.current.push(text)
+    // 同时落到这个项目的草稿键里：刷新后还能补发（见 chatOutbox）
+    if (store) {
+      writeChatOutbox(store, projectId, outbox.current)
+    }
+  }, [projectId, store])
 
-  return { messages, disconnected, send }
+  return { messages, disconnected, loaded, send }
 }

@@ -29,11 +29,30 @@ import { useCopy } from '@/lib/useCopy'
  * 链接是**看不见的凭据**：发出去之后你会忘了发过，而它还在有效期内。
  * 所以"还没被接受的"必须能看见，并且能撤销 —— 这是这个弹窗存在的一半理由。
  */
-export function CollaboratorsDialog({ project }: { project: Project }) {
+export function CollaboratorsDialog({
+  project,
+  onOpen,
+}: {
+  project: Project
+  /**
+   * 弹窗打开时叫一声。
+   *
+   * <p>成员列表是**外面那份 project** 的，而它只在进页面时拉过一次 ——
+   * 对方刚通过邀请链接进来时，这里仍会显示"还有一个名额 / 还没有发出去的链接"。
+   * 打开这个弹窗正是"我想看看现在有谁"的时刻，重拉一次最自然。
+   */
+  onOpen?: () => void
+}) {
   const [open, setOpen] = useState(false)
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        if (next) onOpen?.()
+      }}
+    >
       <DialogTrigger asChild>
         <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground">
           协作
@@ -257,5 +276,5 @@ function LinkRow({
  * 两处必须长得一样。
  */
 function expiry(iso: string): string {
-  return `${formatMoment(iso)} 失效`
+  return `${formatMoment(iso)} 前有效`
 }

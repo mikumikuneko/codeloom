@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { errorText } from '@/lib/api'
 
@@ -18,7 +18,14 @@ interface AsyncState<T> {
   data: T | null
   error: string | null
   loading: boolean
-  reload: () => void
+  /**
+   * 再拉一次。
+   *
+   * <p>{@code quiet} 是给**轮询**用的：不把 {@code loading} 置真、失败也不写
+   * {@code error}。少了这个开关，工作区每 5 秒就会闪一次"正在打开…"，
+   * 一次网络抖动还会把整页换成一句报错 —— 而手上那份旧数据本来还能用。
+   */
+  reload: (quiet?: boolean) => void
 }
 
 export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState<T> {
@@ -26,6 +33,8 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [nonce, setNonce] = useState(0)
+  // 下一次运行是不是安静的那一种。用 ref 而不是 state：它不该触发渲染
+  const quiet = useRef(false)
 
   // load 每次渲染都是新的函数，所以依赖里不能放它 —— 那样会无限循环。
   // 调用方通过 deps 声明"什么时候该重新拉"
@@ -34,22 +43,47 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setError(null)
+    const silent = quiet.current
+    quiet.current = false
+    if (!silent) {
+      setLoading(true)
+      setError(null)
+    }
     run()
       .then((value) => {
-        if (!cancelled) setData(value)
+        if (cancelled) return
+        // 安静的那一次成功了，说明刚才的读取问题是暂时的：把旧错误收掉
+        if (silent) setError(null)
+        // **内容没变就不要换引用。** 轮询每 5 秒回来一份新对象，换引用的话
+        // `nameOf` 那类缓存会跟着重建，整条会话流于是每 5 秒重渲染一遍 ——
+        // 而屏幕上其实一个字都没变。
+        setData((current) =>
+          current !== null && JSON.stringify(current) === JSON.stringify(value)
+            ? current
+            : value,
+        )
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(errorText(e))
+        // 安静的那一次失败了就当没发生：旧数据还在，下一次轮询会再试
+        if (!cancelled && !silent) setError(errorText(e))
       })
       .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && !silent) setLoading(false)
       })
     return () => {
       cancelled = true
     }
   }, [run, nonce])
 
-  return { data, error, loading, reload: () => setNonce((n) => n + 1) }
+  return {
+    data,
+    error,
+    loading,
+    // `=== true` 而不是直接赋值：这个函数可能被当成事件处理器传下去，
+    // 那时第一个参数是一个 MouseEvent —— 而它是真值，会把一次正常重拉变成"安静"的
+    reload: (quietReload = false) => {
+      quiet.current = quietReload === true
+      setNonce((n) => n + 1)
+    },
+  }
 }

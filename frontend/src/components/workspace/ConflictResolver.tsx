@@ -26,11 +26,22 @@ import { personDot, type PersonSlot } from '@/lib/people'
 export function ConflictResolver({
   sessionId,
   conflicts,
+  trigger,
   onResolved,
   onAbort,
 }: {
   sessionId: string
   conflicts: Conflicts
+  /**
+   * 这次冲突出自用户点的哪个按钮。
+   *
+   * <p>方向（INTO_SESSION / INTO_MAIN）说的是"冲突落在哪一步"，而**合并会先同步** ——
+   * 点「合并」撞出的冲突方向也是 INTO_SESSION。只用方向说话，刚点了合并的人会看到
+   * "同步时撞上的"，以为点错了。点击来源比方向更接近他刚做的事。
+   *
+   * <p>刷新之后这个值没了（那时确实分不出来），退回按方向说。
+   */
+  trigger?: 'SYNC' | 'MERGE' | null
   /** 裁掉一个之后的结论。**调用方要靠它说清"下一步是什么"** —— 见下面那段 */
   onResolved: (outcome: MergeOutcome) => void
   onAbort: () => void
@@ -74,7 +85,13 @@ export function ConflictResolver({
               这个信息后端特意带出来了（见 ConflictView / MergeDirection），在这里用上 ——
               否则用户会以为"冲突没了"就等于"合完了" */}
           <span className="mr-1 text-xs text-loom-faint">
-            {conflicts.direction === 'INTO_SESSION' ? '同步时撞上的' : '合回主干时撞上的'}
+            {trigger === 'MERGE'
+              ? '合并时撞上的'
+              : trigger === 'SYNC'
+                ? '同步时撞上的'
+                : conflicts.direction === 'INTO_SESSION'
+                  ? '同步时撞上的'
+                  : '合回主干时撞上的'}
           </span>
           {!editing && (
             <Button

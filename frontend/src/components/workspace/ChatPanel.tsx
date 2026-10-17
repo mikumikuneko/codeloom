@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useEffect } from 'react'
 
 import { ComposerBox } from '@/components/workspace/ComposerBox'
 import { LivePane } from '@/components/workspace/LivePane'
@@ -38,15 +38,29 @@ export function ChatPanel({
   project,
   meId,
   nameOf,
+  active = true,
+  onMessages,
 }: {
   project: Project
   meId: string | undefined
   /** 按 id 查名字。**和工作区里那份是同一个** —— 两处各建一张 Map 会有两套"查不到时说什么" */
   nameOf: (id: string) => string | null
+  /** 现在是不是正看着聊天。不在看的时候它仍然挂着连接 —— 见下面那段 */
+  active?: boolean
+  /** 消息条数变了就叫一声。工作区靠它决定「聊天」标签上要不要点一个未读点 */
+  onMessages?: (count: number, active: boolean) => void
 }) {
-  const { messages, disconnected, send } = useProjectChat(project.id)
+  const { messages, disconnected, loaded, send } = useProjectChat(project.id)
 
   const slots = slotsOf(project.members.map((m) => m.id))
+
+  // 离开这个标签页也**不卸载**它：连接要一直开着，否则"对方说话"这件事
+  // 只有回来那一刻才知道（而人不知道什么时候该回来）。见 WorkspacePage 的渲染处。
+  //
+  // **等历史到了再报**：那一批是"打开页面时本来就在那儿的话"，不该算未读。
+  useEffect(() => {
+    if (loaded) onMessages?.(messages.length, active)
+  }, [messages.length, loaded, active, onMessages])
 
   return (
     // 滚动、贴底、断线提示都在 LivePane 里；输入框在 ComposerBox 里 ——
@@ -54,10 +68,13 @@ export function ChatPanel({
     <LivePane
       disconnected={disconnected}
       progress="连接断了，正在重连…"
+      visible={active}
       footer={
-        // send 是同步的（往 socket 里塞一下），所以清空是**乐观**的：
-        // 万一没发出去（连接断了），那句话就没了。这里接受这个代价 ——
-        // 保留草稿会让"发送失败"看起来像"还没发"，而断线提示已经说清了为什么
+        // send 是同步的（往 socket 里塞一下），所以清空是**乐观**的。
+        // **还没连上时它不会丢**：useProjectChat 把消息排到 onopen 再补发。
+        // 连接已经建立、但发送途中恰好断了的那种情况仍会丢 —— WebSocket 的 send
+        // 没有回执，这一层分辨不出来。这里接受这个代价：保留草稿会让
+        // "发送失败"看起来像"还没发"，而断线提示已经说清了为什么
         <ComposerBox placeholder="说点什么" disabled={disconnected} onSend={send} />
       }
     >
