@@ -266,11 +266,6 @@ class ContextCompactorTest {
         }
 
         @Override
-        public long lastSeq(SessionId sessionId) {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
         public StoredEvent append(SessionId sessionId, PersistentEvent event, LeaseToken token) {
             throw new UnsupportedOperationException();
         }

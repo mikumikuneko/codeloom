@@ -22,7 +22,7 @@ import { chat, type ChatMessage } from '@/lib/api'
  * 一条渲染路径）。本地也追加一遍的话，就会依赖"去重"来兜住 —— 而那是本末倒置：
  * 去重是为了兜住上面那个时间窗口，不是为了兜住我们自己。
  */
-export interface ChatConnection {
+interface ChatConnection {
   messages: ChatMessage[]
   /** 连接断了。正常时**不显示任何状态** —— 一个常绿的"已连接"只是在占地方 */
   disconnected: boolean

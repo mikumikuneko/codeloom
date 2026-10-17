@@ -3,6 +3,7 @@ package com.codeloom.agent.tool;
 import com.codeloom.agent.llm.ToolDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,9 +57,31 @@ public final class ToolRegistry {
                 .toList();
     }
 
-    /** 默认工具集。 */
+    /**
+     * 默认工具集。
+     *
+     * <p>**不含联网工具**：那两个要按会话的实际能力给（见 {@link #withWeb()}），
+     * 而不是每个会话都摆出来、调用时再报"没有联网能力"。
+     */
     public static ToolRegistry standard() {
-        return new ToolRegistry(List.of(
+        return new ToolRegistry(standardTools());
+    }
+
+    /**
+     * 默认工具集 + 联网的两个。
+     *
+     * <p>给"这条会话确实有联网能力"的场合用 —— 判据在 app（哪一家、有没有密钥）。
+     * 两套都在启动时构造：schema 编译、主语核对那些检查对它们一视同仁。
+     */
+    public static ToolRegistry withWeb() {
+        List<Tool> tools = new ArrayList<>(standardTools());
+        tools.add(new WebSearchTool());
+        tools.add(new WebFetchTool());
+        return new ToolRegistry(tools);
+    }
+
+    private static List<Tool> standardTools() {
+        return List.of(
                 new ReadFileTool(),
                 new EditFileTool(),
                 new WriteFileTool(),
@@ -67,7 +90,7 @@ public final class ToolRegistry {
                 new RunCommandTool(),
                 // 它不碰工作区，产出的是**一条事实**（任务清单）——
                 // 由调用方落成事件，见 ToolOutcome.todoUpdate()
-                new TodoWriteTool()));
+                new TodoWriteTool());
     }
 
     /**

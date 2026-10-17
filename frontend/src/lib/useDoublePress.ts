@@ -7,23 +7,22 @@ import { useCallback, useEffect, useRef } from 'react'
  * 比人的反应时间（约 250ms）长得多，比"想一下再按"（一两秒）短。
  * 所以它能把"连按"和"我又按了一次"分开，而不用让界面弹一个"再按一次"的提示。
  */
-export const DOUBLE_PRESS_MS = 800
+const DOUBLE_PRESS_MS = 800
 
 /**
  * 连按两下才触发的那件事。
  *
- * <h2>第一次是立刻生效的，不是等着的</h2>
- * 这是这个 hook 最要紧的性质：**第一次按键马上跑 {@code onFirstPress}**，
- * 不推迟到超时之后再决定。因为用它的地方（打断一轮、清空输入框）都要求"按了就生效" ——
- * 要是等 800ms 才动，那 800ms 里界面是没反应的，而人只会以为这个键坏了。
+ * <h2>单独一下什么都不做</h2>
+ * 唯一用法是"连按两下 Esc 打开回滚"。第一下只进入"待定"，800ms 内没有第二下就作废 ——
+ * 因为单独按一下 Esc 本来就不该发生任何事。从前这里还有一个可选的
+ * {@code onFirstPress}，但没有任何调用方传它，等于一条永远不会走到的分支。
  *
- * <p>Claude Code 也是这个形状（第一次执行 + 进"待定"，超时自己失效，待定期间再来一次就是连按）。
+ * <p>Claude Code 的形状是"第一次执行 + 进待定"，差别在它的第一次有动作；
+ * 我们这里没有，所以不保留那个参数。
  *
  * @param onDoublePress 连按两下时跑它
- * @param onFirstPress  第一下就跑它（可选 —— Claude Code 在"打开回滚"那条路上传的是空函数，
- *                      因为没在跑的时候按 Esc 本来就不该发生任何事）
  */
-export function useDoublePress(onDoublePress: () => void, onFirstPress?: () => void) {
+export function useDoublePress(onDoublePress: () => void) {
   const lastPressAt = useRef(0)
   const waiting = useRef<number | undefined>(undefined)
 
@@ -47,12 +46,11 @@ export function useDoublePress(onDoublePress: () => void, onFirstPress?: () => v
       clear()
       onDoublePress()
     } else {
-      onFirstPress?.()
       clear()
       waiting.current = window.setTimeout(() => {
         waiting.current = undefined
       }, DOUBLE_PRESS_MS)
     }
     lastPressAt.current = now
-  }, [onDoublePress, onFirstPress, clear])
+  }, [onDoublePress, clear])
 }

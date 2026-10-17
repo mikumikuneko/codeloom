@@ -1,5 +1,6 @@
 package com.codeloom.workspace.exec;
 
+import com.codeloom.domain.port.CommandResult;
 import com.codeloom.domain.port.CommandTermination;
 
 import java.util.Objects;
@@ -33,12 +34,6 @@ public record ProcessOutcome(int exitCode,
         termination = termination == null ? CommandTermination.COMPLETED : termination;
     }
 
-    /** 只用于测试与"跑完了"那条路的省事写法。 */
-    public ProcessOutcome(int exitCode, String stdout, String stderr, boolean truncated,
-                          long durationMs) {
-        this(exitCode, stdout, stderr, truncated, durationMs, CommandTermination.COMPLETED);
-    }
-
     /**
      * 命令成功了吗。
      *
@@ -46,7 +41,9 @@ public record ProcessOutcome(int exitCode,
      * 而拿那个 0 当成功，等于把"我们掐断了它"读成"它干完了"。
      */
     public boolean succeeded() {
-        return termination == CommandTermination.COMPLETED && exitCode == 0;
+        // 和 CommandResult.success() **同一份判据**：两层各写一遍，
+        // 改一边就会让"执行器说成功、工具层说失败"
+        return CommandResult.succeeded(termination, exitCode);
     }
 
     /** 标准输出与标准错误的合并，用于交给模型的工具结果。 */

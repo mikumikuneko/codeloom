@@ -104,8 +104,9 @@ public class SessionSyncService {
     /**
      * 这条会话的工作区。
      *
-     * <p>建会话时就建好了（{@code SessionService.create} 里的 {@code workspaces.create}），
-     * 所以找不到意味着它被人从磁盘上删掉了 —— 服务端状态不对，不是客户端传错了。
+     * <p>建会话时就建好了（见 {@code WorkspaceProvisioner.ensure}），所以找不到意味着
+     * 那个目录被人从磁盘上删掉了 —— 服务端状态不对，不是客户端传错了。
+     * 这里问的是 {@code WorkspaceManager}（磁盘），不是库里的那一行。
      */
     private Workspace workspaceOf(Session session) {
         return workspaces.find(session.workspaceId()).orElseThrow(() -> new IllegalStateException(

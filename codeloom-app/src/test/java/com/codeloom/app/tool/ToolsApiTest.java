@@ -58,7 +58,7 @@ class ToolsApiTest {
     }
 
     @Test
-    @DisplayName("七个工具各带形状、词和主语键 —— 界面靠这三样渲染，不再认工具名")
+    @DisplayName("每个工具各带形状、词和主语键 —— 界面靠这三样渲染，不再认工具名")
     void everyToolDeclaresItsOwnSurface() throws Exception {
         TestBrowser browser = newAccount();
 
@@ -70,7 +70,8 @@ class ToolsApiTest {
                 .collect(Collectors.toMap(node -> node.get("name").asText(), node -> node));
 
         assertThat(byName.keySet()).containsExactlyInAnyOrder(
-                "read_file", "write_file", "edit_file", "grep", "glob", "run_command", "todo_write");
+                "read_file", "write_file", "edit_file", "grep", "glob", "run_command", "todo_write",
+                "web_search", "web_fetch");
 
         assertThat(byName.get("read_file").get("shape").asText()).isEqualTo("read");
         assertThat(byName.get("read_file").get("label").asText()).isEqualTo("读取");
@@ -87,6 +88,13 @@ class ToolsApiTest {
         // 走，所以"没有"在线上就是"这一项不存在"。前端要按可选读它
         assertThat(byName.get("todo_write").get("shape").asText()).isEqualTo("plan");
         assertThat(byName.get("todo_write").has("subjectKey")).isFalse();
+
+        assertThat(byName.get("web_search").get("shape").asText()).isEqualTo("search");
+        assertThat(byName.get("web_search").get("subjectKey").asText()).isEqualTo("queries");
+        // 网址不是工作区里的路径 —— 不能做成"点开这个文件"的入口
+        assertThat(byName.get("web_fetch").get("shape").asText()).isEqualTo("web");
+        assertThat(byName.get("web_fetch").get("subjectKey").asText()).isEqualTo("url");
+        assertThat(byName.get("web_fetch").get("subjectIsPath").asBoolean()).isFalse();
     }
 
     @Test

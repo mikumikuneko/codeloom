@@ -27,7 +27,7 @@ public final class EditFileTool implements Tool {
 
     @Override
     public String name() {
-        return "edit_file";
+        return ToolNames.EDIT_FILE;
     }
 
     @Override
@@ -92,8 +92,10 @@ public final class EditFileTool implements Tool {
         // 改其中一行"这种完全正当的用法挡掉。
         Optional<ReadLedger.Observation> observed = context.reads().observationOf(file);
         if (observed.isEmpty()) {
-            return ToolOutcome.failed("还没读过 " + rawPath + "，不能改它。"
-                    + "先用 read_file 看一眼它现在是什么样 —— 改之前得知道你要改的是哪一份内容。");
+            // **只说状态，不教它怎么做。** 从前这里还跟了一句"先用 read_file 看一眼…"，
+            // 而工具描述里已经写着这条约束 —— 重复的那半句会原样进工具结果，
+            // 于是界面上也出现一句教训人的话（它原本只是说给模型的）
+            return ToolOutcome.failed("还没读过 " + rawPath + "，不能改它。");
         }
         // 读完之后被别人改过：old_string 可能还匹配得上，但那是**另一份内容**里的位置。
         // 这时候改下去，改的和模型以为的不是同一处
@@ -124,8 +126,12 @@ public final class EditFileTool implements Tool {
         context.reads().mark(file, true);
 
         int line = lineOf(content, oldString);
+        // 界面那份带**起始行号**：diff 卡片要按它给每一行标号。
+        // 给模型看的那段话里也有这个数，但那是自由文本 —— 从里面反解行号等于猜
+        String presentation = "{\"kind\":\"diff\",\"startLine\":" + line + "}";
         return ToolOutcome.mutated("已修改 " + rawPath + "（第 " + line + " 行附近，替换 "
-                + oldString.length() + " 字符为 " + newString.length() + " 字符）");
+                + oldString.length() + " 字符为 " + newString.length() + " 字符）")
+                .withPresentation(presentation);
     }
 
     private static int countOccurrences(String content, String needle) {

@@ -11,10 +11,11 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { ApiError, invitations, inviteUrl, type Invitation, type Project } from '@/lib/api'
+import { errorText, invitations, inviteUrl, type Invitation, type Project } from '@/lib/api'
 import { personDot, slotsOf } from '@/lib/people'
 import { formatMoment } from '@/lib/time'
 import { useAsync } from '@/lib/useAsync'
+import { useCopy } from '@/lib/useCopy'
 
 /**
  * 协作：成员 + 邀请链接。
@@ -113,7 +114,7 @@ function Invites({ project }: { project: Project }) {
       setOpenedToken(created.token)
       reload()
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -183,20 +184,10 @@ function LinkRow({
   onToggle: () => void
   onChanged: () => void
 }) {
-  const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
+  // 和代码块那个复制按钮**共用一份反馈逻辑**：失败不假装成功，成功 1.2 秒后收回
+  const [copied, copy] = useCopy()
   const url = inviteUrl(invitation.token)
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-    } catch {
-      // 剪贴板 API 在非安全上下文（http 的局域网地址）里会被拒。
-      // 这时候**不假装成功** —— 链接就在旁边的输入框里，手动选中也行
-      setCopied(false)
-    }
-  }
 
   async function revoke() {
     setBusy(true)
@@ -221,7 +212,7 @@ function LinkRow({
             onFocus={(e) => e.currentTarget.select()}
             className="font-mono text-xs"
           />
-          <Button size="sm" className="h-8 shrink-0" onClick={() => void copy()}>
+          <Button size="sm" className="h-8 shrink-0" onClick={() => void copy(url)}>
             {copied ? '已复制' : '复制'}
           </Button>
         </div>

@@ -23,8 +23,6 @@ public interface ProjectRepository {
      */
     void delete(ProjectId id);
 
-    List<Project> findAll();
-
     /**
      * 某人参与的项目，**分页**。用于「我的项目」列表。
      *

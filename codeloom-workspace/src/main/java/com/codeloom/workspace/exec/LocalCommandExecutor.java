@@ -122,8 +122,7 @@ public final class LocalCommandExecutor implements CommandExecutor {
             return new CommandResult(exitCodeOf(outcome), outcome.combinedOutput(),
                     outcome.truncated(), outcome.durationMs(), outcome.termination());
         } catch (IOException e) {
-            throw new ProcessException(List.of(commandLine), ProcessException.Reason.START_FAILED,
-                    "命令没能落盘执行: " + e.getMessage(), e);
+            throw new ProcessException("命令没能落盘执行: " + e.getMessage(), e);
         } finally {
             deleteQuietly(script);
         }

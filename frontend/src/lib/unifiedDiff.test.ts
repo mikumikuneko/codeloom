@@ -40,10 +40,10 @@ describe('parseUnifiedDiff', () => {
     const rows = parseUnifiedDiff(TWO_FILES)
 
     expect(rows.slice(0, 4)).toEqual([
-      { kind: 'context', text: 'keep' },
-      { kind: 'removed', text: 'old' },
-      { kind: 'added', text: 'new' },
-      { kind: 'context', text: 'keep' },
+      { kind: 'context', text: 'keep', line: 1 },
+      { kind: 'removed', text: 'old', line: 2 },
+      { kind: 'added', text: 'new', line: 2 },
+      { kind: 'context', text: 'keep', line: 3 },
     ])
   })
 
@@ -62,8 +62,8 @@ describe('parseUnifiedDiff', () => {
     )
 
     expect(rows).toEqual([
-      { kind: 'removed', text: '-- 分隔线' },
-      { kind: 'added', text: '-- 分隔线（改了）' },
+      { kind: 'removed', text: '-- 分隔线', line: 1 },
+      { kind: 'added', text: '-- 分隔线（改了）', line: 1 },
     ])
   })
 
@@ -73,9 +73,32 @@ describe('parseUnifiedDiff', () => {
     )
 
     expect(rows).toEqual([
-      { kind: 'context', text: 'keep' },
-      { kind: 'removed', text: 'old' },
-      { kind: 'added', text: 'new' },
+      { kind: 'context', text: 'keep', line: 1 },
+      { kind: 'removed', text: 'old', line: 2 },
+      { kind: 'added', text: 'new', line: 2 },
+    ])
+  })
+
+  it('删行标旧号、加行标新号，hunk 之间各自接上自己的起始行', () => {
+    const rows = parseUnifiedDiff(
+      [
+        '@@ -5,3 +5,4 @@',
+        ' same',
+        '-old',
+        '+new1',
+        '+new2',
+        ' same',
+      ].join('\n'),
+    )
+
+    expect(rows).toEqual([
+      // 这段 hunk 从第 5 行开始，前面 4 行没显示
+      { kind: 'gap', hidden: 4 },
+      { kind: 'context', text: 'same', line: 5 },
+      { kind: 'removed', text: 'old', line: 6 },
+      { kind: 'added', text: 'new1', line: 6 },
+      { kind: 'added', text: 'new2', line: 7 },
+      { kind: 'context', text: 'same', line: 8 },
     ])
   })
 

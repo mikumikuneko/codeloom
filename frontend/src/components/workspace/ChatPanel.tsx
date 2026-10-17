@@ -4,6 +4,7 @@ import { ComposerBox } from '@/components/workspace/ComposerBox'
 import { LivePane } from '@/components/workspace/LivePane'
 import type { ChatMessage, Project } from '@/lib/api'
 import { personDot, slotsOf, type PersonSlot } from '@/lib/people'
+import { formatChatTime } from '@/lib/time'
 import { useProjectChat } from '@/lib/useProjectChat'
 
 /** 隔了这么久就值得标一次时间。挑 5 分钟是因为它正好是"一口气说完"和"过一会儿又说"的分界。 */
@@ -33,11 +34,19 @@ const TIME_GAP_MS = 5 * 60 * 1000
  * 不加的话昨天 22:00 和今天 22:00 在屏幕上长得一模一样 —— 那时候"时间"这个信息
  * 本身就是错的，比没有还坏。
  */
-export function ChatPanel({ project, meId }: { project: Project; meId: string | undefined }) {
+export function ChatPanel({
+  project,
+  meId,
+  nameOf,
+}: {
+  project: Project
+  meId: string | undefined
+  /** 按 id 查名字。**和工作区里那份是同一个** —— 两处各建一张 Map 会有两套"查不到时说什么" */
+  nameOf: (id: string) => string | null
+}) {
   const { messages, disconnected, send } = useProjectChat(project.id)
 
   const slots = slotsOf(project.members.map((m) => m.id))
-  const byId = new Map(project.members.map((m) => [m.id, m]))
 
   return (
     // 滚动、贴底、断线提示都在 LivePane 里；输入框在 ComposerBox 里 ——
@@ -63,13 +72,13 @@ export function ChatPanel({ project, meId }: { project: Project; meId: string | 
           <Fragment key={message.id}>
             {needsTime(messages, index) && (
               <p className="text-center text-xs text-loom-faint">
-                {timeLabel(message.createdAt)}
+                {formatChatTime(message.createdAt)}
               </p>
             )}
             <Line
               message={message}
               mine={message.authorId === meId}
-              authorName={byId.get(message.authorId)?.displayName ?? '某人'}
+              authorName={nameOf(message.authorId) ?? '某人'}
               slot={slots.get(message.authorId) ?? 'a'}
             />
           </Fragment>
@@ -90,35 +99,6 @@ function needsTime(messages: ChatMessage[], index: number): boolean {
   return (
     Date.parse(messages[index].createdAt) - Date.parse(messages[index - 1].createdAt) >= TIME_GAP_MS
   )
-}
-
-/** 今天只看时分；往前每退一档加一层限定，让"22:00"始终能定位到具体哪一天。 */
-function timeLabel(iso: string): string {
-  const at = new Date(iso)
-  const now = new Date()
-  const clock = `${two(at.getHours())}:${two(at.getMinutes())}`
-  if (isSameDay(at, now)) return clock
-
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  if (isSameDay(at, yesterday)) return `昨天 ${clock}`
-
-  const date = `${at.getMonth() + 1}月${at.getDate()}日`
-  return at.getFullYear() === now.getFullYear()
-    ? `${date} ${clock}`
-    : `${at.getFullYear()}年${date} ${clock}`
-}
-
-function isSameDay(a: Date, b: Date): boolean {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  )
-}
-
-function two(value: number): string {
-  return String(value).padStart(2, '0')
 }
 
 /**

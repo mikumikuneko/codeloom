@@ -13,10 +13,10 @@ package com.codeloom.app.tool;
  *
  * @param name          工具名。界面拿它和事件里的 {@code toolName} 对上
  * @param shape         什么形状：{@code read} / {@code edit} / {@code search} /
- *                      {@code execute} / {@code plan} / {@code other}。
+ *                      {@code execute} / {@code plan} / {@code web} / {@code other}。
  *                      界面按它选组件 —— **闭集**，所以新增工具只要形状是已有的，
  *                      界面一行都不用改
- * @param label         动作词（读取 / 新建 / 修改 / 运行 / 查找 / 搜索）。界面直接显示它。
+ * @param label         动作词（读取 / 新建 / 修改 / 运行 / 查找 / 搜索 / 抓取）。界面直接显示它。
  *                      <b>没声明时这个字段在响应里是缺席的</b>（见下）
  * @param subjectKey    参数里哪一项是这次调用的主语；<b>没有主语时缺席</b>
  * @param subjectIsPath 主语是不是一个工作区里的路径 —— 界面拿它决定"能不能点开"。

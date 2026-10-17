@@ -147,7 +147,8 @@ public class MergeController {
     /**
      * @param toCommitSha 合到哪个点。**省略 = 合到这条会话分支的最新**（全部产出）。
      *                    给了就必须是这条会话打过的**一个 checkpoint** —— 那个 sha 从
-     *                    {@code GET /api/sessions/{id}/checkpoints} 拿。
+     *                    事件流里的 {@code CHECKPOINT_CREATED} 拿（界面也是这么取的，
+     *                    见 {@code RewindPicker}）。
      *
      *                    <p>它不是"高级选项"：一轮的产出就是一个 checkpoint，
      *                    所以"做一段合一段"用的是同一个动作，只是把终点提前

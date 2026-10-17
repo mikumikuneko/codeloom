@@ -60,8 +60,6 @@ import java.util.function.Supplier;
  */
 public final class OpenAiCompatibleClient implements LlmClient {
 
-    private static final int MAX_ERROR_BODY_CHARS = 4_000;
-
     private final HttpClient http;
     private final ObjectMapper mapper;
     private final String endpoint;
@@ -315,7 +313,10 @@ public final class OpenAiCompatibleClient implements LlmClient {
         // 状态码 → 我们自己的分类。**分类的用处不是"报错更清楚"，是决定要不要重试**
         // （见 LlmCallException）：429 和 5xx 值得再来一次，400/401 再来一万次也一样。
         // 402 和 401 都属于"要人去处理"，但处理方式不同（充值 vs 换 key），所以分开。
-        String providerMessage = extractProviderMessage(body, mapper);
+        String providerMessage = ProviderErrorBody.message(body, mapper);
+        if (providerMessage.isEmpty()) {
+            providerMessage = "(服务端未返回错误说明)";
+        }
 
         LlmCallException.Kind kind = switch (status) {
             // 400/422 里混着两种**意思正相反**的失败：请求写错了（该让模型改写法）
@@ -325,6 +326,14 @@ public final class OpenAiCompatibleClient implements LlmClient {
                     : LlmCallException.Kind.INVALID_REQUEST;
             case 401 -> LlmCallException.Kind.AUTH;
             case 402 -> LlmCallException.Kind.INSUFFICIENT_BALANCE;
+            // 403 是权限/账号被拒（地区、封禁、没有这个模型的使用权），404 是端点或模型
+            // 写错了，413 是请求体太大 —— 这三种**再试多少次结果都一样**。
+            // 从前它们落进 default 的 NETWORK，等于每次失败都白烧三轮调用、
+            // 还把真正的错拖几十秒才报出来。联网那条适配器对同样几个码也是不可重试的。
+            case 403 -> LlmCallException.Kind.AUTH;
+            case 404, 413 -> LlmCallException.Kind.INVALID_REQUEST;
+            // 408 是"服务商读请求超时"，属于值得再来一次的那一类（和 NETWORK 同档）
+            case 408 -> LlmCallException.Kind.NETWORK;
             case 429 -> LlmCallException.Kind.RATE_LIMITED;
             default -> status >= 500 ? LlmCallException.Kind.SERVER_ERROR : LlmCallException.Kind.NETWORK;
         };
@@ -357,23 +366,6 @@ public final class OpenAiCompatibleClient implements LlmClient {
                 || haystack.contains("context length exceeded")
                 || haystack.contains("prompt is too long")
                 || haystack.contains("reduce the length of the messages");
-    }
-
-    private static String extractProviderMessage(String body, ObjectMapper mapper) {
-        if (body == null || body.isBlank()) {
-            return "(服务端未返回错误说明)";
-        }
-        try {
-            // 用注入的 mapper，不要为了解析一个小 JSON 体再 new 一个 ——
-            // 构造 ObjectMapper 远比解析本身贵
-            JsonNode error = mapper.readTree(body).path("error");
-            if (error.isObject() && error.hasNonNull("message")) {
-                return error.get("message").asText();
-            }
-        } catch (JsonProcessingException ignored) {
-            // 错误响应体未必是 JSON，那就原样返回
-        }
-        return body.length() <= MAX_ERROR_BODY_CHARS ? body : body.substring(0, MAX_ERROR_BODY_CHARS) + "…";
     }
 
     private static String readBodyQuietly(InputStream body) {
@@ -417,14 +409,6 @@ public final class OpenAiCompatibleClient implements LlmClient {
             return Math.max(0L, Duration.between(Instant.now(), when).toMillis());
         } catch (DateTimeParseException e) {
             return null;
-        }
-    }
-
-    private static void closeQuietly(InputStream stream) {
-        try {
-            stream.close();
-        } catch (IOException ignored) {
-            // 关闭失败无所谓，连接最终会自己回收
         }
     }
 

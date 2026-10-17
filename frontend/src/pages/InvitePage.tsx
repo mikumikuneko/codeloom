@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
-import { ApiError, invitations, type InvitationPreview } from '@/lib/api'
+import { errorText, invitations } from '@/lib/api'
 import { formatMoment } from '@/lib/time'
+import { useAsync } from '@/lib/useAsync'
 import { useAuth } from '@/stores/auth'
 
 /**
@@ -17,10 +18,10 @@ import { useAuth } from '@/stores/auth'
  * 所以预览这一步不需要登录（后端也是这么做的，见 {@code InvitationService.preview}），
  * 只有"加入"那一下才要。
  *
- * <h2>没有卡片 —— 它和登录页是同一个门面的两扇</h2>
- * 被邀请的人多半从没见过 codeloom，这一页和登录页就是他最先看到的两样东西，
- * 所以它们共用一套骨架：居中的一列字，产品名在最上面，底下是主角。
- * 六行短内容套一个带边框的盒子，盒子比内容重 —— 那正是"模板感"的来源。
+ * <h2>没有卡片 —— 这一点和登录页不同</h2>
+ * 登录页有一组表单，需要一个面把它托住；这一页只有几行字和**一个动作**，
+ * 套一个盒子反而会把注意力引到容器上。两页共用的是"居中一列、产品名在最上面"
+ * 那套骨架，不是一个盒子。
  *
  * <h2>主角是那一句话，所以它是标题的体量</h2>
  * 「root 邀请你加入 test」是这一页的全部信息：人名和项目名加重，连接词降成次要色。
@@ -54,33 +55,19 @@ export function InvitePage() {
   const user = useAuth((s) => s.user)
   const logout = useAuth((s) => s.logout)
 
-  const [preview, setPreview] = useState<InvitationPreview | null>(null)
+  // 预览 = 一次标准的"拉一次"（加载 / 出错 / 取消），见 useAsync
+  const { data: preview, error: loadError, loading } = useAsync(
+    () => invitations.preview(token),
+    [token],
+  )
+  /** "加入"那一下的失败。和上面那条读取失败分开 —— 一个还没拿到内容，一个已经有内容了 */
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  const [loading, setLoading] = useState(true)
 
   // 这一页可能在登录关卡外面，所以 "我是谁" 要自己问一次
   useEffect(() => {
     if (status === 'unknown') void load()
   }, [status, load])
-
-  useEffect(() => {
-    let cancelled = false
-    invitations
-      .preview(token)
-      .then((value) => {
-        if (!cancelled) setPreview(value)
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : '连不上服务器')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [token])
 
   async function accept() {
     setBusy(true)
@@ -89,7 +76,7 @@ export function InvitePage() {
       const project = await invitations.accept(token)
       navigate(`/projects/${project.id}`, { replace: true })
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -128,7 +115,7 @@ export function InvitePage() {
           <div className="space-y-6">
             <h1 className="text-sm font-semibold tracking-tight">codeloom</h1>
             <p role="alert" className="text-sm text-destructive">
-              {error ?? '连不上服务器'}
+              {loadError ?? error ?? '连不上服务器'}
             </p>
           </div>
         ) : (

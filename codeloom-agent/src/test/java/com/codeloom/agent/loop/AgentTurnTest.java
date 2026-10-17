@@ -10,6 +10,7 @@ import com.codeloom.agent.llm.LlmResult;
 import com.codeloom.agent.llm.TokenUsage;
 import com.codeloom.agent.llm.ToolCall;
 import com.codeloom.agent.support.ScriptedLlm;
+import com.codeloom.agent.web.WebAccess;
 import com.codeloom.agent.tool.CommandApproval;
 import com.codeloom.agent.tool.Tool;
 import com.codeloom.agent.tool.ToolContext;
@@ -49,6 +50,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
 import java.time.Instant;
@@ -100,6 +102,19 @@ class AgentTurnTest {
         assertThat(outcome.newEvents()).singleElement()
                 .isInstanceOf(AssistantMessage.class)
                 .satisfies(e -> assertThat(((AssistantMessage) e).text()).contains("一个字段 x"));
+    }
+
+    @Test
+    @DisplayName("每次请求的尾部带一行时钟 —— 没有它，「今天」会让模型去跑 date 并要人批")
+    void sendsTheClockWithEveryRequest() {
+        ScriptedLlm client = new ScriptedLlm(ScriptedLlm.answer("好"));
+
+        new AgentTurn().run(input(client));
+
+        String last = client.requests().getFirst().messages().getLast().content();
+        assertThat(last)
+                .startsWith("[平台指令] 现在是 ")
+                .contains(ZoneId.systemDefault().getId());
     }
 
     @Test
@@ -343,6 +358,38 @@ class AgentTurnTest {
         // 完整的意思是**两头都在**（不是只能读到开头）。注意它前面还有工具自己加的
         // "退出码…耗时…"那行 —— 落盘存的是工具结果的全文，不是命令的原始输出
         assertThat(persisted).contains("HEAD-").endsWith("-TAIL");
+    }
+
+    @Test
+    @DisplayName("【总预算】超预算改写结果时**不丢领域事实** —— 清单更新照常落事件")
+    void cappingKeepsDomainFacts() throws IOException {
+        ScriptedLlm client = new ScriptedLlm(
+                ScriptedLlm.toolCalls(
+                        ScriptedLlm.call("c1", "run_command", "{\"command\":\"build\"}"),
+                        ScriptedLlm.call("c2", "run_command", "{\"command\":\"build\"}"),
+                        ScriptedLlm.call("c3", "run_command", "{\"command\":\"build\"}"),
+                        ScriptedLlm.call("c4", "todo_write",
+                                "{\"todos\":[{\"content\":\"改代码\",\"state\":\"in_progress\"}]}")),
+                ScriptedLlm.answer("好了"));
+
+        // 前三次把这一轮的输出预算顶开；第四次（清单）的结果会被改写
+        CommandExecutor chatty = (ws, cmd, timeout, limit, cancel) ->
+                new CommandResult(0, "y".repeat(80_000), false, 5);
+
+        TurnOutcome outcome = new AgentTurn().run(new TurnInput(sessionId, projection(), worktree,
+                MODEL.systemPrompt(), client, MODEL, ModelCapabilities.UNKNOWN,
+                ToolRegistry.standard(), chatty, TokenBudget.DEFAULT,
+                VerificationPlan.NONE, CancellationToken.none()));
+
+        // 改写的是**给模型看的那段文本**，不该顺手把工具报上来的事实一起抹掉 ——
+        // 从前的 7 参重建就把 todoUpdate 置成了 null，症状是"清单明明写了，流里没有"
+        assertThat(outcome.newEvents()).anyMatch(TodoListUpdated.class::isInstance);
+        TodoListUpdated todos = (TodoListUpdated) outcome.newEvents().stream()
+                .filter(TodoListUpdated.class::isInstance)
+                .findFirst()
+                .orElseThrow();
+        assertThat(todos.items()).extracting(TodoListUpdated.Item::content)
+                .containsExactly("改代码");
     }
 
     @Test
@@ -1078,11 +1125,11 @@ class AgentTurnTest {
 
         // 读过的那份改得动：账跨轮传下来了（它现在跟着投影走，见 TurnInput 的类注释）
         assertThat(readFile("A.java")).contains("int x");
-        // 没读过的原样不动，而且回给模型的话说了"先读一遍"
+        // 没读过的原样不动，而且回给模型的话说了"还没读过"
         assertThat(readFile("B.java")).isEqualTo("class B {}\n");
         assertThat(outcome.newEvents()).filteredOn(ToolResult.class::isInstance)
                 .extracting(event -> ((ToolResult) event).output())
-                .anyMatch(output -> output.contains("先用 read_file"));
+                .anyMatch(output -> output.contains("还没读过"));
     }
 
     private void commit(List<PersistentEvent> events) {
@@ -1134,7 +1181,7 @@ class AgentTurnTest {
         return new TurnInput(sessionId, projection(), worktree, MODEL.systemPrompt(), client, MODEL,
                 ModelCapabilities.UNKNOWN, ToolRegistry.standard(), executor,
                 TokenBudget.DEFAULT, VerificationPlan.NONE,
-                CancellationToken.none(), approval);
+                CancellationToken.none(), approval, WebAccess.none());
     }
 
     private void writeFile(String path, String content) {

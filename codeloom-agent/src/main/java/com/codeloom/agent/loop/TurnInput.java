@@ -5,6 +5,7 @@ import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.model.ModelCapabilities;
 import com.codeloom.agent.tool.CommandApproval;
 import com.codeloom.agent.tool.ToolRegistry;
+import com.codeloom.agent.web.WebAccess;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommandExecutor;
 import com.codeloom.domain.session.ModelConfig;
@@ -48,6 +49,8 @@ import java.util.Optional;
  *                         {@link com.codeloom.agent.tool.CommandApproval}）。
  *                         为空表示**一切都不需要批** —— 判据（命令白名单 + 路径范围）
  *                         在 workspace 模块，循环只能被喂进来
+ * @param web            联网能力。没有联网能力的会话给 {@link WebAccess#none()}，
+ *                       那样的会话也拿不到联网工具（见 {@code ToolCatalog}）
  */
 public record TurnInput(SessionId sessionId,
                         ContextAssembler.Projection projection,
@@ -61,7 +64,8 @@ public record TurnInput(SessionId sessionId,
                         TokenBudget budget,
                         VerificationPlan verification,
                         CancellationToken cancellation,
-                        CommandApproval requiresApproval) {
+                        CommandApproval requiresApproval,
+                        WebAccess web) {
 
     public TurnInput {
         Objects.requireNonNull(sessionId, "sessionId");
@@ -83,7 +87,13 @@ public record TurnInput(SessionId sessionId,
         }
     }
 
-    /** 没有审批概念的场合用这个：一切都不需要批。 */
+    /**
+     * 没有审批概念、也没有联网能力的场合用这个：一切都不需要批。
+     *
+     * <p>联网给 {@link WebAccess#none()} 与审批给 {@code null} 是同一个道理：
+     * 这条重载是给**测试和纯读流程**用的，那些场合本来就没有联网工具
+     * （工具列表里没有它们，见 {@code ToolCatalog}）。
+     */
     public TurnInput(SessionId sessionId,
                      ContextAssembler.Projection projection,
                      Path worktree,
@@ -97,7 +107,7 @@ public record TurnInput(SessionId sessionId,
                      VerificationPlan verification,
                      CancellationToken cancellation) {
         this(sessionId, projection, worktree, systemPrompt, client, model, capabilities, tools,
-                commandExecutor, budget, verification, cancellation, null);
+                commandExecutor, budget, verification, cancellation, null, WebAccess.none());
     }
 
     /**
@@ -122,6 +132,7 @@ public record TurnInput(SessionId sessionId,
                 // 而不是"一条需要审批的命令"
                 candidate -> candidate == null || command.equals(candidate)
                         ? Optional.empty()
-                        : requiresApproval.reasonToAsk(candidate));
+                        : requiresApproval.reasonToAsk(candidate),
+                web);
     }
 }

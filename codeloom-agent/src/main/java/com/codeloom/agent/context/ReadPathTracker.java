@@ -1,5 +1,7 @@
 package com.codeloom.agent.context;
 
+import com.codeloom.agent.tool.ToolJson;
+import com.codeloom.agent.tool.ToolNames;
 import com.codeloom.domain.event.SessionRewound;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.ToolCallRequested;
@@ -41,7 +43,7 @@ final class ReadPathTracker implements Derived {
         }
         // 解构只拿走用得到的两个：调用的 id 是 PendingCallTracker 的事
         if (stored.event() instanceof ToolCallRequested requested
-                && "read_file".equals(requested.toolName())) {
+                && ToolNames.READ_FILE.equals(requested.toolName())) {
             readPathOf(requested.argumentsJson())
                     .ifPresent(path -> earliestRead.merge(path, stored.seq(), Math::min));
         }
@@ -61,17 +63,16 @@ final class ReadPathTracker implements Derived {
      * 一次调用的参数里它读的是哪个文件 —— 取不到就当这次没读过（不是跳过整本账：
      * 模型偶尔写出不合法的参数，那一次本来就没读成）。
      *
-     * <p>{@code path} 这个键名是**硬写的**，得和读文件那个工具的 JSON schema 一致：
-     * 那边把参数改名而这里没跟着改，这笔账就静默地不再记。
+     * <p>{@code path} 这个键名和读文件那个工具的 schema 共用一份常量
+     * （{@code ToolNames.PATH_ARG}）—— 从前这里写的是字面值，那边改名的话
+     * 这笔账会静默地不再记。
      */
     private static Optional<String> readPathOf(String argumentsJson) {
         try {
-            String path = MAPPER.readTree(argumentsJson).path("path").asText("");
+            String path = ToolJson.MAPPER.readTree(argumentsJson).path(ToolNames.PATH_ARG).asText("");
             return path.isBlank() ? Optional.empty() : Optional.of(path);
         } catch (JsonProcessingException e) {
             return Optional.empty();
         }
     }
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 }

@@ -45,7 +45,7 @@ interface TurnMeaning {
  * <p>`IDLE` 三个都是 false：它只出现在**失败重试**那两步之间（`FAILED → IDLE → THINKING`），
  * 所以它既不活跃、也不算收尾 —— 这也是重试那条路不会把流式缓冲清掉的原因。
  */
-export const TURN: Record<SessionState, TurnMeaning> = {
+const TURN: Record<SessionState, TurnMeaning> = {
   IDLE: { active: false, settlesDangling: false, dropsStreaming: false },
   THINKING: { active: true, settlesDangling: false, dropsStreaming: false },
   EXECUTING_TOOL: { active: true, settlesDangling: false, dropsStreaming: false },

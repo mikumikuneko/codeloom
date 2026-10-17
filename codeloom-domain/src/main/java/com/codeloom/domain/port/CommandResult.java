@@ -24,10 +24,10 @@ public record CommandResult(Integer exitCode,
     }
 
     /**
-     * 跑完了的那一种 —— 绝大多数调用都是它。
+     * 测试与便捷用的重载：假定 {@code COMPLETED}。
      *
-     * <p>同 {@code ToolOutcome} 的那个重载：{@code COMPLETED} 是常态，
-     * 每个调用点都补一个只会让人以为那里漏了什么。
+     * <p>**产品路径总是显式带上 {@code termination}**（执行器知道是谁结束了进程）——
+     * 这个重载省掉的正好是"命令有没有被我们杀掉"那条信息，而它不能靠默认值猜。
      */
     public CommandResult(int exitCode, String output, boolean truncated, long durationMs) {
         this(exitCode, output, truncated, durationMs, CommandTermination.COMPLETED);
@@ -47,6 +47,17 @@ public record CommandResult(Integer exitCode,
      * 而它在这里唯一可能的用途是误导。真正的结论在 {@link #termination()} 里。
      */
     public boolean success() {
+        return succeeded(termination, exitCode);
+    }
+
+    /**
+     * 同一条判据的**唯一实现**。
+     *
+     * <p>执行器那边的 {@code ProcessOutcome} 也调它 —— 两层各写一遍时，
+     * 任何一边改动都会让"执行器说成功、工具层说失败"变成可能，
+     * 而那种错只在某个终止方式上才显形。
+     */
+    public static boolean succeeded(CommandTermination termination, Integer exitCode) {
         return termination == CommandTermination.COMPLETED && exitCode != null && exitCode == 0;
     }
 }

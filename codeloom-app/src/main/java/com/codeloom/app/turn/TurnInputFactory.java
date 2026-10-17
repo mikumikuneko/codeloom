@@ -5,11 +5,13 @@ import com.codeloom.agent.loop.TokenBudget;
 import com.codeloom.agent.loop.TurnInput;
 import com.codeloom.agent.loop.VerificationPlan;
 import com.codeloom.agent.model.ModelCapabilitiesResolver;
+import com.codeloom.agent.web.WebAccess;
+import com.codeloom.app.llm.ApiKeyError;
 import com.codeloom.app.tool.ToolCatalog;
+import com.codeloom.app.web.ApiKeyWebAccessProvider;
 import com.codeloom.domain.llm.Providers;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommandExecutor;
-import com.codeloom.domain.port.EventStore;
 import com.codeloom.domain.port.Workspace;
 import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.session.Session;
@@ -33,7 +35,6 @@ import java.util.Optional;
 @Component
 public class TurnInputFactory {
 
-    private final EventStore events;
     private final LlmClientProvider clients;
     private final CommandExecutor commands;
 
@@ -47,18 +48,21 @@ public class TurnInputFactory {
     /** 工具集。进程里唯一那份 —— 见 {@link ToolCatalog}。 */
     private final ToolCatalog catalog;
 
-    public TurnInputFactory(EventStore events,
-                            LlmClientProvider clients,
+    /** 这条会话能不能联网。判据在它自己那儿（provider + 密钥），这里只取结果。 */
+    private final ApiKeyWebAccessProvider webAccess;
+
+    public TurnInputFactory(LlmClientProvider clients,
                             CommandExecutor commands,
                             SessionProjections projections,
                             CommandPolicy policy,
-                            ToolCatalog catalog) {
-        this.events = events;
+                            ToolCatalog catalog,
+                            ApiKeyWebAccessProvider webAccess) {
         this.clients = clients;
         this.commands = commands;
         this.projections = projections;
         this.policy = policy;
         this.catalog = catalog;
+        this.webAccess = webAccess;
     }
 
     /**
@@ -70,6 +74,9 @@ public class TurnInputFactory {
      */
     TurnInput create(Session session, Workspace workspace, CancellationToken cancellation) {
         ModelConfig model = session.model();
+        // 联网能力按这条会话判（用哪一家、那个人有没有密钥，见 ApiKeyWebAccessProvider）。
+        // 有才把联网工具放进工具列表 —— 没有就不放：摆出来再让每次调用失败，是白烧一次调用
+        Optional<WebAccess> web = webAccess.find(session.ownerId(), model);
         return new TurnInput(
                 session.id(),
                 projections.acquire(session),
@@ -81,13 +88,12 @@ public class TurnInputFactory {
                 // 建会话时已经拦过一次，走到这里还取不到客户端只有一种情况：
                 // **这一轮跑起来之后密钥被删了**。所以不必再给一段"怎么去配"的引导，
                 // 说清"发生了什么"就够 —— 它会被记成一次失败的轮次，不是 500
-                clients.findClient(session.ownerId(), model).orElseThrow(() -> new IllegalStateException(
-                        Providers.displayNameOf(model.provider())
-                                + " 的 API Key 已经取不到了，这一轮无法开始。"
-                                + "它多半是在会话建好之后被删掉或换掉了 —— 重新配置后重新发一条消息即可。")),
+                clients.findClient(session.ownerId(), model).orElseThrow(() ->
+                        new IllegalStateException(ApiKeyError.goneMidTurn(
+                                Providers.displayNameOf(model.provider())))),
                 model,
                 ModelCapabilitiesResolver.resolve(model.modelId()),
-                catalog.registry(),
+                web.isPresent() ? catalog.withWeb() : catalog.registry(),
                 commands,
                 TokenBudget.DEFAULT,
                 // 验证命令按工作区里的构建文件猜（认不出来就不验证）。
@@ -111,7 +117,8 @@ public class TurnInputFactory {
                 //
                 // 注意这里决定的只是"要不要问"，**不是"能不能跑"** ——
                 // 答案永远是"能"，只是可能要先点一下批准
-                commandLine -> whyAsk(workspace, commandLine));
+                commandLine -> whyAsk(workspace, commandLine),
+                web.orElseGet(WebAccess::none));
     }
 
     /**
@@ -123,18 +130,22 @@ public class TurnInputFactory {
      * 压根看不懂。只说"需要确认"的话，那个确认就是走过场。
      */
     private Optional<String> whyAsk(Workspace workspace, String commandLine) {
-        Optional<List<String>> words = CommandLine.simpleWords(commandLine);
-        if (words.isEmpty()) {
+        // 一路 `&&` / `||` / `;` 串起来的是"依次跑几条"，每条各自查一遍就够了 ——
+        // 整行按单个 &（后台）、|（管道）判"看不懂"的话，模型每写一次
+        // `javac X.java && java X` 都要人点一次批准
+        Optional<List<List<String>>> commands = CommandLine.simpleCommands(commandLine);
+        if (commands.isEmpty()) {
             return Optional.of("这行命令里有变量、命令替换、管道、重定向，或者引号没配对 ——"
                     + "它真正会做什么我们看不准，先请你过一眼。");
         }
-        List<String> parts = words.get();
-        String program = parts.getFirst();
-        if (!policy.isAllowed(program)) {
-            return Optional.of("`" + program + "` 不在免审批的程序名单里，先请你过一眼。");
-        }
-        if (!CommandPathScope.staysInside(ProjectLayout.rootOf(workspace), parts)) {
-            return Optional.of("这条命令会动到工作区外面的路径，先请你过一眼。");
+        for (List<String> parts : commands.get()) {
+            String program = parts.getFirst();
+            if (!policy.isAllowed(program)) {
+                return Optional.of("`" + program + "` 不在免审批的程序名单里，先请你过一眼。");
+            }
+            if (!CommandPathScope.staysInside(ProjectLayout.rootOf(workspace), parts)) {
+                return Optional.of("这条命令会动到工作区外面的路径，先请你过一眼。");
+            }
         }
         return Optional.empty();
     }

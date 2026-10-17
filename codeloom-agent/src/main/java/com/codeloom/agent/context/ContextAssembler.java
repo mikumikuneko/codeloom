@@ -2,6 +2,7 @@ package com.codeloom.agent.context;
 
 import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.ToolCall;
+import com.codeloom.agent.tool.ToolNames;
 import com.codeloom.domain.event.ContextCompacted;
 import com.codeloom.domain.event.SessionRewound;
 import com.codeloom.domain.event.StoredEvent;
@@ -131,6 +132,26 @@ public final class ContextAssembler {
     /** UTF-16 下一个字符最多占的字节数。见 {@code Projection#approximateSizeBytes}。 */
     private static final int BYTES_PER_CHAR_WORST_CASE = 2;
 
+    /**
+     * 一串消息的字符量：**正文 + 工具调用的参数**。
+     *
+     * <p>这两样是投影里唯一会长的部分，也是真正会发给模型的部分。压缩那边按 token 估算、
+     * 内存淘汰那边按字节估算 —— 单位不同，但**数哪些字段必须只有一个答案**，
+     * 否则同一条对话在两处的"大小"会不一样，而两处都很像对的。
+     */
+    public static long charactersOf(List<LlmMessage> messages) {
+        long chars = 0;
+        for (LlmMessage message : messages) {
+            if (message.content() != null) {
+                chars += message.content().length();
+            }
+            for (ToolCall call : message.toolCalls()) {
+                chars += call.argumentsJson().length();
+            }
+        }
+        return chars;
+    }
+
     /** 一条可以往前推进的投影，见 {@link #projection(String)}。 */
     public static final class Projection {
 
@@ -198,22 +219,16 @@ public final class ContextAssembler {
         /**
          * 这串消息**大致**占多少字节 —— 只给"这张表最多占多少内存"画个界用，不求精确。
          *
+         * <p>字符量由 {@link #charactersOf} 统一数：内存淘汰按字节、压缩按 token，
+         * 但"数哪些字段"必须是同一个集合（正文 + 工具参数）。
+         *
          * <p>算正文与工具参数：它们是投影里唯一会长的部分。
          *
          * <p>**按最坏情况算**（一个字符两个字节）：中文在内存里就是两字节，
          * 而这是个上界 —— 宁可高估。高估的后果是早淘汰一次，低估的后果是内存没有边界。
          */
         public long approximateSizeBytes() {
-            long bytes = 0;
-            for (LlmMessage message : messages) {
-                if (message.content() != null) {
-                    bytes += message.content().length();
-                }
-                for (ToolCall call : message.toolCalls()) {
-                    bytes += call.argumentsJson().length();
-                }
-            }
-            return bytes * BYTES_PER_CHAR_WORST_CASE;
+            return charactersOf(messages) * BYTES_PER_CHAR_WORST_CASE;
         }
 
         /**
@@ -353,7 +368,8 @@ public final class ContextAssembler {
         }
 
         /** 清单消息的开头。同样得点明"这是状态，不是谁刚说的一句话"。 */
-        private static final String TODO_HEADER = "[当前任务清单 —— 你自己列的，用 todo_write 更新它]\n";
+        private static final String TODO_HEADER =
+                "[当前任务清单 —— 你自己列的，用 " + ToolNames.TODO_WRITE + " 更新它]\n";
 
         /**
          * 清单写成几行字。

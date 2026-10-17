@@ -96,6 +96,14 @@ class EventEnvelopeCodecTest {
                 """))
                 .isInstanceOf(EventCodecException.class)
                 .hasMessageContaining("未知的事件类型");
+
+        // 时间戳也是"坏数据"的一种。`DateTimeParseException` 不继承 IllegalArgumentException，
+        // 漏掉它的话这一类会以另一种异常形状漏出去（见 read 的 catch）
+        assertThatThrownBy(() -> codec.read("""
+                {"sessionId":"s-1","seq":1,"at":"昨天下午","type":"USER_MESSAGE","payload":{"text":"x"}}
+                """))
+                .isInstanceOf(EventCodecException.class)
+                .hasMessageContaining("事件信封解码失败");
     }
 
     @Test

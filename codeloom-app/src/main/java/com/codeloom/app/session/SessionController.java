@@ -249,6 +249,10 @@ public class SessionController {
      * <p>存在的理由只有一个：让人答得出「我发的留言到哪了」。
      * 发出去时拿到的是 202（"收到了"），但从"收到"到"投递给 agent"之间隔着
      * 一条队列 —— 没有这个接口的话，那段等待是**完全不可见**的。
+     *
+     * <p>**界面目前还没有"主动发留言"的入口**（agent 自己新建文件时那条提醒走的是
+     * 同一条队列，由 {@code TurnExecutor} 直接塞）。这一对接口是给那个入口留的，
+     * 在它做出来之前只有 API 调用方会用到。
      */
     @GetMapping("/api/sessions/{sessionId}/notes")
     public List<NoteView> pendingNotes(Principal principal, @PathVariable String sessionId) {
@@ -278,10 +282,11 @@ public class SessionController {
     }
 
     /**
-     * 这条会话的事件流，按 seq 升序。
+     * 这条会话的事件流，按 seq 升序 —— **一次性的 REST 快照**。
      *
-     * <p>用途是**初次加载和回放**：SSE 那条只推"从现在起发生的事"，
-     * 打开页面时该显示的历史得从这儿拉。
+     * <p>界面不用它：SSE 那条通道连上时会自己补历史（见 {@code SessionStreamService.replay}），
+     * 断线重连也靠 {@code Last-Event-ID} 接着补。这里保留给"要一份静态事件列表"的调用方
+     * （导出、调试、测试），所以分页参数和 SSE 那条不是一回事。
      *
      * <p>返回的每一条就是 {@code EventEnvelopeCodec} 编出来的那个 JSON ——
      * 和 SSE 帧的 {@code data:}、以及 Redis Pub/Sub 的消息体**是同一份格式**。
@@ -292,12 +297,13 @@ public class SessionController {
     public List<JsonNode> events(Principal principal,
                                  @PathVariable String sessionId,
                                  @RequestParam(defaultValue = "0") long afterSeq,
-                                 @RequestParam(defaultValue = "200") int limit) {
+                                 @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
         Session session = access.requireVisible(me.id(), SessionId.of(sessionId));
         // 上限是保护服务端的：一个客户端不该能要求一次拉回无限多的事件。
-        // 下限也是：limit=0 会让调用方以为"没有事件"，而那是另一回事
-        int bounded = Math.clamp(limit, 1, MAX_EVENTS_PER_REQUEST);
+        // 下限也是：limit=0 会让调用方以为"没有事件"，而那是另一回事。
+        // **和别的列表用同一套上限**（PageLimits）：同一个 ?limit= 在哪个端点上都该是同一个意思
+        int bounded = Math.clamp(limit, 1, PageLimits.MAX);
         return eventStore.readAfter(session.id(), afterSeq, bounded).stream()
                 .map(stored -> envelopeJson(EventEnvelope.of(stored)))
                 .toList();
@@ -327,12 +333,6 @@ public class SessionController {
         User me = currentUser.require(principal);
         Session session = access.requireDriver(me.id(), SessionId.of(sessionId));
         sessions.discard(session);
-    }
-
-    @GetMapping("/api/sessions/{sessionId}/checkpoints")
-    public List<CheckpointView> checkpoints(Principal principal, @PathVariable String sessionId) {
-        User me = currentUser.require(principal);
-        return sessions.checkpoints(access.requireVisible(me.id(), SessionId.of(sessionId)));
     }
 
     /**
@@ -368,9 +368,6 @@ public class SessionController {
     }
 
     // ------------------------------------------------------------------
-
-    private static final int MAX_EVENTS_PER_REQUEST = 1000;
-
 
     /**
      * 建会话要带的东西：**只有"哪一家、哪个模型"**。

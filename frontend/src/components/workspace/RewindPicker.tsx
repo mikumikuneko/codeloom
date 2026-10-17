@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { ApiError, sessions, type Session } from '@/lib/api'
+import { errorText, sessions, type Session } from '@/lib/api'
 import { changeTotals, changesByTurnIndex, type StreamItem, type TurnFiles } from '@/lib/sessionStream'
 
 /** 一次能看见几条。上下再多了就折叠成「↑ N more」。 */
@@ -168,7 +168,7 @@ export function RewindPicker({
     try {
       onRewound(await sessions.rewind(sessionId, target.mark.seq), target.said)
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '回滚失败')
+      setError(errorText(e, '回滚失败'))
     } finally {
       setBusy(false)
     }
@@ -218,7 +218,7 @@ export function RewindPicker({
         {/* 标题一行、说明一行（同 Claude Code）：标题回答"这是什么"，
             说明回答"它会动什么" —— 而后者是**两条都要动**，那正是这里最容易误解的地方。
 
-            标题从前是英文的 "Rewind"（照搬参考实现），全站其余都是中文，改了。
+            标题从前是英文的 "Rewind"（照搬 Claude Code），全站其余都是中文，改了。
 
             说明**必须在标题下第一行、用正文那一档的颜色**：它说的是这个动作**退到哪** ——
             "选中一句 = 退到那句**之前**"，而列表里每一行写的是那句话本身，

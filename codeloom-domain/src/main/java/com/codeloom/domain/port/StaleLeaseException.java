@@ -18,16 +18,9 @@ import com.codeloom.domain.workspace.WorkspaceId;
  */
 public class StaleLeaseException extends RuntimeException {
 
-    private final transient WorkspaceId workspaceId;
-
     /** @param presentedToken 对方拿出来的那个号（它已经失效了）。**拼进消息里** —— 只开这一个口子 */
     public StaleLeaseException(WorkspaceId workspaceId, long presentedToken) {
         super("工作区 " + workspaceId + " 的写入被拒绝：持有的 fencing token " + presentedToken
                 + " 已失效，这棵工作区已被别的执行者接管");
-        this.workspaceId = workspaceId;
-    }
-
-    public WorkspaceId workspaceId() {
-        return workspaceId;
     }
 }

@@ -1,5 +1,7 @@
 import { useEffect, useState, type RefObject } from 'react'
 
+import { readStorage, writeStorage } from '@/lib/storage'
+
 /**
  * 工作区左右两栏的宽度，以及怎么改它们。
  *
@@ -17,7 +19,7 @@ import { useEffect, useState, type RefObject } from 'react'
  * 和"记住上次看的会话"同一条理由：这是**这个人的习惯**，不是项目的属性。
  * 存丢了只是回到默认值 —— 一个合理的退化。
  */
-export interface PaneWidths {
+interface PaneWidths {
   /** 往右拖是正数。往左拖是负数 —— **符号由调用方定**，因为两栏"变宽"的方向相反 */
   resize: (side: 'left' | 'right', delta: number) => void
   /** 双击把手：回到默认。拖到一个别扭的位置之后，人需要一个不用重拖的出口 */
@@ -27,10 +29,10 @@ export interface PaneWidths {
 }
 
 /** 左栏默认宽度。它是一条导航，不该跟着窗口变胖。 */
-export const DEFAULT_LEFT = 256
+const DEFAULT_LEFT = 256
 
 /** 右栏默认宽度。一段可读文本的行宽，再宽就开始费眼睛了。 */
-export const DEFAULT_RIGHT = 480
+const DEFAULT_RIGHT = 480
 
 /** 两栏各自的下限。再窄的话，树里一行文件名都要被截掉，那就不如不给拖。 */
 const MIN_LEFT = 160
@@ -99,11 +101,7 @@ export function usePaneWidths(row: RefObject<HTMLElement | null>): PaneWidths {
   }, [row])
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(widths))
-    } catch {
-      // 隐私模式下 localStorage 会抛。那不是错误，只是"记不住"而已
-    }
+    writeStorage(STORAGE_KEY, JSON.stringify(widths))
   }, [widths])
 
   return { left: widths.left, right: widths.right, resize, reset }
@@ -139,11 +137,11 @@ function fit(widths: Pair, available: number): Pair {
 
 function remember(): Pair {
   const fallback: Pair = { left: DEFAULT_LEFT, right: DEFAULT_RIGHT }
+  const raw = readStorage(STORAGE_KEY)
+  if (!raw) {
+    return fallback
+  }
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) {
-      return fallback
-    }
     const parsed = JSON.parse(raw) as Partial<Pair>
     return {
       left: typeof parsed.left === 'number' ? parsed.left : DEFAULT_LEFT,

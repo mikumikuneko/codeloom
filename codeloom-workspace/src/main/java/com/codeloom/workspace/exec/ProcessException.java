@@ -1,7 +1,5 @@
 package com.codeloom.workspace.exec;
 
-import java.util.List;
-
 /**
  * 进程**连结果都拿不到**（启动失败 / 等待期间线程被中断）。
  *
@@ -23,31 +21,11 @@ import java.util.List;
  */
 public class ProcessException extends RuntimeException {
 
-    public enum Reason {
-        /** 可执行文件不存在或无法启动。 */
-        START_FAILED,
-        /** 等待期间线程被中断。 */
-        INTERRUPTED
-    }
-
-    private final transient List<String> command;
-    private final transient Reason reason;
-
-    public ProcessException(List<String> command, Reason reason, String message, Throwable cause) {
+    public ProcessException(String message, Throwable cause) {
         super(message, cause);
-        this.command = List.copyOf(command);
-        this.reason = reason;
     }
 
-    public ProcessException(List<String> command, Reason reason, String message) {
-        this(command, reason, message, null);
-    }
-
-    public List<String> command() {
-        return command;
-    }
-
-    public Reason reason() {
-        return reason;
+    public ProcessException(String message) {
+        super(message);
     }
 }

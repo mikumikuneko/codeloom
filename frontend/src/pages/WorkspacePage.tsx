@@ -14,8 +14,10 @@ import { SessionHistoryDialog } from '@/components/workspace/SessionHistoryDialo
 import { SessionStreamView } from '@/components/workspace/SessionStreamView'
 import { Splitter } from '@/components/workspace/Splitter'
 import { Button } from '@/components/ui/button'
-import { ApiError, merge, projects, sessions as sessionsApi, type Conflicts } from '@/lib/api'
+import { ApiError, errorText, merge, projects, sessions as sessionsApi, type Conflicts } from '@/lib/api'
 import { personDot, slotsOf, type PersonSlot } from '@/lib/people'
+import type { NoticeTone } from '@/lib/sessionStream'
+import { readStorage, removeStorage } from '@/lib/storage'
 import { useAsync } from '@/lib/useAsync'
 import { usePaneWidths } from '@/lib/usePaneWidths'
 import { useAuth } from '@/stores/auth'
@@ -34,7 +36,8 @@ const WORKSPACE_RELOAD_MS = 400
 
 /** 顶栏右侧那行小字。**没有弹出层、没有自动消失** —— 它只是把刚才那一下的结果说出来。 */
 interface Notice {
-  tone: 'plain' | 'good' | 'bad'
+  /** 和事件流里那行小字**同一个联合类型** —— 两处各写一遍的话，加一种 tone 时这里不会报错 */
+  tone: NoticeTone
   text: string
 }
 
@@ -226,7 +229,7 @@ export function WorkspacePage() {
           setNotice({ tone: 'plain', text: e.message })
         }
       } else {
-        setNotice({ tone: 'bad', text: e instanceof ApiError ? e.message : '连不上服务器' })
+        setNotice({ tone: 'bad', text: errorText(e) })
       }
     } finally {
       setBusy(false)
@@ -317,11 +320,7 @@ export function WorkspacePage() {
     wantsFresh.current = true
     setMySession(null)
     // 连记住的那条一起清掉：不清的话刷新之后它又被捡回来（见上面那个 effect）
-    try {
-      localStorage.removeItem(rememberKey(projectId))
-    } catch {
-      // 隐私模式下 localStorage 会抛。那不是错误，只是"记不住"而已（同 remembered）
-    }
+    removeStorage(rememberKey(projectId))
   }
 
   /**
@@ -339,14 +338,10 @@ export function WorkspacePage() {
     try {
       await sessionsApi.discard(sessionId)
     } catch (e) {
-      return e instanceof ApiError ? e.message : '连不上服务器'
+      return errorText(e)
     }
     if (mySession === sessionId) {
-      try {
-        localStorage.removeItem(rememberKey(projectId))
-      } catch {
-        // 同上：隐私模式下会抛，那只是"记不住"
-      }
+      removeStorage(rememberKey(projectId))
     }
     // **这里不要顺手 setMySession(null)。** 此刻 `mine` 还是刷新之前那份、**里面还有刚删的这条**，
     // 而下面那个 effect 是"空着就从 mine 里挑一条" —— 于是它会把这条刚删掉的又选回来，
@@ -620,6 +615,7 @@ export function WorkspacePage() {
               <ChatPanel
                 project={data}
                 meId={me?.id}
+                nameOf={nameOf}
 
 
 
@@ -720,12 +716,7 @@ function rememberKey(projectId: string) {
 }
 
 function remembered(projectId: string): string | null {
-  try {
-    return localStorage.getItem(rememberKey(projectId))
-  } catch {
-    // 隐私模式下 localStorage 会抛。那不是错误，只是"记不住"而已
-    return null
-  }
+  return readStorage(rememberKey(projectId))
 }
 
 function TabButton({

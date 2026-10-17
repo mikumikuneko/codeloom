@@ -15,7 +15,7 @@
 import type { SessionState } from '@/lib/sessionState'
 
 /** 后端返回的 ProblemDetail。`detail` 是给人看的那句话，`title` 是它的分类。 */
-export interface ProblemDetail {
+interface ProblemDetail {
   title?: string
   detail?: string
   status?: number
@@ -25,6 +25,19 @@ export interface ProblemDetail {
 }
 
 /** 一次失败的请求。`status` 用来分支处理，`detail` 用来给人看。 */
+/**
+ * 一次请求失败后，说给用户听的那句话。
+ *
+ * <p>后端给了人话（`ApiError` 的消息就是它写的）就用它；连不上、或者抛出来的
+ * 根本不是我们自己的异常，才用兜底。**兜底文案只在这一处** —— 从前它被抄在
+ * 二十来个 catch 里，改一句要改二十个地方，而且已经有一处悄悄变成了另一种说法。
+ *
+ * @param fallback 非 HTTP 失败时说什么（"读不到这个文件"比"连不上服务器"更准确）
+ */
+export function errorText(error: unknown, fallback = '连不上服务器'): string {
+  return error instanceof ApiError ? error.message : fallback
+}
+
 export class ApiError extends Error {
   readonly status: number
   readonly problem: ProblemDetail
@@ -48,7 +61,7 @@ export class ApiError extends Error {
  * @returns 解析好的 JSON；204 或空响应体时返回 `undefined as T`
  * @throws ApiError 任何非 2xx
  */
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     credentials: 'same-origin',
@@ -191,7 +204,7 @@ export const apiKeys = {
 // 项目
 // ---------------------------------------------------------------------------
 
-export interface ProjectMember {
+interface ProjectMember {
   id: string
   username: string
   displayName: string
@@ -318,7 +331,6 @@ export interface SessionModel {
   /** 哪一家。**没有地址** —— 那是服务端的事 */
   provider: string
   modelId: string
-  systemPrompt: string | null
 }
 
 export interface Session {
@@ -347,7 +359,7 @@ export interface Session {
  * 是平台定的，用户选的是端点和模型。那个字段一度存在过（后端有列、这里有个可选属性），
  * 但从来没有人填过它，留着只会让"用户能改系统提示词"这件事看起来像个功能。
  */
-export interface NewSession {
+interface NewSession {
   provider: string
   modelId: string
 }
@@ -384,26 +396,23 @@ export const files = {
    * 列**一层**目录。
    *
    * @param path  空 = 工作区根目录。**不递归** —— 前端点开一层拉一层
-   * @param owner 看谁的树；不传就是自己的（观战时才传）
-   * @param trunk 看**主干**。和 owner 互斥：一个是"谁"，一个是"那条共享的线"
+   * @param trunk 看**主干**而不是自己那棵树
    */
-  list: (projectId: string, path = '', owner?: string, trunk = false) =>
+  list: (projectId: string, path = '', trunk = false) =>
     api<FileEntry[]>(
       `/api/projects/${projectId}/files?path=${encodeURIComponent(path)}` +
-        (owner ? `&owner=${encodeURIComponent(owner)}` : '') +
         (trunk ? '&trunk=true' : ''),
     ),
 
-  /** @param trunk 读**主干**上的它；和 owner 互斥 */
-  read: (projectId: string, path: string, owner?: string, trunk = false) =>
+  /** @param trunk 读**主干**上的它 */
+  read: (projectId: string, path: string, trunk = false) =>
     api<FileContent>(
       `/api/projects/${projectId}/files/content?path=${encodeURIComponent(path)}` +
-        (owner ? `&owner=${encodeURIComponent(owner)}` : '') +
         (trunk ? '&trunk=true' : ''),
     ),
 
-  // 下面三个**没有 owner 参数**，这不是漏了：读可以读别人的（观战要看得见对方的代码），
-  // 写只能写自己的。带上 owner 就等于"我可以删掉对方工作区里的文件"
+  // 这三个**没有 owner 参数**，这不是漏了：界面只读写自己那棵树。
+  // 写接口上尤其不能有 —— 带上它就等于"我可以删掉对方工作区里的文件"
 
   /** 新建一个空文件，或者一个空目录。目标已存在时后端回 409，绝不覆盖 */
   create: (projectId: string, path: string, directory: boolean) =>
@@ -439,7 +448,7 @@ export const files = {
  */
 export interface ToolView {
   name: string
-  shape: 'read' | 'edit' | 'search' | 'execute' | 'plan' | 'other'
+  shape: 'read' | 'edit' | 'search' | 'execute' | 'plan' | 'web' | 'other'
   /**
    * 动作词。**没声明时它不在响应里** —— 整个 API 都按
    * `default-property-inclusion: non_null` 走，所以"没有"在线上就是"这一项缺席"。
@@ -510,7 +519,6 @@ export const messages = {
 export const sessions = {
   /** 项目下的会话。**包括队友的** —— 观战要看得见他 */
   forProject: (projectId: string) => api<Session[]>(`/api/projects/${projectId}/sessions`),
-  one: (sessionId: string) => api<Session>(`/api/sessions/${sessionId}`),
   create: (projectId: string, model: NewSession) =>
     api<Session>(`/api/projects/${projectId}/sessions`, {
       method: 'POST',
@@ -544,12 +552,6 @@ export const sessions = {
     api<void>(`/api/sessions/${sessionId}/interrupt`, { method: 'POST' }),
   /** 丢弃这条会话：对话没了，**代码留着**（树属于「人 + 项目」，不属这条会话）。 */
   discard: (sessionId: string) => api<void>(`/api/sessions/${sessionId}`, { method: 'DELETE' }),
-  /**
-   * 每一轮改了哪些文件、能退回哪儿 —— **这些不再走接口**：它们是事件流的一部分，
-   * 从 `sessionStream` 的 fold 里读（见 `turnChanges` 和后端那条 `WorkspaceChanges`）。
-   *
-   */
-
   /**
    * 回滚：**代码和对话一起**退到那个点之前。
    *
@@ -595,7 +597,7 @@ export const approvals = {
 // 同步 / 合并 / 冲突
 // ---------------------------------------------------------------------------
 
-export interface Verification {
+interface Verification {
   command: string
   passed: boolean
   exitCode: number | null
@@ -611,14 +613,14 @@ export interface MergeOutcome {
   remainingConflicts: string[]
 }
 
-export interface SyncOutcome {
+interface SyncOutcome {
   status: string
   fromHead: string
   toHead: string
 }
 
 /** 两侧的**名字**永远指向同一份东西，不随合并方向翻转（见后端的 ConflictView）。 */
-export interface Conflict {
+interface Conflict {
   path: string
   /** 会话那侧（我改的） */
   sessionSide: string

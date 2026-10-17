@@ -138,7 +138,7 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     }
 
     @Test
-    @DisplayName("lastSeq / readAfter：断线补齐用的游标语义")
+    @DisplayName("readAfter：断线补齐用的游标语义")
     void cursorSemanticsForReconnect() {
         Session session = savedSession();
         List<StoredEvent> appended = events.append(session.id(), List.of(
@@ -148,7 +148,6 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         long first = appended.getFirst().seq();
         long last = appended.getLast().seq();
 
-        assertThat(events.lastSeq(session.id())).isEqualTo(last);
         // readAfter 是开区间：游标那条自己不再返回，否则重连时会重复渲染一条
         assertThat(events.readAfter(session.id(), first, 10)).hasSize(2);
         assertThat(events.readAfter(session.id(), last, 10)).isEmpty();
@@ -156,9 +155,9 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     }
 
     @Test
-    @DisplayName("一条事件都没有时 lastSeq 是 0，不是 null —— 客户端拿它当初始游标")
-    void emptySessionHasSeqZero() {
-        assertThat(events.lastSeq(savedSession().id())).isZero();
+    @DisplayName("一条事件都没有时什么都读不回来 —— 游标从 0 开始是安全的")
+    void emptySessionHasNoEvents() {
+        assertThat(events.readAfter(savedSession().id(), 0, 10)).isEmpty();
     }
 
     @Test
@@ -167,7 +166,7 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         Session session = savedSession();
 
         assertThat(events.append(session.id(), List.of(), acquire(session))).isEmpty();
-        assertThat(events.lastSeq(session.id())).isZero();
+        assertThat(events.readAfter(session.id(), 0, 10)).isEmpty();
     }
 
     // ------------------------------------------------------------------
@@ -265,7 +264,8 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
                 UserId.of("77777777-7777-7777-7777-777777777777"), PROJECT_ID);
 
         assertThatThrownBy(() -> fence.issue(unknown))
-                .isInstanceOf(IllegalArgumentException.class)
+                // 和 WorkspaceRepository.require 同一类：库里的行少了（500），不是请求写错（400）
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("工作区不存在");
     }
 

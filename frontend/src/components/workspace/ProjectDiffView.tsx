@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { X } from 'lucide-react'
 
 import { Hint } from '@/components/workspace/CodeView'
 import { DiffView } from '@/components/workspace/SessionStreamView'
-import { ApiError, projects } from '@/lib/api'
+import { projects } from '@/lib/api'
 import { parseUnifiedDiff } from '@/lib/unifiedDiff'
+import { useAsync } from '@/lib/useAsync'
 
 /**
  * 工作区中栏：看**某一轮**对某个文件做了什么。
@@ -32,34 +33,16 @@ export function ProjectDiffView({
   /** 关掉它 —— 关完落回"{@link CodeView}"，看这个文件现在的样子 */
   onClose: () => void
 }) {
-  const [text, setText] = useState<string | null>(null)
-  const [truncated, setTruncated] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    projects
-      .diff(projectId, commitSha, path)
-      .then((result) => {
-        if (cancelled) return
-        setText(result.text)
-        setTruncated(result.truncated)
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : '取不到这一段改动')
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [projectId, commitSha, path])
-
-  const rows = useMemo(() => (text === null ? [] : parseUnifiedDiff(text)), [text])
+  // 拉一段改动 = 标准的三件事（加载 / 出错 / 取消），见 useAsync。
+  // 从前这里手写了一遍，行为和 useAsync 一模一样
+  const { data, error, loading } = useAsync(
+    () => projects.diff(projectId, commitSha, path),
+    [projectId, commitSha, path],
+  )
+  const rows = useMemo(
+    () => (data === null ? [] : parseUnifiedDiff(data.text)),
+    [data],
+  )
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -69,7 +52,7 @@ export function ProjectDiffView({
         <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-loom-faint">
           {/* 顶上必须说这是哪一种 —— 同一栏里"文件的内容"和"这一轮的改动"长得像 */}
           <span>这一轮的改动</span>
-          {truncated && <span>只显示了前面一段</span>}
+          {data?.truncated === true && <span>只显示了前面一段</span>}
           {/* 表头那三样都是字，只有这一个不是 —— 所以它得让人看出来是能按的 */}
           <button
             type="button"

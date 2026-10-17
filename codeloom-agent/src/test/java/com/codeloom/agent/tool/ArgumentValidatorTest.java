@@ -305,4 +305,57 @@ class ArgumentValidatorTest {
             assertThat(problem).contains("`todos`").contains("array").contains("string");
         }
     }
+
+    // ------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("additionalProperties: false —— 多传的参数不能静默丢掉")
+    class ClosedObjects {
+
+        private static final String CLOSED = """
+                {"type":"object","additionalProperties":false,
+                 "properties":{"query":{"type":"string"},"count":{"type":"integer"}},
+                 "required":["query"]}
+                """;
+
+        @Test
+        @DisplayName("多了一个参数：挡下来，并把能用的那几个报给模型")
+        void rejectsUnknownParameter() {
+            Optional<String> problem = ArgumentValidator.of(CLOSED)
+                    .validate(args("""
+                            {"query":"x","after":"2026-01-01"}"""));
+
+            assertThat(problem).isPresent();
+            assertThat(problem.get()).contains("`after`").contains("query").contains("count");
+        }
+
+        @Test
+        @DisplayName("没声明 additionalProperties 的对象照旧忽略多出来的参数 —— 别的工具不受影响")
+        void openObjectsStillIgnoreExtras() {
+            assertThat(ArgumentValidator.of("""
+                            {"type":"object","properties":{"query":{"type":"string"}}}""")
+                    .validate(args("""
+                            {"query":"x","after":"2026-01-01"}"""))).isEmpty();
+        }
+
+        @Test
+        @DisplayName("写成 true 就是明确不限制")
+        void explicitTrueIsOpen() {
+            assertThat(ArgumentValidator.of("""
+                            {"type":"object","additionalProperties":true,
+                             "properties":{"query":{"type":"string"}}}""")
+                    .validate(args("""
+                            {"query":"x","after":"2026-01-01"}"""))).isEmpty();
+        }
+
+        @Test
+        @DisplayName("写成一份 schema 我们不执行 —— 当场炸，别让它变成一条没人执行的约束")
+        void schemaValuedAdditionalPropertiesIsRejected() {
+            assertThatThrownBy(() -> ArgumentValidator.of("""
+                    {"type":"object","additionalProperties":{"type":"string"},
+                     "properties":{"query":{"type":"string"}}}"""))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("additionalProperties");
+        }
+    }
 }

@@ -5,6 +5,7 @@ import com.codeloom.domain.user.UserId;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Objects;
 import java.util.Optional;
@@ -103,12 +104,16 @@ public record ProjectInvitation(String token,
         if (ttl.isZero() || ttl.isNegative()) {
             throw new IllegalArgumentException("邀请的有效期必须是正数，收到 " + ttl);
         }
+        // 两列都是 DATETIME(3)：在**生成的那一刻**就截到毫秒，而不是等落库时再截。
+        // 不截的话，"生成接口返回的这张邀请"和"之后查出来的同一张"时间不相等 ——
+        // 和事件、聊天记录同一条规矩（见 MyBatisEventStore / MyBatisChatMessageRepository）
+        Instant issuedAt = now.truncatedTo(ChronoUnit.MILLIS);
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
         // 无填充的 URL 安全编码：它要放进 URL 路径里，`+`、`/`、`=` 三个字符
         // 分别会在路径、查询串、以及某些客户端上出问题，一个都不留
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        return new ProjectInvitation(token, projectId, createdBy, now, now.plus(ttl),
+        return new ProjectInvitation(token, projectId, createdBy, issuedAt, issuedAt.plus(ttl),
                 null, null, null);
     }
 

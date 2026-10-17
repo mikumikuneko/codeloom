@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { CodeLines } from '@/components/workspace/CodeLines'
 import { Markdown } from '@/components/workspace/Markdown'
-import { ApiError, files, type FileContent } from '@/lib/api'
+import { errorText, files, type FileContent } from '@/lib/api'
 import { languageOfPath } from '@/lib/highlight'
 
 /**
@@ -29,17 +29,15 @@ import { languageOfPath } from '@/lib/highlight'
 export function CodeView({
   projectId,
   path,
-  owner,
   reload = 0,
   trunk = false,
 }: {
   projectId: string
   path: string | null
-  owner?: string
   /**
    * 磁盘上这一份**可能变了**的信号，由调用方递增。
    *
-   * <p>它和左边那棵树用的是同一个来源（见 {@code refreshTree}）：agent 写完文件、
+   * <p>它和左边那棵树用的是同一个来源（见 {@code refreshWorkspace}）：agent 写完文件、
    * 同步、合并、裁决落盘 —— 那四件事都会动磁盘，而这个组件自己什么都看不见。
    * 不接这根线的话，agent 改完一个文件，中栏会一直显示**改动前**的内容，
    * 直到有人手动刷新页面（那正是它从前的样子）。
@@ -82,14 +80,14 @@ export function CodeView({
     }
     setError(null)
     files
-      .read(projectId, path, owner, trunk)
+      .read(projectId, path, trunk)
       .then((content) => {
         if (cancelled) return
         loadedPath.current = path
         setFile(content)
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : '读不到这个文件')
+        if (!cancelled) setError(errorText(e, '读不到这个文件'))
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
@@ -97,7 +95,7 @@ export function CodeView({
     return () => {
       cancelled = true
     }
-  }, [projectId, path, owner, trunk, reload])
+  }, [projectId, path, trunk, reload])
 
   if (!path) {
     return <Hint>从左边选一个文件。</Hint>

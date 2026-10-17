@@ -50,9 +50,6 @@ public interface EventStore {
     /** 拉取全量事件，用于**回放**。 */
     List<StoredEvent> readAll(SessionId sessionId);
 
-    /** 当前最后一条事件的 seq；没有任何事件时返回 0。用于重连时确定初始游标。 */
-    long lastSeq(SessionId sessionId);
-
     /**
      * 这条会话**最后一次**服务商报的上下文大小（token）。没有就是空。
      *

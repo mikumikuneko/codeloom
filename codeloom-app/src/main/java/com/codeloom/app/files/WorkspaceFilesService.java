@@ -319,6 +319,7 @@ public class WorkspaceFilesService {
      * 不该是"看到自己代码"的前提。
      *
      * <p>找不到目录意味着它被人从磁盘上删掉了 —— 服务端状态不对，所以是 500 不是 400。
+     * 注意这里问的是 {@code WorkspaceManager}（**磁盘真相**），不是库里的那一行。
      */
     private Path projectRootOf(UserId owner, ProjectId project) {
         WorkspaceId workspaceId = WorkspaceId.of(owner, project);

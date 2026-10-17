@@ -4,6 +4,7 @@ import com.codeloom.agent.llm.LlmClient;
 import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.agent.llm.openai.OpenAiCompatibleClient;
 import com.codeloom.domain.llm.ProviderId;
+import com.codeloom.domain.llm.Providers;
 import com.codeloom.domain.port.ApiKeyStore;
 import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.user.UserId;
@@ -122,10 +123,9 @@ public class ApiKeyLlmClientProvider implements LlmClientProvider {
                 // 而客户端正是按它拼 /chat/completions 的
                 String baseUrl = endpoints.baseUrlOf(ownerId, provider);
                 return new OpenAiCompatibleClient(PROTOCOL_MAPPER, baseUrl,
-                        () -> keyFor(ownerId, provider).orElseThrow(() -> new IllegalStateException(
-                                "这一家（" + provider.value() + "）的 API Key 现在取不到了 —— "
-                                        + "它多半是在这一轮跑起来之后被删掉或换掉了。"
-                                        + "重新配置之后重新发一条消息即可。")));
+                        () -> keyFor(ownerId, provider).orElseThrow(() ->
+                                new IllegalStateException(ApiKeyError.goneMidTurn(
+                                        Providers.displayNameOf(provider)))));
             });
         }
     }

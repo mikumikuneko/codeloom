@@ -16,7 +16,7 @@ import { personDot, type PersonSlot } from '@/lib/people'
 import type { SessionState } from '@/lib/sessionState'
 
 /**
- * 会话状态的显示名。查表 + 兜底，理由见 `WorkspacePage` 里那段。
+ * 会话状态的显示名。
  *
  * <p>键的类型是那份权威词表（`lib/sessionState`）—— **漏一个状态就编译不过**，
  * 而兜底那一支留着是因为线上来的字符串不保证认得出来。

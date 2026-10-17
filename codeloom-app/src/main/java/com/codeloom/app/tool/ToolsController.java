@@ -26,7 +26,7 @@ import java.util.Map;
  * 一次拿全即可。这是刻意的：把这些展示信息写进不可变的事件流，将来想改展示就得迁移历史。
  *
  * <h2>它不需要额外授权</h2>
- * 内容不含任何会话或用户数据（就是七个名字和六个词），而且安全配置里
+ * 内容不含任何会话或用户数据（就是工具名和它们声明的几个词），而且安全配置里
  * "其余一律要登录"那条已经管住它了。要按项目授权的话，得先有"哪个工具属于哪个项目"
  * 这回事 —— 而那不存在。
  */
@@ -43,7 +43,9 @@ public class ToolsController {
 
     @GetMapping
     public List<ToolView> list() {
-        return catalog.registry().surfaces().entrySet().stream()
+        // 连**带联网的那一套**一起给：界面只拿它决定怎么渲染，
+        // 而工具在不在某条会话里可用，是每轮输入决定的（见 TurnInputFactory）
+        return catalog.withWeb().surfaces().entrySet().stream()
                 .map(ToolsController::view)
                 .toList();
     }

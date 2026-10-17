@@ -25,7 +25,7 @@ import {
  * <h2>成功之后关不关，由调用方决定</h2>
  * {@code onConfirm} 返回一句错误（就停在框里显示起来），或者 {@code null} 表示成功。
  * 有些调用方成功之后还有别的事要做（清掉选中、刷新列表），把关框写在它们那儿更顺 ——
- * 见 FileTree 和 ProvidersPage 两处用法。
+ * 见 FileTree、ProvidersPage、SessionHistoryDialog 三处用法。
  */
 export function ConfirmDialog({
   title,

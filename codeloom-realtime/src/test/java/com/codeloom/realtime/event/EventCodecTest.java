@@ -232,6 +232,26 @@ class EventCodecTest {
     }
 
     @Test
+    @DisplayName("结构化结果随事件落库、原样读回 —— 它只给界面看，不进模型的上下文")
+    void presentationRoundTrips() {
+        String presentation = "{\"kind\":\"web_search\",\"truncated\":false,"
+                + "\"sources\":[{\"url\":\"https://example.com/a\",\"title\":\"标题\"}]}";
+
+        assertRoundTrip(new ToolResult("c1", true, "来源见上", false, null, 5L, false, presentation));
+    }
+
+    @Test
+    @DisplayName("升级前落库的事件没有 presentation —— 读出来是 null，界面退回渲染文本")
+    void oldPayloadsWithoutPresentationDecodeToNull() {
+        EventCodec.EncodedEvent encoded = codec.encode(new ToolResult("c1", true, "ok", false, null, 3L));
+        String legacy = encoded.payload().replace(",\"presentation\":null", "");
+
+        Event decoded = codec.decode(EventType.TOOL_RESULT, legacy);
+
+        assertThat(((ToolResult) decoded).presentation()).isNull();
+    }
+
+    @Test
     @DisplayName("null 组件在 JSON 里是显式的 null，不是被省略掉")
     void nullsAreWrittenExplicitly() {
         // 落库格式要自解释：「没有 baseCommit」应该看得见，而不是靠"这个键不存在"去暗示。

@@ -91,7 +91,7 @@ public class SessionStreamController {
     public SessionStreamController(SessionStreamService streams,
                                    CurrentUser currentUser,
                                    ProjectAccess access,
-                                   @Value("${codeloom.stream.timeout:30m}") Duration streamTimeout) {
+                                   @Value("${codeloom.stream.timeout}") Duration streamTimeout) {
         this.streams = streams;
         this.currentUser = currentUser;
         this.access = access;

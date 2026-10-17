@@ -1,20 +1,11 @@
-import { useState, type FormEvent } from 'react'
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Folder } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { ApiError, projects, type Project } from '@/lib/api'
+import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { NameInputDialog } from '@/components/NameInputDialog'
+import { errorText, projects, type Project } from '@/lib/api'
 import { useAsync } from '@/lib/useAsync'
 import { useAuth } from '@/stores/auth'
 
@@ -49,7 +40,11 @@ export function ProjectsPage() {
             每个项目两个人，各自一个 agent，共用同一棵代码树。
           </p>
         </div>
-        <CreateProjectDialog open={open} onOpenChange={setOpen} onCreated={reload} pageHeader />
+        {/* 一个页面只挂**一个**弹窗。两个入口、两个实例的话，空项目时
+            两份遮罩和两份表单会同时出现（它们共享同一个 open） */}
+        <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
+          新建项目
+        </Button>
       </div>
 
       {loading && <Note>正在读取…</Note>}
@@ -65,7 +60,7 @@ export function ProjectsPage() {
           <p className="max-w-xs text-center text-sm leading-6 text-muted-foreground">
             还没有项目。建一个 —— 建完把链接发给对方，他点开就能进来。
           </p>
-          <CreateProjectDialog open={open} onOpenChange={setOpen} onCreated={reload} />
+          <Button onClick={() => setOpen(true)}>新建项目</Button>
         </div>
       )}
 
@@ -98,6 +93,10 @@ export function ProjectsPage() {
           ))}
         </ul>
       )}
+
+      {/* 弹窗**只挂这一个**：页头和空状态各放一个触发按钮，但表单、遮罩、
+          以及那些输入状态都只有一份（见上面那段注释） */}
+      <CreateProjectDialog open={open} onOpenChange={setOpen} onCreated={reload} />
     </div>
   )
 }
@@ -106,73 +105,35 @@ function CreateProjectDialog({
   open,
   onOpenChange,
   onCreated,
-  pageHeader = false,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onCreated: () => void
-  /** 摆在哪决定它有多响：页头里是一个**看得见的**按钮（那是这一页的主要动作），
-   *  空状态里是**主按钮**（此刻它是唯一能做的事） */
-  pageHeader?: boolean
 }) {
-  const [name, setName] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    setError(null)
-    setBusy(true)
-    try {
-      await projects.create(name)
-      setName('')
-      onOpenChange(false)
-      onCreated()
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
-    } finally {
-      setBusy(false)
-    }
+  // 关掉就卸载：名字和错误跟着一起清掉。表单本身**和文件树的命名框共用一份**
+  // （见 NameInputDialog）—— 一个输入框加一句就地错误，不该有两套状态机
+  if (!open) {
+    return null
   }
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogTrigger asChild>
-        <Button variant={pageHeader ? 'outline' : 'default'} size={pageHeader ? 'sm' : 'default'}>
-          新建项目
-        </Button>
-      </DialogTrigger>
-      <DialogContent>
-        <form onSubmit={submit}>
-          <DialogHeader>
-            <DialogTitle>新建项目</DialogTitle>
-            <DialogDescription>建好之后名字就不能改了。</DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-2 py-4">
-            <Label htmlFor="project-name">项目名</Label>
-            <Input
-              id="project-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-              autoFocus
-            />
-            {error && (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button type="submit" disabled={busy}>
-              {busy ? '创建中…' : '创建'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <NameInputDialog
+      title="新建项目"
+      description="建好之后名字就不能改了。"
+      label="项目名"
+      submitLabel="创建"
+      busyLabel="创建中…"
+      onSubmit={async (name) => {
+        try {
+          await projects.create(name)
+          onOpenChange(false)
+          onCreated()
+          return null
+        } catch (e) {
+          return errorText(e)
+        }
+      }}
+      onClose={() => onOpenChange(false)}
+    />
   )
 }
 
@@ -197,68 +158,51 @@ function CreateProjectDialog({
 function LeaveDialog({ project, onLeft }: { project: Project; onLeft: () => void }) {
   const me = useAuth((s) => s.user)
   const [open, setOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   const others = project.members.filter((m) => m.id !== me?.id)
   const alone = others.length === 0
   const heir = others[0]
 
-  async function submit() {
-    setError(null)
-    setBusy(true)
-    try {
-      await projects.leave(project.id)
-      setOpen(false)
-      onLeft()
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
-    } finally {
-      setBusy(false)
-    }
-  }
-
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        {/* 平时只是极淡的两个字，指上去才变红 —— 它是个破坏性动作，
-            但不该比"进哪个项目"更响。用素按钮而不是 Button：列表里
-            不需要一个带悬停底色的方框 */}
-        <button
-          type="button"
-          className="ml-2 shrink-0 rounded px-2 py-1 text-xs text-loom-faint transition-colors hover:text-destructive"
-        >
-          退出
-        </button>
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>退出「{project.name}」</DialogTitle>
-          <DialogDescription>
-            {alone
+    <>
+      {/* 平时只是极淡的两个字，指上去才变红 —— 它是个破坏性动作，
+          但不该比"进哪个项目"更响。用素按钮而不是 Button：列表里
+          不需要一个带悬停底色的方框 */}
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="ml-2 shrink-0 rounded px-2 py-1 text-xs text-loom-faint transition-colors hover:text-destructive"
+      >
+        退出
+      </button>
+
+      {/* 危险操作的确认框**只有一份实现**（见 ConfirmDialog）：
+          状态、错误、两个按钮的语义都在那儿，这里只提供文案和那件要做的事 */}
+      {open && (
+        <ConfirmDialog
+          title={`退出「${project.name}」`}
+          description={
+            alone
               ? '你是这里最后一个人。退出之后这个项目就没了 —— 仓库、聊天记录、你的对话，一起删掉'
               : project.ownerId === me?.id
                 ? `你是房主。退出之后房主会变成${heir?.displayName ?? '对方'}，你在这里的对话和代码一起删掉`
-                : '你在这里的对话和代码一起删掉。对方和聊天记录不受影响'}
-          </DialogDescription>
-        </DialogHeader>
-
-        {error && (
-          <p role="alert" className="text-sm text-destructive">
-            {error}
-          </p>
-        )}
-
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>
-            算了
-          </Button>
-          <Button variant="destructive" onClick={() => void submit()} disabled={busy}>
-            {busy ? '退出中…' : '退出'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+                : '你在这里的对话和代码一起删掉。对方和聊天记录不受影响'
+          }
+          confirmLabel="退出"
+          onConfirm={async () => {
+            try {
+              await projects.leave(project.id)
+              setOpen(false)
+              onLeft()
+              return null
+            } catch (e) {
+              return errorText(e)
+            }
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   )
 }
 

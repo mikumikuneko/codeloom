@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import {
   EMPTY_STREAMING,
@@ -114,11 +114,4 @@ export function useSessionStream(sessionId: string | null): SessionStream {
   }, [sessionId])
 
   return { items, streaming, disconnected, empty }
-}
-
-/** 供组件判断"这一条是不是正在长出来"用的 —— 只是给一个稳定的引用，避免每次新建对象。 */
-export function useStreamingRef(streaming: Streaming) {
-  const ref = useRef(streaming)
-  ref.current = streaming
-  return ref
 }

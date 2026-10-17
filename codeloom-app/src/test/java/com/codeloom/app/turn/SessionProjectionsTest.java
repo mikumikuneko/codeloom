@@ -287,12 +287,6 @@ class SessionProjectionsTest {
             return of(sessionId);
         }
 
-        @Override
-        public long lastSeq(SessionId sessionId) {
-            List<StoredEvent> mine = of(sessionId);
-            return mine.isEmpty() ? 0 : mine.getLast().seq();
-        }
-
         /** 这条测试盯的是**投影**，压缩那道闸归 {@code ContextCompactorTest} 管。 */
         @Override
         public OptionalInt lastContextTokens(SessionId sessionId) {

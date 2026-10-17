@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { ComposerBox } from '@/components/workspace/ComposerBox'
 import {
-  ApiError,
+  errorText,
   apiKeys,
   messages,
   sessions,
@@ -106,7 +106,7 @@ export function Composer({
       // 没换成。必须退回原来那个 —— 否则界面上会一直挂着一个**并没有生效**的模型，
       // 而那是这个界面里最坏的一种谎：用户以为下一轮换人了，其实没有
       setEdited(back)
-      setError(e instanceof ApiError ? e.message : '换不了模型')
+      setError(errorText(e, '换不了模型'))
     }
   }
 
@@ -156,10 +156,10 @@ export function Composer({
       noteSent(id, words)
       void messages.send(id, words, clientMessageId).catch((e: unknown) => {
         dropSent(id, words)
-        setError(e instanceof ApiError ? e.message : '连不上服务器')
+        setError(errorText(e))
       })
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
       // 故意把异常吞在这里：抛出去输入框就会被清空，而这句话根本没发出去
     }
   }

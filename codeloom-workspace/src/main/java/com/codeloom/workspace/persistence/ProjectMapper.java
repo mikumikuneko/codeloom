@@ -38,9 +38,6 @@ public interface ProjectMapper {
     @Select("SELECT " + ProjectRow.COLUMNS + " FROM project WHERE id = #{id}")
     ProjectRow findById(@Param("id") String id);
 
-    @Select("SELECT " + ProjectRow.COLUMNS + " FROM project ORDER BY name, id")
-    List<ProjectRow> findAll();
-
     /**
      * 某人参与的项目，分页。JOIN 而不是先查 id 再 IN，省一次往返，也天然去重。
      *

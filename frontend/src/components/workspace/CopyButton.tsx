@@ -1,5 +1,7 @@
 import { Check, Copy } from 'lucide-react'
-import { useRef, useState, type RefObject } from 'react'
+import type { RefObject } from 'react'
+
+import { useCopy } from '@/lib/useCopy'
 
 /**
  * 「把这块代码复制走」。
@@ -25,30 +27,20 @@ export function CopyButton({
   label?: string
   className?: string
 }) {
-  const [copied, setCopied] = useState(false)
-  const timer = useRef<number | undefined>(undefined)
+  // 复制的反馈时机和邀请链接那一处**共用一份**（见 useCopy）
+  const [copied, copy] = useCopy()
 
-  async function copy() {
+  async function copyContent() {
     const text = contentRef.current?.textContent ?? ''
-    if (text === '') {
-      return
+    if (text !== '') {
+      await copy(text)
     }
-    try {
-      await navigator.clipboard.writeText(text)
-    } catch {
-      // 没有剪贴板权限（非 https、或者用户拒绝了）—— 那就当没发生。
-      // 弹一个红色提示反而更吵，而这件事人再点一次就能确认
-      return
-    }
-    setCopied(true)
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setCopied(false), 1200)
   }
 
   return (
     <button
       type="button"
-      onClick={() => void copy()}
+      onClick={() => void copyContent()}
       // `opacity-0` 而不是 `hidden`：键盘仍然能 Tab 到它，聚焦时它自己会显形
       className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-loom-faint opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/code:opacity-100 ${className}`}
     >

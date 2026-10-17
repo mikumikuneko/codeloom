@@ -117,6 +117,7 @@ class ProjectPersistenceTest extends AbstractPersistenceTest {
         projects.save(first);
         projects.save(second);
 
-        assertThat(projects.findAll()).contains(first, second);
+        // 用分页那条产品路径验证：成员装配发生在同一层，不需要为测试留一个 findAll
+        assertThat(projects.findByMember(ALICE, 10, 0)).contains(first, second);
     }
 }

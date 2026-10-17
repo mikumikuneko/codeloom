@@ -29,6 +29,30 @@ import { DARCULA } from '@/lib/darcula'
  * <p><strong>认不出来就不高亮</strong>，原样显示 —— 半套高亮比没有高亮更像坏了。
  * 只列下面真正 import 了的那些：多写一个语言 id 换来的是一次运行时炸。
  */
+/**
+ * 文件树图标用的"这是代码"清单。**和下面 {@link LANGUAGES} 不是同一张表，而且是刻意的**：
+ * 那张决定"能不能上色"，这张决定"图标是不是钢蓝色"。
+ *
+ * <ul>
+ *   <li>文档/数据（md、json、yml、xml）能高亮，但不是"代码"；</li>
+ *   <li>Kotlin、C、Ruby 这些明显是代码，但我们没有对应的语法包 —— 图标仍然是代码色。</li>
+ * </ul>
+ *
+ * <p>两张表放在同一个文件里，改的时候能看见彼此；合并成一张会让上面两个判断
+ * 之一变成错的。
+ */
+const CODE_EXTENSIONS = new Set([
+  'java', 'kt', 'ts', 'tsx', 'js', 'jsx', 'css', 'scss', 'vue', 'svelte',
+  'py', 'go', 'rs', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift',
+  'sh', 'bash', 'sql', 'proto', 'graphql',
+])
+
+/** 这个文件名看起来是不是代码（文件树图标用）。点开头的文件不算"点扩展名"。 */
+export function isCodeFile(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && CODE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase())
+}
+
 const LANGUAGES: Record<string, string> = {
   java: 'java',
   ts: 'typescript',

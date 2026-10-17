@@ -40,7 +40,12 @@ public record AssistantMessage(String text, String model, String reasoning)
         this(text, null, null);
     }
 
-    /** 只带正文和模型名 —— 不产生思考的模型就走这个。 */
+    /**
+     * 测试与便捷用的重载。
+     *
+     * <p>**产品路径不走它**：那一侧总是显式传 {@code reasoning}（可能为 null）——
+     * "有没有思考"是那次调用的事实，让它由第三个参数自己说，而不是靠重载去猜。
+     */
     public AssistantMessage(String text, String model) {
         this(text, model, null);
     }

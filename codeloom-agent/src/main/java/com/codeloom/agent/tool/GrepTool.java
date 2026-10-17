@@ -32,7 +32,7 @@ public final class GrepTool implements Tool {
 
     @Override
     public String name() {
-        return "grep";
+        return ToolNames.GREP;
     }
 
     @Override

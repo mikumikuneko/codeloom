@@ -7,7 +7,7 @@ import org.springframework.stereotype.Component;
  * 进程里**唯一**那一份工具集。
  *
  * <h2>为什么要有这么一个东西</h2>
- * 每轮输入如果用现造的工具集（每轮七个工具对象、七份 schema 编译），有两个后果：
+ * 每轮输入如果用现造的工具集（标准集七个、带联网九个，各自一份 schema 编译），有两个后果：
  *
  * <ol>
  *   <li><b>启动时的检查没人在启动时跑。</b>{@link ToolRegistry} 构造时会逐个编译 schema、
@@ -27,8 +27,20 @@ import org.springframework.stereotype.Component;
 public class ToolCatalog {
 
     private final ToolRegistry registry = ToolRegistry.standard();
+    private final ToolRegistry withWeb = ToolRegistry.withWeb();
 
     public ToolRegistry registry() {
         return registry;
+    }
+
+    /**
+     * 带联网工具的那一套。
+     *
+     * <p>两套都在这里构造一次：启动检查照跑，界面也照旧从这儿取声明。
+     * **用哪一套由每轮输入决定**（见 {@code TurnInputFactory}）—— 没有联网能力的会话
+     * 不该在工具列表里看见它们，否则模型会去调、然后拿到一条"没有联网能力"的失败。
+     */
+    public ToolRegistry withWeb() {
+        return withWeb;
     }
 }

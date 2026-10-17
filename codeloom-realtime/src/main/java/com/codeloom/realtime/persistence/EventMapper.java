@@ -64,15 +64,6 @@ public interface EventMapper {
     List<EventRow> readAll(@Param("sessionId") String sessionId);
 
     /**
-     * 当前最后一条事件的 seq；一条都没有时是 0。
-     *
-     * <p>{@code COALESCE} 不能省：{@code MAX()} 在空集上返回 {@code NULL}，
-     * 而领域那边约定"没有事件时返回 0"，让 null 漏到 Java 层会变成一次空指针。
-     */
-    @Select("SELECT COALESCE(MAX(id), 0) FROM `event` WHERE session_id = #{sessionId}")
-    long lastSeq(@Param("sessionId") String sessionId);
-
-    /**
      * 这条会话**最后一条**指定类型的事件；一条都没有时返回 null。
      *
      * <p>走 {@code (session_id, id)} 那条索引**倒着**扫：问它的都是"最近怎么样"，

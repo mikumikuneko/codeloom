@@ -34,7 +34,6 @@ import java.util.Optional;
 public final class RunCommandTool implements Tool {
 
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
-    private static final int MAX_OUTPUT_CHARS = 100_000;
 
     /**
      * 输出被截断时贴在**开头**的一句话。
@@ -47,17 +46,17 @@ public final class RunCommandTool implements Tool {
 
     @Override
     public String name() {
-        return "run_command";
+        return ToolNames.RUN_COMMAND;
     }
 
     @Override
     public String description() {
         return "在工作区里执行一行 shell 命令（构建、跑测试、看目录、清理产物都用它）。"
-                + "用法和终端里一样：管道、重定向、&& 都能用。"
+                + "用法和终端里一样：管道、重定向都能用；几条命令可以用 &&、|| 或 ; 串起来。"
                 + "工作目录是项目根；要换目录就写 cd 子目录 && 命令"
                 + "（每条命令都从项目根重新开始）。"
-                + "有几种情况会先请用户确认一次：不在免审批清单里的程序；"
-                + "含变量、命令替换、分号、管道、重定向、波浪号、或引号不配对的写法；"
+                + "串联会**逐段检查**；有几种情况会先请用户确认一次：不在免审批清单里的程序；"
+                + "含变量、命令替换、管道、重定向、波浪号、或引号不配对的写法；"
                 + "以及用路径写出来的可执行文件（如 ./gradlew）。"
                 + "那是问一句，不是被拒绝 —— 用户确认之后命令就会执行。"
                 + "输出过长只保留尾部；超过 timeout_seconds 会被强杀整棵进程树，"
@@ -125,7 +124,7 @@ public final class RunCommandTool implements Tool {
         try {
             // 只传工作目录就够了 —— 端口收 {@code Path}，不需要现场伪造一个 Workspace。
             result = context.commandExecutor()
-                    .execute(context.worktree(), commandLine, timeout, MAX_OUTPUT_CHARS,
+                    .execute(context.worktree(), commandLine, timeout, ToolLimits.MAX_OUTPUT_CHARS,
                             context.cancellation());
         } catch (RuntimeException e) {
             // 走到这里只剩"起不来"和"等待时被线程中断"—— 超时和取消现在是**返回值**了

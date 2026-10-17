@@ -9,6 +9,7 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 /**
@@ -38,8 +39,12 @@ public class MyBatisChatMessageRepository implements ChatMessageRepository {
     @Transactional
     public ChatMessage append(ProjectId projectId, UserId authorId, String text,
                               Long anchorEventSeq, String anchorText, Instant occurredAt) {
+        // created_at 是 DATETIME(3)，而 Instant.now() 在多数平台上到微秒 ——
+        // 不截的话**返回出去的那一条**（广播用）和**之后读回来的那一条**（历史接口）
+        // 时间不相等，同一条消息会出现两个时刻。和事件落库那条同一个做法。
+        Instant storedAt = occurredAt.truncatedTo(ChronoUnit.MILLIS);
         ChatMessageInsert insert = new ChatMessageInsert(
-                projectId.value(), authorId.value(), text, anchorEventSeq, anchorText, occurredAt);
+                projectId.value(), authorId.value(), text, anchorEventSeq, anchorText, storedAt);
         mapper.insert(insert);
 
         Long generatedId = insert.getId();
@@ -49,7 +54,7 @@ public class MyBatisChatMessageRepository implements ChatMessageRepository {
                     "chat_message 插入后没有回填自增主键：项目 " + projectId + " 的这条消息 id 无法确定");
         }
         return new ChatMessage(ChatMessageId.of(generatedId), projectId, authorId,
-                text, anchorEventSeq, anchorText, occurredAt);
+                text, anchorEventSeq, anchorText, storedAt);
     }
 
     @Override

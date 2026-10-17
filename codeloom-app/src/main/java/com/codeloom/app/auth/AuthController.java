@@ -25,7 +25,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.security.Principal;
 import java.time.Instant;
-import java.util.Objects;
 
 /**
  * 注册、登录、登出、取当前用户。
@@ -56,13 +55,17 @@ public class AuthController {
     private final AuthenticationManager authenticationManager;
     private final UserRepository users;
     private final PasswordEncoder passwordEncoder;
+    /** principal → 用户**只在这一处**做（和别的控制器共用同一份，见 CurrentUser） */
+    private final CurrentUser currentUser;
 
     public AuthController(AuthenticationManager authenticationManager,
                           UserRepository users,
-                          PasswordEncoder passwordEncoder) {
+                          PasswordEncoder passwordEncoder,
+                          CurrentUser currentUser) {
         this.authenticationManager = authenticationManager;
         this.users = users;
         this.passwordEncoder = passwordEncoder;
+        this.currentUser = currentUser;
     }
 
     // ------------------------------------------------------------------
@@ -111,7 +114,7 @@ public class AuthController {
                         request.username(), request.password()));
         saveContext(authenticated, httpRequest, httpResponse);
 
-        return AuthUserView.of(requireUser(authenticated.getName()));
+        return AuthUserView.of(currentUser.require(authenticated));
     }
 
     @PostMapping("/logout")
@@ -128,7 +131,7 @@ public class AuthController {
     public AuthUserView me(Principal principal) {
         // principal 为 null 时根本到不了这里 —— 上面那条链已经把这几个端点之外的一切
         // 都要求登录了。这个判断只是为了让"没登录"不表现为一个空指针
-        return AuthUserView.of(requireUser(Objects.requireNonNull(principal, "principal").getName()));
+        return AuthUserView.of(currentUser.require(principal));
     }
 
     // ------------------------------------------------------------------
@@ -143,11 +146,6 @@ public class AuthController {
 
     private static Authentication authenticationOrNull(Principal principal) {
         return principal instanceof Authentication authentication ? authentication : null;
-    }
-
-    private User requireUser(String username) {
-        return users.findByUsername(username).orElseThrow(() -> new IllegalStateException(
-                "已认证的会话指向一个不存在的用户：" + username + "（用户被删了？）"));
     }
 
     // ------------------------------------------------------------------

@@ -19,7 +19,9 @@ import java.util.Optional;
  *   <tr><td>{@code `}</td><td>命令替换，藏第二条命令最经典的写法</td></tr>
  *   <tr><td>{@code \}</td><td>转义：它能让下一个字符换个意思（含 Windows 路径里的分隔符）</td></tr>
  *   <tr><td>{@code ( ) { }}</td><td>子 shell 与花括号展开</td></tr>
- *   <tr><td>{@code ; | & < >}</td><td>一条变两条、前后接管道、读写别的文件</td></tr>
+ *   <tr><td>{@code | & < >}</td><td>前后接管道、丢到后台、读写别的文件</td></tr>
+ *   <tr><td>{@code && || ;}（命令之间）</td><td>串联：按段切开、每段各查一遍，
+ *       见 {@link #simpleCommands}</td></tr>
  *   <tr><td>换行、回车</td><td>长得像一行，其实是两行</td></tr>
  *   <tr><td>{@code ~}（只在词首）</td><td>展开成用户目录 —— 一字之差，删的是家目录</td></tr>
  * </table>
@@ -61,6 +63,70 @@ public final class CommandLine {
      * <p>{@code ~} 不在这里 —— 它只在词首才展开，单独判，见类注释。
      */
     private static final String UNREADABLE_PLAIN = "$`\\(){};|&<>\n\r";
+
+    /**
+     * 把一行拆成**几条简单命令**：按引号外的 {@code &&}、{@code ||} 和 {@code ;} 切。
+     *
+     * <p>为什么要切：模型很爱写 {@code javac X.java && java X}，而 {@code &} 本身
+     * 意味着"把这条丢到后台"、和 {@code &&} 的"前一条成功再跑下一条"是两回事。
+     * 不切的话，一条普通的串联命令会被判成"看不懂"，于是每一步都要人点一次批准 ——
+     * 那是这套判据最烦人的失败方式。
+     *
+     * <p>切完**每一段各自过一遍** {@link #simpleWords} 与审批判据：串联只是"依次跑几条"，
+     * 任何一段不合格（变量替换、管道、重定向、引号没配平、程序不在名单里、路径跑到树外），
+     * 整行照样要问。所以放宽的只是"串联"这个写法，不是"看不懂的内容"。
+     *
+     * <p>{@code |} 和单个 {@code &} 仍然不切、仍然算看不懂：管道让数据换了流向，
+     * 后台执行让命令跑在谁都不知道的地方 —— 那两件事不是"依次跑几条"。
+     *
+     * @return 每条命令的词表；任何一段读不懂就是 {@link Optional#empty()}
+     */
+    public static Optional<List<List<String>>> simpleCommands(String commandLine) {
+        if (commandLine == null || commandLine.isBlank()) {
+            return Optional.empty();
+        }
+        List<List<String>> commands = new ArrayList<>();
+        StringBuilder segment = new StringBuilder();
+        char quote = 0;
+        for (int i = 0; i < commandLine.length(); i++) {
+            char c = commandLine.charAt(i);
+            if (quote != 0) {
+                segment.append(c);
+                if (c == quote) {
+                    quote = 0;
+                }
+                continue;
+            }
+            if (c == '\'' || c == '"') {
+                quote = c;
+                segment.append(c);
+                continue;
+            }
+            boolean doubled = i + 1 < commandLine.length()
+                    && commandLine.charAt(i + 1) == c
+                    && (c == '&' || c == '|');
+            boolean ends = c == ';' || doubled;
+            if (!ends) {
+                segment.append(c);
+                continue;
+            }
+            Optional<List<String>> words = simpleWords(segment.toString());
+            if (words.isEmpty() || words.get().isEmpty()) {
+                return Optional.empty();
+            }
+            commands.add(words.get());
+            segment.setLength(0);
+            if (doubled) {
+                i++;      // 跳过第二个 & 或 |
+            }
+        }
+        Optional<List<String>> tail = simpleWords(segment.toString());
+        if (tail.isEmpty() || tail.get().isEmpty()) {
+            return Optional.empty();
+        }
+        commands.add(tail.get());
+        return Optional.of(commands);
+    }
 
     /**
      * 在**双引号**里仍然会被解释的字符。

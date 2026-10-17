@@ -25,7 +25,7 @@ public final class GlobTool implements Tool {
 
     @Override
     public String name() {
-        return "glob";
+        return ToolNames.GLOB;
     }
 
     @Override

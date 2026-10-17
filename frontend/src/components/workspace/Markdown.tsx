@@ -162,12 +162,10 @@ export function Markdown({
   children: string
   /**
    * - `chat`（默认）：一段工作对话。标题压到和正文一个量级。
-   * - `dense`：次要内容（思考过程）。同族，但小一号淡一档。
    * - `document`：一份文档。标题真的分级 —— 中栏打开 .md 时用这个。
    */
-  variant?: 'chat' | 'dense' | 'document'
+  variant?: 'chat' | 'document'
 }) {
-  const dense = variant === 'dense'
   const document = variant === 'document'
 
   /**
@@ -194,21 +192,17 @@ export function Markdown({
     // overflow-wrap: 一个长 URL 或长路径不许把这一栏撑破 —— 撑破的话，
     // 整个三栏布局都会被它顶开，而不只是一行长出去
     //
-    // dense: "次要内容"用的那档（思考过程）。它和正文**同族但小一号、淡一档**，
-    // 而不是换一种排版 —— 换排版会让人以为那是另一种东西
+    // 正文块间距 16：一段、一张表、一块代码之间要能一眼看出是两块。
+    // 12 的时候小标题和它下面那段会黏在一起（Claude Code 的正文也是 16）
     <div
       className={`${
-        document
-          ? 'space-y-4 text-sm leading-7'
-          : dense
-            ? 'space-y-2 text-xs leading-5'
-            : 'space-y-3 text-sm leading-6'
+        document ? 'space-y-4 text-sm leading-7' : 'space-y-3 text-sm leading-6'
       } [overflow-wrap:anywhere]`}
     >
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCjkStrong]}
         components={{
-          // 段落的间距由上面那个 space-y-3 给，所以段自己不留
+          // 段落的间距由上面那个 space-y-4 给，所以段自己不留
           p: ({ node: _node, ...props }: Md<'p'>) => <p className="whitespace-pre-wrap break-words" {...props} />,
 
           // 标题的档位见上面那个 heading()：对话里压平，文档里分级。
@@ -309,7 +303,9 @@ export function Markdown({
             <img className="max-w-full rounded-md" {...props} />
           ),
 
-          hr: () => <hr className="border-border" />,
+          // 分隔线是**模型自己写的** `---`（比如正文和"来源："之间）：
+          // 保留它，但要给它上下留白、颜色压暗 —— 紧贴着字的 1px 线看起来像界面画错了
+          hr: () => <hr className="my-4 border-t border-border/70" />,
         }}
       >
         {children}

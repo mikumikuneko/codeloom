@@ -19,6 +19,10 @@ package com.codeloom.domain.event;
  *
  *                   <p>算出来了却扔掉、再让下游猜回来，和"超时被吞成内部错误"是同一个毛病：
  *                   **事实只该有一个来源**。
+ * @param presentation **只给界面看**的结构化结果（JSON 文本），可以为 null。
+ *                     给模型看的 {@code output} 是有损的自由文本，界面要画卡片就得有
+ *                     一份能还原结构的副本。**它不是领域事实，模型也看不到它** ——
+ *                     读它的只有展示层；缺失时展示层退回渲染 {@code output}
  */
 public record ToolResult(String callId,
                          boolean success,
@@ -26,13 +30,14 @@ public record ToolResult(String callId,
                          boolean truncated,
                          Integer exitCode,
                          long durationMs,
-                         boolean mutated) implements PersistentEvent {
+                         boolean mutated,
+                         String presentation) implements PersistentEvent {
 
     /**
-     * 没改工作区的那一种 —— 读文件、搜索、找文件都是它。
+     * 测试与便捷用的重载：没改工作区、也没有界面结构化结果。
      *
-     * <p>这不是"给个方便"的重载：{@code mutated == false} 是**大多数工具的常态**，
-     * 每个调用点都补一个 {@code false} 只会让人以为那里漏了什么。
+     * <p>**产品路径走全参构造器**（{@code AgentTurn} 总是把 {@code presentation} 一起带上）——
+     * 这里不再声称"大多数工具都是这个形状"：工具的真实产出由那次调用自己给。
      */
     public ToolResult(String callId,
                       boolean success,
@@ -40,6 +45,6 @@ public record ToolResult(String callId,
                       boolean truncated,
                       Integer exitCode,
                       long durationMs) {
-        this(callId, success, output, truncated, exitCode, durationMs, false);
+        this(callId, success, output, truncated, exitCode, durationMs, false, null);
     }
 }

@@ -8,22 +8,13 @@ import {
   GitBranch,
   RotateCw,
 } from 'lucide-react'
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState } from 'react'
 
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { NameInputDialog } from '@/components/NameInputDialog'
 import { ContextMenu, type MenuAction } from '@/components/workspace/ContextMenu'
-import { Button } from '@/components/ui/button'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import { ApiError, files, projectArchiveUrl, type FileEntry } from '@/lib/api'
+import { errorText, files, projectArchiveUrl, type FileEntry } from '@/lib/api'
+import { isCodeFile } from '@/lib/highlight'
 
 /**
  * 工作区左栏：项目树。
@@ -38,9 +29,9 @@ import { ApiError, files, projectArchiveUrl, type FileEntry } from '@/lib/api'
  * 那个理由在**没有整树动作**的时候成立 —— 而头上那两个按钮（刷新、全部折叠）
  * 恰恰是整树动作：它们要一次作用到所有已经展开的目录上，节点自己记的话够不着。
  *
- * <h2>右键改的是**你自己那棵树**</h2>
- * 后端的写接口上刻意没有 `owner`（读的有，观战要看得见对方的代码）。
- * 所以这里也不传 —— 对方的树是唯一一块只有他能改的地方。
+ * <h2>它永远是**你自己那棵树**</h2>
+ * 后端的写接口上没有 `owner`，读接口虽然支持，但界面不传 ——
+ * 对方的树是唯一一块只有他能改的地方，这里也就没有"看别人的树"这条路。
  *
  * <h2>刷新有两个来源</h2>
  * 一个是**这台组件自己**的：右键新建、改名、删除之后（那些动作就发生在这里，
@@ -53,7 +44,6 @@ export function FileTree({
   rootName,
   selected,
   onSelect,
-  owner,
   trunk = false,
   onTrunk,
 
@@ -69,7 +59,6 @@ export function FileTree({
   /** 传 null 是"选中的那个文件没了"（刚被删掉），中栏要清空 */
   onSelect: (path: string | null) => void
   selected: string | null
-  owner?: string
   /**
    * 外面推来的"重新拉一遍"。**每变一次拉一次**（数本身没有含义）。
    *
@@ -225,7 +214,6 @@ export function FileTree({
               depth={1}
               selected={selected}
               onSelect={onSelect}
-              owner={owner}
               trunk={trunk}
               open={open}
               onToggle={toggle}
@@ -266,7 +254,7 @@ export function FileTree({
               refresh()
               return null
             } catch (e) {
-              return e instanceof ApiError ? e.message : '连不上服务器'
+              return errorText(e)
             }
           }}
         />
@@ -295,7 +283,7 @@ export function FileTree({
               refresh()
               return null
             } catch (e) {
-              return e instanceof ApiError ? e.message : '连不上服务器'
+              return errorText(e)
             }
           }}
         />
@@ -400,7 +388,6 @@ function Level({
   depth,
   selected,
   onSelect,
-  owner,
   trunk,
   open,
   onToggle,
@@ -412,8 +399,7 @@ function Level({
   depth: number
   selected: string | null
   onSelect: (path: string | null) => void
-  owner?: string
-  /** 看主干 —— 和 owner 互斥 */
+  /** 看**主干**，而不是自己那棵树 */
   trunk?: boolean
   open: ReadonlySet<string>
   onToggle: (path: string) => void
@@ -428,7 +414,7 @@ function Level({
     // **不在这里把 entries 清成 null**：刷新时清掉的话整棵树会闪一下"正在读取"，
     // 而拉回来的东西多半和原来一样。让旧内容留到新内容到位为止
     files
-      .list(projectId, path, owner, trunk)
+      .list(projectId, path, trunk)
       .then((list) => {
         if (!cancelled) {
           setEntries(list)
@@ -441,7 +427,7 @@ function Level({
     return () => {
       cancelled = true
     }
-  }, [projectId, path, owner, trunk, reload])
+  }, [projectId, path, trunk, reload])
 
   if (error) {
     return (
@@ -477,7 +463,6 @@ function Level({
           depth={depth}
           selected={selected}
           onSelect={onSelect}
-          owner={owner}
               trunk={trunk}
           open={open}
           onToggle={onToggle}
@@ -495,7 +480,6 @@ function Node({
   depth,
   selected,
   onSelect,
-  owner,
   trunk,
   open,
   onToggle,
@@ -507,8 +491,7 @@ function Node({
   depth: number
   selected: string | null
   onSelect: (path: string | null) => void
-  owner?: string
-  /** 看主干 —— 和 owner 互斥 */
+  /** 看**主干**，而不是自己那棵树 */
   trunk?: boolean
   open: ReadonlySet<string>
   onToggle: (path: string) => void
@@ -558,7 +541,6 @@ function Node({
             depth={depth + 1}
             selected={selected}
             onSelect={onSelect}
-            owner={owner}
               trunk={trunk}
             open={open}
             onToggle={onToggle}
@@ -587,7 +569,7 @@ function Node({
       {/* 代码是暖色、其余保持中性 —— 三种状态里有一种"没有颜色"，
           这样"有颜色"才是一句有用的话，而不是到处都在喊 */}
       <FileIcon
-        className={`size-3.5 shrink-0 ${codeish(entry.name) ? 'text-loom-code' : 'text-loom-faint'}`}
+        className={`size-3.5 shrink-0 ${isCodeFile(entry.name) ? 'text-loom-code' : 'text-loom-faint'}`}
       />
       <span className="truncate">{entry.name}</span>
     </button>
@@ -660,65 +642,27 @@ function NameDialog({
   onSubmit: (name: string) => Promise<string | null>
   onClose: () => void
 }) {
-  const [name, setName] = useState(task.initial)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
   const title = task.from !== null ? '重命名' : task.directory ? '新建目录' : '新建文件'
+  const parent = task.parent === '' ? '工作区根目录' : `「${task.parent}」`
 
-  async function submit(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    const problem = await onSubmit(name.trim())
-    if (problem) {
-      setError(problem)
-    }
-    setBusy(false)
-  }
-
+  // 表单本身**和新建项目共用一份**（见 NameInputDialog）：一个输入框、一句说明、
+  // 一句就地错误，两个地方不该各有一套状态机
   return (
-    <Dialog open onOpenChange={(next) => !next && onClose()}>
-      <DialogContent>
-        <form onSubmit={submit}>
-          <DialogHeader>
-            <DialogTitle>{title}</DialogTitle>
-            <DialogDescription>
-              {task.from !== null
-                ? '名字写全，包括扩展名'
-                : task.directory
-                  ? `会建在${task.parent === '' ? '工作区根目录' : `「${task.parent}」`}下面`
-                  : `会建在${task.parent === '' ? '工作区根目录' : `「${task.parent}」`}下面，内容先是空的`}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-2 py-4">
-            <Label htmlFor="file-name">名字</Label>
-            <Input
-              id="file-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
-              required
-            />
-            {error && (
-              <p role="alert" className="text-sm text-destructive">
-                {error}
-              </p>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
-              算了
-            </Button>
-            <Button type="submit" disabled={busy || name.trim() === ''}>
-              {busy ? '正在做…' : title}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <NameInputDialog
+      title={title}
+      description={
+        task.from !== null
+          ? '名字写全，包括扩展名'
+          : task.directory
+            ? `会建在${parent}下面`
+            : `会建在${parent}下面，内容先是空的`
+      }
+      initial={task.initial}
+      submitLabel={title}
+      busyLabel="正在做…"
+      onSubmit={onSubmit}
+      onClose={onClose}
+    />
   )
 }
 
@@ -754,14 +698,3 @@ function IconAction({
  * <p>宁可偏保守：把一张图片标成橙色没人会做错事，但把配置标成代码会让
  * "颜色 = 代码"这句话变得不可信 —— 而一个不可信的信号不如没有信号。
  */
-const CODE_EXTENSIONS = new Set([
-  'java', 'kt', 'ts', 'tsx', 'js', 'jsx', 'css', 'scss', 'vue', 'svelte',
-  'py', 'go', 'rs', 'rb', 'php', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'swift',
-  'sh', 'bash', 'sql', 'proto', 'graphql',
-])
-
-function codeish(name: string): boolean {
-  const dot = name.lastIndexOf('.')
-  // dot === 0 是 .gitignore 这类点开头的文件 —— 它们不是"点扩展名"
-  return dot > 0 && CODE_EXTENSIONS.has(name.slice(dot + 1).toLowerCase())
-}

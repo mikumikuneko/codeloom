@@ -36,7 +36,8 @@ import java.util.Set;
  *
  * <h2>为什么是类，不是接口</h2>
  * 它没有第二个实现，也没有一处 lambda —— 只有一种造法（{@link #allowList}：私有构造器
- * 加静态工厂），唯一的调用点是 {@code TurnInputFactory}。所以"可替换的策略"这层抽象并不存在，
+ * 加静态工厂），构造点在 {@code WorkspaceConfig}（从配置读名单），消费方是
+ * {@code TurnInputFactory}。所以"可替换的策略"这层抽象并不存在，
  * 现在它就是普通的不可变类：名单在造出来的时候定下，{@link #isAllowed} 只读它。
  *
  * <p>下面那三个 static 也不是"给实现方用的工具"—— 它们不是这个类的对外契约，

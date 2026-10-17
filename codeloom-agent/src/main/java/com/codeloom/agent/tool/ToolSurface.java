@@ -36,7 +36,7 @@ import java.util.Optional;
  * 只要它的形状是已有的，客户端**一行都不用改**。
  *
  * @param shape      客户端该拿哪个组件来渲染这次调用
- * @param label      这个工具的动作词（读取 / 新建 / 修改 / 运行 / 查找 / 搜索）。
+ * @param label      这个工具的动作词（读取 / 新建 / 修改 / 运行 / 查找 / 搜索 / 抓取）。
  *                   界面直接显示它 —— 省掉前端一张按工具名查词的表
  * @param subjectKey 参数里哪一项是这次调用的"主语"（{@code path} / {@code command} /
  *                   {@code pattern}）；没有就是 null。界面显示它，后端拿它做审批与补跑
@@ -57,6 +57,14 @@ public record ToolSurface(Shape shape, String label, String subjectKey) {
         EDIT,
         /** 搜索：显示被搜的那个模式。 */
         SEARCH,
+        /**
+         * 抓一个网址：显示 URL 和正文。
+         *
+         * <p>**不能复用 {@link #READ}**：{@code subjectIsPath()} 由形状推出来，
+         * 而 READ 的主语会被界面当成工作区里的路径做成可点的入口 —— 点一个网址
+         * 会去打开一个同名的文件。
+         */
+        WEB,
         /** 跑命令：显示命令本身和退出码。 */
         EXECUTE,
         /** 不碰工作区、只产出结构化的事实（目前只有任务清单）。 */

@@ -12,11 +12,10 @@ package com.codeloom.realtime.chat;
  *                       它是那一步的**动作**，不是把那条事件的正文概括成一句话 ——
  *                       见 {@code ChatMessage.anchorText} 那段。
  *
- *                       <p>**由发消息的人在客户端带上**，而不是服务端去查那条事件：
- *                       被引用的事件属于**对方 agent 的流**，服务端这一侧要按 seq 反查
- *                       得先知道是哪条会话 —— 而 event 的 seq 是全局唯一的，查得到，
- *                       但那要多一次查询、而且事件被清理之后就查不到了。
- *                       引用该留住的是"当时指的是什么"，那是已经说过的话的一部分。
+ *                       <p>**协议允许客户端带上它**（服务端不反查那条事件：被引用的
+ *                       事件属于对方 agent 的流，而且事件被清理之后就查不到了）。
+ *                       **界面目前还没有引用回复，所以发的一直是 null** ——
+ *                       这不矛盾：字段是协议的一部分，生产者是将来那个功能。
  */
 public record ChatInbound(String text, Long anchorEventSeq, String anchorText) {
 }

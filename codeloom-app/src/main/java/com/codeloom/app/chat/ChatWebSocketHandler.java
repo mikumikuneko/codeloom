@@ -1,9 +1,9 @@
 package com.codeloom.app.chat;
 
+import com.codeloom.app.auth.CurrentUser;
 import com.codeloom.app.auth.ProjectAccess;
 import com.codeloom.domain.chat.ChatMessage;
 import com.codeloom.domain.port.ChatMessageRepository;
-import com.codeloom.domain.port.UserRepository;
 import com.codeloom.domain.project.ProjectId;
 import com.codeloom.domain.user.User;
 import com.codeloom.domain.user.UserId;
@@ -23,7 +23,6 @@ import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.IOException;
 import java.net.URI;
-import java.security.Principal;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Set;
@@ -84,7 +83,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocketHandler.class);
 
     private final ChatMessageRepository messages;
-    private final UserRepository users;
+    /** principal → 用户走这一份，不再自己查一次库（见 CurrentUser） */
+    private final CurrentUser currentUser;
     private final ProjectAccess access;
     private final ObjectMapper mapper;
 
@@ -92,11 +92,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final Map<ProjectId, Set<WebSocketSession>> watchers = new ConcurrentHashMap<>();
 
     public ChatWebSocketHandler(ChatMessageRepository messages,
-                                UserRepository users,
+                                CurrentUser currentUser,
                                 ProjectAccess access,
                                 ObjectMapper mapper) {
         this.messages = messages;
-        this.users = users;
+        this.currentUser = currentUser;
         this.access = access;
         this.mapper = mapper;
     }
@@ -239,11 +239,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      * 不提前假设认证层会给出什么。
      */
     private UserId authorOf(WebSocketSession session) {
-        Principal principal = session.getPrincipal();
-        if (principal == null) {
-            return null;
-        }
-        return users.findByUsername(principal.getName()).map(User::id).orElse(null);
+        // 查不到就返回 null（调用方据此关连接）—— 这条通道没有 HTTP 状态码可用
+        return currentUser.find(session.getPrincipal()).map(User::id).orElse(null);
     }
 
     private static ProjectId projectIdOf(WebSocketSession session) {

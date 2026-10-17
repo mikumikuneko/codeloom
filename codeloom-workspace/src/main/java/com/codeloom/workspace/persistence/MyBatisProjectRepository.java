@@ -72,11 +72,6 @@ public class MyBatisProjectRepository implements ProjectRepository {
     }
 
     @Override
-    public List<Project> findAll() {
-        return assemble(mapper.findAll());
-    }
-
-    @Override
     public List<Project> findByMember(UserId userId, int limit, int offset) {
         return assemble(mapper.findByMember(userId.value(), limit, offset));
     }

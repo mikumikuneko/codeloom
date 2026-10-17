@@ -61,7 +61,10 @@ public class MyBatisWorkspaceFence implements WorkspaceFence {
         if (bumped != 1) {
             // 一行都没命中 = 这棵树不存在。这时 lastIssuedToken() 读回来的是这条连接更早的
             // 残留值，把它当号发出去会让一棵不相干的工作区莫名失去写入权 —— 必须在这里拦住
-            throw new IllegalArgumentException(
+            // 和 WorkspaceRepository.require 同一种异常：这不是"调用方传错了"（400），
+            // 而是库里少了一行（500）。同一个条件在两个入口给出不同的错误码，
+            // 排障时看到的是两种互相矛盾的说法
+            throw new IllegalStateException(
                     "工作区不存在，无法发号：" + workspaceId + "（先建出它的工作区，再抢租约）");
         }
         return mapper.lastIssuedToken();

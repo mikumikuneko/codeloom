@@ -10,10 +10,12 @@ import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.project.Project;
 import com.codeloom.domain.project.ProjectId;
 import com.codeloom.domain.session.Session;
+import com.codeloom.domain.session.SessionId;
 import com.codeloom.domain.user.User;
 import com.codeloom.domain.user.UserId;
 import com.codeloom.domain.workspace.WorkspaceId;
 import com.codeloom.workspace.DataPaths;
+import com.codeloom.app.turn.PendingMessages;
 import com.codeloom.app.workspace.WorkspaceProvisioner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,6 +26,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -77,6 +80,7 @@ public class ProjectService {
     private final ProjectDeparture departure;
     private final Path reposRoot;
     private final WorkspaceProvisioner provisioner;
+    private final PendingMessages pending;
 
     public ProjectService(ProjectRepository projects,
                          UserRepository users,
@@ -85,7 +89,8 @@ public class ProjectService {
                          ExecutionLease leases,
                          ProjectDeparture departure,
                          @Value("${codeloom.repos-root:}") String reposRoot,
-                         WorkspaceProvisioner provisioner) {
+                         WorkspaceProvisioner provisioner,
+                         PendingMessages pending) {
         this.projects = projects;
         this.users = users;
         this.workspaces = workspaces;
@@ -96,6 +101,7 @@ public class ProjectService {
         // 那样"数据放哪儿"会取决于从哪个目录启动。见 DataPaths
         this.reposRoot = DataPaths.locate(reposRoot, "repos");
         this.provisioner = provisioner;
+        this.pending = pending;
     }
 
     /**
@@ -143,6 +149,10 @@ public class ProjectService {
      */
     public void leave(Project project, UserId leaver) {
         LeaseToken held = holdOwnTree(project.id(), leaver);
+        // 会话行会在 departure 里被成批删掉，之后就再也定位不到它们了 ——
+        // 所以排队留言的 id 要**在删之前**收集，**在事务成功之后**才丢
+        //（事务失败时留言还在，用户再点一次就行，和 discard 那条同一个理由）
+        List<SessionId> leaving = sessionIdsOf(project.id(), leaver);
         boolean projectIsGone;
         try {
             projectIsGone = departure.leave(project, leaver);
@@ -151,6 +161,7 @@ public class ProjectService {
                 leases.release(held);
             }
         }
+        leaving.forEach(pending::forget);
 
         // 磁盘放在事务**之后**：库里已经定了，这一步失败最多是地上多个目录，
         // 而反过来（先删盘）一次库侧失败就会留下"行还在、仓库没了"的项目
@@ -207,6 +218,25 @@ public class ProjectService {
      *
      * <p>会话很多的仓库里这是几次查询，但只在退出时发生一次。
      */
+    /**
+     * 这个人在这个项目里的**所有**会话 id（不是每棵树一条 —— 留言是按会话排的）。
+     *
+     * <p>退出时用它在会话行被删之前记下要清哪些内存队列。翻页翻到底的理由和
+     * {@link #oneSessionPerTree} 一样：一个人的会话可以多到把第一页占满。
+     */
+    private List<SessionId> sessionIdsOf(ProjectId projectId, UserId owner) {
+        List<SessionId> ids = new ArrayList<>();
+        for (int offset = 0; ; offset += SESSION_PAGE) {
+            List<Session> page = sessions.findByProject(projectId, SESSION_PAGE, offset);
+            page.stream()
+                    .filter(session -> session.ownerId().equals(owner))
+                    .forEach(session -> ids.add(session.id()));
+            if (page.size() < SESSION_PAGE) {
+                return ids;
+            }
+        }
+    }
+
     private Map<WorkspaceId, Session> oneSessionPerTree(ProjectId projectId) {
         Map<WorkspaceId, Session> perTree = new LinkedHashMap<>();
         for (int offset = 0; ; offset += SESSION_PAGE) {

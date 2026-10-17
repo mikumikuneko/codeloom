@@ -1,5 +1,6 @@
 package com.codeloom.agent.tool;
 
+import com.codeloom.agent.web.WebAccess;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.port.CommandExecutor;
 
@@ -28,12 +29,16 @@ import java.util.Objects;
  * @param reads            这条对话（会话）里读过哪些文件。见 {@link ReadLedger}。
  *                         **它是有状态的**（工具往里记一笔），而 {@code ToolContext} 每次
  *                         工具调用都新造一个 —— 所以账本身挂在调用方那里，这里只拿一个引用
+ * @param web              联网能力。没有联网能力的会话拿到的是 {@link WebAccess#none()}
+ *                         —— 那样的会话本来也拿不到联网工具（见 {@code ToolCatalog}），
+ *                         所以这条路上走到它不是"没有能力"，是接线错了
  */
 public record ToolContext(Path worktree,
                           CommandExecutor commandExecutor,
                           CancellationToken cancellation,
                           CommandApproval requiresApproval,
-                          ReadLedger reads) {
+                          ReadLedger reads,
+                          WebAccess web) {
 
     public ToolContext {
         Objects.requireNonNull(worktree, "worktree");
@@ -41,6 +46,7 @@ public record ToolContext(Path worktree,
         Objects.requireNonNull(cancellation, "cancellation");
         Objects.requireNonNull(requiresApproval, "requiresApproval");
         Objects.requireNonNull(reads, "reads");
+        Objects.requireNonNull(web, "web");
         if (!worktree.isAbsolute()) {
             throw new IllegalArgumentException("工作区路径必须是绝对路径: " + worktree);
         }

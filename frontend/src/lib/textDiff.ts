@@ -18,11 +18,17 @@
  * 规模一旦超出预期（长块），下面直接退化成"整段替换"：**不做对齐，但一行不丢**。
  */
 
-/** diff 里的一行。`gap` 是"这里省略了 N 行" —— 它没有文字内容。 */
+/**
+ * diff 里的一行。`gap` 是"这里省略了 N 行" —— 它没有文字内容。
+ *
+ * <p>`line` 是**显示用的那个行号**：删除的行用旧文件的行号（它在新文件里已经没有了），
+ * 其余用新文件的。来自统一 diff 的行自带它（{@code parseUnifiedDiff} 手上有 `@@`）；
+ * 会话里那段改动不走统一 diff，改由后端给的起始行号（{@code DiffView} 的 `startLine`）现场数。
+ */
 export type DiffRow =
-  | { kind: 'context'; text: string }
-  | { kind: 'added'; text: string }
-  | { kind: 'removed'; text: string }
+  | { kind: 'context'; text: string; line?: number }
+  | { kind: 'added'; text: string; line?: number }
+  | { kind: 'removed'; text: string; line?: number }
   | { kind: 'gap'; hidden: number }
 
 /**
@@ -159,13 +165,171 @@ function withContext(rows: DiffRow[], context: number): DiffRow[] {
   return out
 }
 
-/** 加了几行、删了几行 —— 就是工具行右侧那对数字。 */
-export function diffTotals(rows: DiffRow[]): { added: number; removed: number } {
-  let added = 0
-  let removed = 0
-  for (const row of rows) {
-    if (row.kind === 'added') added += 1
-    if (row.kind === 'removed') removed += 1
+/**
+ * 一行里的一小段。{@code changed} 的那些段是**这一对行之间真的换了**的部分。
+ *
+ * <p>只在一对「删掉的行 / 加上的行」之间成立：一行整个是新增或整个是删除时
+ * 没有"哪里变了"可谈，那种行不会有分段。
+ */
+export interface DiffSegment {
+  text: string
+  changed: boolean
+}
+
+/** 一对删/加行各自的分段。 */
+export interface WordDiff {
+  removed: DiffSegment[]
+  added: DiffSegment[]
+}
+
+/**
+ * 词级对齐的规模上限（旧词数 × 新词数）。
+ *
+ * <p>它比行级那个上限小得多：一行里出现几千个词只可能是紧凑格式的压缩产物，
+ * 那种行整行标出来反而好读。超过就退化成"整行都算换了"（返回 null）。
+ */
+const WORD_MAX_CELLS = 20_000
+
+/**
+ * 改动超过这个比例就不做词级标记。
+ *
+ * <p>两行几乎全不一样时，逐词标出来等于把整行都涂深 —— 那样和"整行换了"
+ * 说的是同一件事，却多出几十个切换点，读起来更碎。Claude Code 用的也是这个阈值。
+ */
+const WORD_CHANGE_LIMIT = 0.4
+
+/**
+ * 切成"词 / 空白 / 单个标点"。
+ *
+ * <p>把空白单独成词是必要的：不然 `a = 1` 和 `a=1` 的差别会粘在 `a` 那个词里，
+ * 标出来的是半个词。单个标点各自成词，则让 `>` 和 `>=`、`(` 和 `[` 这类
+ * 一位差别也能单独标出来。
+ */
+function tokenize(text: string): string[] {
+  const tokens: string[] = []
+  let at = 0
+  while (at < text.length) {
+    const ch = text[at]!
+    if (/[\p{L}\p{N}_]/u.test(ch)) {
+      let end = at + 1
+      while (end < text.length && /[\p{L}\p{N}_]/u.test(text[end]!)) end++
+      tokens.push(text.slice(at, end))
+      at = end
+    } else if (/\s/.test(ch)) {
+      let end = at + 1
+      while (end < text.length && /\s/.test(text[end]!)) end++
+      tokens.push(text.slice(at, end))
+      at = end
+    } else {
+      // 代理对算一个词：切成两半的话，标出来的颜色会落在半个字上
+      const code = text.codePointAt(at)!
+      const length = code > 0xffff ? 2 : 1
+      tokens.push(text.slice(at, at + length))
+      at += length
+    }
   }
-  return { added, removed }
+  return tokens
+}
+
+/**
+ * 两行之间哪几个词换了。**没有可标的就返回 null** —— 调用方退回普通渲染。
+ *
+ * <p>算法和行级那个一样（最短公共子序列），只是单位从"行"换成了"词"：
+ * 对得上的词保持原样，对不上的两边都标成 changed，相邻的同类再并成一段。
+ */
+export function wordDiff(before: string, after: string): WordDiff | null {
+  const a = tokenize(before)
+  const b = tokenize(after)
+  if (a.length * b.length > WORD_MAX_CELLS) {
+    return null
+  }
+
+  const width = b.length + 1
+  const dp = new Uint32Array((a.length + 1) * width)
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      dp[i * width + j] = a[i] === b[j]
+        ? dp[(i + 1) * width + j + 1] + 1
+        : Math.max(dp[(i + 1) * width + j], dp[i * width + j + 1])
+    }
+  }
+
+  const sameA = new Array<boolean>(a.length).fill(false)
+  const sameB = new Array<boolean>(b.length).fill(false)
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      sameA[i++] = true
+      sameB[j++] = true
+    } else if (dp[(i + 1) * width + j] >= dp[i * width + j + 1]) {
+      i++
+    } else {
+      j++
+    }
+  }
+
+  let changedLength = 0
+  for (let at = 0; at < a.length; at++) {
+    if (!sameA[at]) changedLength += a[at]!.length
+  }
+  for (let at = 0; at < b.length; at++) {
+    if (!sameB[at]) changedLength += b[at]!.length
+  }
+  const total = before.length + after.length
+  if (changedLength === 0 || (total > 0 && changedLength / total > WORD_CHANGE_LIMIT)) {
+    return null
+  }
+
+  return { removed: segmentsOf(a, sameA), added: segmentsOf(b, sameB) }
+}
+
+/** 把词按"换没换"并成连续的小段。 */
+function segmentsOf(tokens: string[], same: boolean[]): DiffSegment[] {
+  const segments: DiffSegment[] = []
+  tokens.forEach((token, at) => {
+    const changed = !same[at]
+    const last = segments[segments.length - 1]
+    if (last !== undefined && last.changed === changed) {
+      last.text += token
+    } else {
+      segments.push({ text: token, changed })
+    }
+  })
+  return segments
+}
+
+/**
+ * 给整段 diff 配词级差异。返回的数组和 {@code rows} **等长**，没配上的位置是 null。
+ *
+ * <p>配对规则照 Claude Code：一段连续的删行后面紧跟一段连续的加行时，第 k 行对第 k 行；
+ * 多出来的行没有对象，保持整行标注。中间隔着上下文的不配对 —— 那说明它们不是同一处改动。
+ */
+export function wordDiffs(rows: DiffRow[]): (WordDiff | null)[] {
+  const out = new Array<WordDiff | null>(rows.length).fill(null)
+  let at = 0
+  while (at < rows.length) {
+    if (rows[at]!.kind !== 'removed') {
+      at++
+      continue
+    }
+    const removedStart = at
+    while (at < rows.length && rows[at]!.kind === 'removed') at++
+    const addedStart = at
+    while (at < rows.length && rows[at]!.kind === 'added') at++
+
+    const removed = rows.slice(removedStart, addedStart)
+      .filter((row): row is Extract<DiffRow, { kind: 'removed' }> => row.kind === 'removed')
+    const added = rows.slice(addedStart, at)
+      .filter((row): row is Extract<DiffRow, { kind: 'added' }> => row.kind === 'added')
+    const pairs = Math.min(removed.length, added.length)
+    for (let k = 0; k < pairs; k++) {
+      const diff = wordDiff(removed[k]!.text, added[k]!.text)
+      if (diff !== null) {
+        out[removedStart + k] = diff
+        out[addedStart + k] = diff
+      }
+    }
+  }
+  return out
 }

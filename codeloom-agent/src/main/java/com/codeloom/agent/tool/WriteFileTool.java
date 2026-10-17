@@ -31,7 +31,7 @@ public final class WriteFileTool implements Tool {
 
     @Override
     public String name() {
-        return "write_file";
+        return ToolNames.WRITE_FILE;
     }
 
     @Override
@@ -84,9 +84,11 @@ public final class WriteFileTool implements Tool {
             if (observed.isEmpty()) {
                 // 说"这条对话"而不是"这一轮"：账是**跨轮**的（上一次交互里读过的算数，
                 // 见 seedReadLedger），说成"这一轮"会让模型以为"刚读过的东西为什么还不算数"
-                return ToolOutcome.failed(rawPath + " 已经存在，而你还没读过它。"
-                        + "先用 read_file 看一眼它现在是什么，再决定是覆盖它（write_file）"
-                        + "还是只改几行（edit_file）。");
+                //
+                // **只说状态，不教它怎么做** —— 和 {@link EditFileTool} 那道门同一个口径：
+                // 工具描述里已经写着"先 read_file 看一眼再写"，重复的那半句会原样进结果，
+                // 于是界面上也出现一句教训人的话
+                return ToolOutcome.failed("还没读过 " + rawPath + "，不能覆盖它。");
             }
             ReadLedger.Observation observation = observed.get();
             // 只读了一部分就整份覆盖 = 把**没看到的那部分静默抹掉**
@@ -118,8 +120,15 @@ public final class WriteFileTool implements Tool {
         long lines = content.lines().count();
         // **新建和覆盖是两个事实，说成两句话。** 覆盖时旧内容已经没了，
         // 而模型得知道自己抹掉了什么（它读过，但说一句"覆盖"能提醒它这件事真的发生了）
+        //
+        // presentation 只带**界面需要的那两个事实**：新建还是覆盖、多少行。
+        // 正文不在这里 —— 它在这次调用的参数里（界面本来就有），再存一份等于同一份
+        // 内容在事件流里出现两次
+        String presentation = "{\"kind\":\"write\",\"created\":" + !existed
+                + ",\"lines\":" + lines + "}";
         return ToolOutcome.mutated((existed ? "已覆盖 " : "已新建 ")
                 + WorkspacePathGuard.relativize(context.worktree(), file)
-                + "（" + lines + " 行）");
+                + "（" + lines + " 行）")
+                .withPresentation(presentation);
     }
 }

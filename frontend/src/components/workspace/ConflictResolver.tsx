@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { CodeLines } from '@/components/workspace/CodeLines'
 import { Button } from '@/components/ui/button'
-import { ApiError, merge, type Conflicts, type MergeOutcome } from '@/lib/api'
+import { errorText, merge, type Conflicts, type MergeOutcome } from '@/lib/api'
 import { personDot, type PersonSlot } from '@/lib/people'
 
 /**
@@ -57,7 +57,7 @@ export function ConflictResolver({
     try {
       onResolved(await action())
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }

@@ -16,6 +16,7 @@
  */
 
 import { dropsStreaming, isActive, settlesDangling } from '@/lib/sessionState'
+import { parsePresentation, type ToolPresentation } from '@/lib/toolPresentation'
 
 /**
  * 一次调用**存在过、却没有结果**的几种原因。
@@ -47,6 +48,13 @@ export interface ToolOutcome {
    * 判"这一类工具通常会改"和判"这一次真的改了"是两件事，前者只能猜。
    */
   mutated: boolean
+  /**
+   * 只给界面看的结构化结果（后端随事件落库）。**模型看不到它**。
+   *
+   * <p>缺失、坏 JSON、认不出来的形状都是 `null` —— 那时界面退回渲染 `output`，
+   * 也就是旧事件的样子。见 {@link parsePresentation}。
+   */
+  presentation?: ToolPresentation | null
 }
 
 /**
@@ -302,8 +310,6 @@ export type StreamItem = {
       kind: 'approval'
       callId: string
       approved: boolean | null
-      /** 谁答的。**是个用户 id** —— 名字在渲染时按它现查（用户名会变，唯一也不代表它是身份） */
-      by: string | null
       /**
        * 后端为什么要问 —— 一句话，摆在人点"批准"的地方。
        *
@@ -539,6 +545,8 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
         exitCode: typeof p.exitCode === 'number' ? p.exitCode : null,
         // 老事件里没有这一项（那时它还只是个没落库的事实）—— 缺失按"没改"处理
         mutated: p.mutated === true,
+        // 同上：旧事件没有结构化结果，解析出来是 null，界面照旧渲染文本
+        presentation: parsePresentation(p.presentation),
       }
       return items.map((item) =>
         item.kind === 'tool' && item.callId === callId ? { ...item, outcome } : item,
@@ -579,7 +587,6 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
           kind: 'approval',
           callId: str(p.callId),
           approved: null,
-          by: null,
           reason: str(p.reason),
         },
       ]
@@ -588,7 +595,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       const callId = str(p.callId)
       return items.map((item) =>
         item.kind === 'approval' && item.callId === callId
-          ? { ...item, approved: p.approved === true, by: idOf(p.resolvedByUserId) || null }
+          ? { ...item, approved: p.approved === true }
           : item,
       )
     }
@@ -657,8 +664,8 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
         ]
       }
       // 等人批**不写小字** —— 那件事由**待批卡片自己**表达：它就在那次调用的下面，
-      // 写着"等你批准一次调用"、带允许一次/拒绝两个按钮，而答复到了之后它会
-      // **原地变成**"root 批准了那次调用"。
+      // 写着"等你批准一次调用"、带批准/拒绝两个按钮，答复到了之后**那张卡片就收掉**
+      //（见 SessionStreamView 里 Item 的 approval 分支：不画"某某批准了"一行）。
       //
       // 从前这里另外追加一条"停下来等你批准一次调用"，两个后果都实际发生了：
       // 等的时候同一句话出现两遍；批完之后那条小字还留在下面 ——

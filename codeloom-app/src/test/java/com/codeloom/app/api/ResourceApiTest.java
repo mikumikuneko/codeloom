@@ -1611,19 +1611,24 @@ class ResourceApiTest {
         return json.readerForListOf(JsonNode.class).readValue(response.body());
     }
 
+    /**
+     * 事件流里的 {@code CHECKPOINT_CREATED}（按顺序）。
+     *
+     * <p>**从事件流里取，而不是另有一个列表接口** —— 界面也是这么拿的（见 RewindPicker），
+     * 所以这条路径顺带把"界面看到的位置和测试看到的是同一份"也钉住了。
+     */
     private List<JsonNode> checkpoints(TestBrowser owner, SessionId sessionId) throws Exception {
-        HttpResponse<String> response = owner.get(
-                "/api/sessions/" + sessionId.value() + "/checkpoints");
-        assertThat(response.statusCode()).isEqualTo(200);
-        return json.readerForListOf(JsonNode.class).readValue(response.body());
+        return events(owner, sessionId, 0).stream()
+                .filter(frame -> "CHECKPOINT_CREATED".equals(frame.get("type").asText()))
+                .map(frame -> frame.get("payload"))
+                .toList();
     }
 
     /**
      * 事件流里那些 checkpoint 的 seq，按顺序 —— 回滚的目标就是其中一个。
      *
-     * <p>从**事件流**里拿而不是从 {@code /checkpoints} 拿：回滚送的是序号，
-     * 而序号是"事件在流里的位置"这件事，本来就只有流知道（界面也是这么拿的，
-     * 见 RewindPicker）。
+     * <p>序号是"事件在流里的位置"这件事，只有流知道 —— 回滚送的就是它，
+     * 界面也是这么拿的（见 {@code RewindPicker}）。
      */
     private List<Long> checkpointSeqs(TestBrowser owner, SessionId sessionId) throws Exception {
         return events(owner, sessionId, 0).stream()

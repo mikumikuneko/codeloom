@@ -252,6 +252,8 @@ public class ProjectMerger {
      * 所以找不到意味着它被人从磁盘上删掉了 —— 那是服务端状态不对，不是客户端传错了。
      */
     private Workspace workspaceOf(Session session) {
+        // 问的是**磁盘上的那棵树**（WorkspaceManager），不是库里的行 ——
+        // 两者都叫 find，但一个看磁盘、一个查库
         return workspaces.find(session.workspaceId())
                 .orElseThrow(() -> new IllegalStateException(
                         "会话 " + session.id() + " 的工作区目录不在磁盘上"));

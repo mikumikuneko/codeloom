@@ -32,36 +32,29 @@ import java.util.Set;
 public final class ModelCapabilitiesResolver {
 
     /**
-     * 查证过的模型窗口。
+     * 一个认得的模型的两项能力。**放同一条记录里**，因为它们是同一份"查证结果"：
+     * 拆成两张表时，加模型只改一张、另一项静默退回默认值 —— 那种错不报任何东西。
+     *
+     * @param contextWindow   上下文窗口。压缩用它算阈值
+     * @param maxOutputTokens 单次输出上限（请求体里的 {@code max_tokens}）。
+     *                        取官方文档写的**最大输出**（pricing 页：「MAXIMUM: 384K」），
+     *                        不是"我们希望它写多长"。写大没有额外代价：不预扣费用，
+     *                        压缩算余量时也会被 {@code RESERVED_OUTPUT_CAP} 夹住
+     */
+    private record KnownModel(int contextWindow, int maxOutputTokens) {
+    }
+
+    /**
+     * 查证过的模型。**往这里加一行 = 两样一起填**，出处见类注释。
      *
      * <p>{@code deepseek-chat} 是个旧名，服务商会把它映射成 {@code deepseek-flash}
      * （响应里的 {@code model} 回的就是后者）—— 但请求时可以写旧名，所以两边都要列。
      */
-    private static final Map<String, Integer> CONTEXT_WINDOWS = Map.of(
-            "deepseek-flash", 1_000_000,
-            "deepseek-chat", 1_000_000,
-            "deepseek-reasoner", 1_000_000,
-            "deepseek-v4-pro", 1_000_000);
-
-    /**
-     * 查证过的**单次输出上限**，也就是请求体里的 {@code max_tokens}。
-     *
-     * <p>取值就是官方文档写的那个**最大输出**（pricing 页：「MAXIMUM: 384K」），
-     * 而不是"我们希望它写多长" —— 这个字段的语义本来就是**上限**：模型想收就收，
-     * 这个数只负责在它不想收的时候把它拦住。
-     *
-     * <p>写死成一个很大的上限没有额外代价：它不预扣费用，压缩那边算余量时也会被
-     * {@code RESERVED_OUTPUT_CAP} 夹住（见 {@code ContextCompactor.fullThreshold}），
-     * 所以水位不跟着它走。
-     *
-     * <p>认不出的模型不给这个值，退回 {@code DEFAULT_MAX_OUTPUT_TOKENS} —— 那是保守的方向，
-     * 理由见那个常量。
-     */
-    private static final Map<String, Integer> MAX_OUTPUT_TOKENS = Map.of(
-            "deepseek-flash", 384_000,
-            "deepseek-chat", 384_000,
-            "deepseek-reasoner", 384_000,
-            "deepseek-v4-pro", 384_000);
+    private static final Map<String, KnownModel> KNOWN = Map.of(
+            "deepseek-flash", new KnownModel(1_000_000, 384_000),
+            "deepseek-chat", new KnownModel(1_000_000, 384_000),
+            "deepseek-reasoner", new KnownModel(1_000_000, 384_000),
+            "deepseek-v4-pro", new KnownModel(1_000_000, 384_000));
 
     /**
      * 不支持工具调用的模型。
@@ -83,9 +76,10 @@ public final class ModelCapabilitiesResolver {
             return ModelCapabilities.UNKNOWN;
         }
         String key = modelId.toLowerCase(Locale.ROOT);
+        KnownModel known = KNOWN.get(key);
         return new ModelCapabilities(
                 !WITHOUT_TOOL_SUPPORT.contains(key),
-                CONTEXT_WINDOWS.getOrDefault(key, ModelCapabilities.DEFAULT_CONTEXT_WINDOW),
-                MAX_OUTPUT_TOKENS.getOrDefault(key, ModelCapabilities.DEFAULT_MAX_OUTPUT_TOKENS));
+                known == null ? ModelCapabilities.DEFAULT_CONTEXT_WINDOW : known.contextWindow(),
+                known == null ? ModelCapabilities.DEFAULT_MAX_OUTPUT_TOKENS : known.maxOutputTokens());
     }
 }

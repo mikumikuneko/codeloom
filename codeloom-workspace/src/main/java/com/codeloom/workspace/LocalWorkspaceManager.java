@@ -201,27 +201,18 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
 
     @Override
     public MergeResult merge(Path targetWorktree, String sourceRef, CommitIdentity identity) {
-        if (!Files.isDirectory(targetWorktree)) {
-            throw new IllegalStateException("目标工作区不存在: " + targetWorktree);
-        }
-        return git.merge(targetWorktree, sourceRef, identity);
+        return git.merge(requireDirectory(targetWorktree, "目标工作区"), sourceRef, identity);
     }
 
     @Override
     public int commitsBehind(Path worktree, String ref) {
-        if (!Files.isDirectory(worktree)) {
-            throw new IllegalStateException("工作区不存在: " + worktree);
-        }
         // {@code HEAD..ref} 就是"ref 上有、而我没有"的那些提交
-        return git.countCommits(worktree, "HEAD.." + ref);
+        return git.countCommits(requireDirectory(worktree, "工作区"), "HEAD.." + ref);
     }
 
     @Override
     public List<FileChange> changesIntroducedBy(Path worktree, String commitSha) {
-        if (!Files.isDirectory(worktree)) {
-            throw new IllegalStateException("工作区不存在: " + worktree);
-        }
-        return git.numstatOf(worktree, commitSha);
+        return git.numstatOf(requireDirectory(worktree, "工作区"), commitSha);
     }
 
     // ------------------------------------------------------------------
@@ -281,8 +272,18 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     }
 
     private static Path requireDirectory(Path worktree) {
+        return requireDirectory(worktree, "工作目录");
+    }
+
+    /**
+     * 同一个判据，只是"这是什么目录"的说法跟着调用点走。
+     *
+     * <p>它从前在五个地方各写一遍（目标工作区 / 工作区 / 工作目录），改一处判定
+     * 就会漏掉别处。**说法可以不同，判断只能有一处。**
+     */
+    private static Path requireDirectory(Path worktree, String what) {
         if (!Files.isDirectory(worktree)) {
-            throw new IllegalStateException("工作目录不存在: " + worktree);
+            throw new IllegalStateException(what + "不存在: " + worktree);
         }
         return worktree;
     }
@@ -318,10 +319,6 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     }
 
     private static Path requireExisting(Workspace workspace) {
-        Path path = workspace.path();
-        if (!Files.isDirectory(path)) {
-            throw new IllegalStateException("工作区不存在: " + path);
-        }
-        return path;
+        return requireDirectory(workspace.path(), "工作区");
     }
 }

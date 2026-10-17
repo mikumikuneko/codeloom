@@ -23,6 +23,9 @@ import com.codeloom.domain.event.TodoListUpdated;
  *                   更新了"已经是领域语言 —— 再翻译一次只会多一个会走样的形状。
  *                   工具自己**不写**事件流：那是知道会话是谁的那一层的事（见
  *                   {@code AgentTurn.recordOutcome}）。
+ * @param presentation **只给界面看**的结构化结果（JSON 文本），可以为 null。
+ *                     给模型看的文本是有损的（来源压进一行自由文本），界面要画卡片
+ *                     就得有一份能还原结构的副本。它不进模型上下文，也不是领域事实
  */
 public record ToolOutcome(boolean success,
                           String output,
@@ -31,7 +34,8 @@ public record ToolOutcome(boolean success,
                           long durationMs,
                           Failure failure,
                           boolean mutated,
-                          TodoListUpdated todoUpdate) {
+                          TodoListUpdated todoUpdate,
+                          String presentation) {
 
     /**
      * 失败的性质。
@@ -93,16 +97,16 @@ public record ToolOutcome(boolean success,
                        long durationMs,
                        Failure failure,
                        boolean mutated) {
-        this(success, output, truncated, exitCode, durationMs, failure, mutated, null);
+        this(success, output, truncated, exitCode, durationMs, failure, mutated, null, null);
     }
 
     public static ToolOutcome ok(String output) {
-        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, null);
+        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, null, null);
     }
 
     /** 成功并且**改动过工作区** —— 循环据此决定要不要跑强制验证。 */
     public static ToolOutcome mutated(String output) {
-        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, true, null);
+        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, true, null, null);
     }
 
     /**
@@ -111,7 +115,7 @@ public record ToolOutcome(boolean success,
      * <p>它不算"改动过工作区"：清单不是文件，左边那棵树不该因为写了一次计划就重拉。
      */
     public static ToolOutcome produced(TodoListUpdated update, String output) {
-        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, update);
+        return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, update, null);
     }
 
     public static ToolOutcome failed(String reason) {
@@ -119,7 +123,7 @@ public record ToolOutcome(boolean success,
     }
 
     public static ToolOutcome failure(Failure failure, String reason) {
-        return new ToolOutcome(false, reason, false, null, 0, failure, false, null);
+        return new ToolOutcome(false, reason, false, null, 0, failure, false, null, null);
     }
 
     /**
@@ -151,12 +155,37 @@ public record ToolOutcome(boolean success,
         // "工具明明报了清单，事件流里却没有"，而工具自己的测试是绿的
         //（它直接看 execute 的返回值，不经过这一层）
         return new ToolOutcome(success, output, truncated, exitCode, millis, failure, mutated,
-                todoUpdate);
+                todoUpdate, presentation);
     }
 
     /** 换掉给模型看的那段文本，其余字段原样带过来（同上，一个字段都不许漏）。 */
     public ToolOutcome withOutput(String text) {
+        return withOutput(text, truncated);
+    }
+
+    /**
+     * 换掉给模型看的那段文本，并且**同时改变"截断"这个标记**。
+     *
+     * <p>循环在"一轮输出超预算"时用它把结果压成头尾；那种改写**本来就同时意味着**
+     * 内容被截了（{@code truncated = true}）。让调用方自己拼一个新 record 的话，
+     * 每加一个字段（{@code todoUpdate}、{@code presentation}……）就会在那一处悄悄漏掉 ——
+     * 症状是"工具明明产出了清单，事件流里却没有"。
+     */
+    public ToolOutcome withOutput(String text, boolean truncated) {
         return new ToolOutcome(success, text, truncated, exitCode, durationMs, failure, mutated,
-                todoUpdate);
+                todoUpdate, presentation);
+    }
+
+    /**
+     * 附上一份**只给界面看**的结构化结果（JSON 文本）。
+     *
+     * <p>它和 {@link #output()} 是两个方向：那个是**给模型看的**（有损的自由文本），
+     * 这个是**给界面看的**（能还原成卡片的结构）。界面拿不到它时退回渲染 output。
+     *
+     * <p>**它不进模型的上下文**，也不该被任何判据读取 —— 它是展示数据，不是事实。
+     */
+    public ToolOutcome withPresentation(String presentationJson) {
+        return new ToolOutcome(success, output, truncated, exitCode, durationMs, failure, mutated,
+                todoUpdate, presentationJson);
     }
 }

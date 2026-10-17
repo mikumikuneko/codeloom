@@ -136,8 +136,7 @@ public final class ProcessRunner {
         // 提前把最常见的一种启动失败查出来。不查的话，ProcessBuilder 只会抛一句
         // "Cannot run program ... CreateProcess error=267"，很难定位到是工作目录压根不存在。
         if (workingDirectory != null && !Files.isDirectory(workingDirectory)) {
-            throw new ProcessException(command, ProcessException.Reason.START_FAILED,
-                    "工作目录不存在或不是目录: " + workingDirectory);
+            throw new ProcessException("工作目录不存在或不是目录: " + workingDirectory);
         }
 
         ProcessBuilder builder = new ProcessBuilder(command);
@@ -155,8 +154,7 @@ public final class ProcessRunner {
         try {
             process = builder.start();
         } catch (IOException e) {
-            throw new ProcessException(command, ProcessException.Reason.START_FAILED,
-                    "无法启动进程: " + String.join(" ", command), e);
+            throw new ProcessException("无法启动进程: " + String.join(" ", command), e);
         }
 
         // **立刻关掉子进程的标准输入。** 不关的话那条管道会一直开着，谁去读它谁就挂在那儿
@@ -240,8 +238,7 @@ public final class ProcessRunner {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 killTree(process);
-                throw new ProcessException(command, ProcessException.Reason.INTERRUPTED,
-                        "等待进程时线程被中断，已终止进程树");
+                throw new ProcessException("等待进程时线程被中断，已终止进程树");
             }
 
             if (finished) {
@@ -296,7 +293,7 @@ public final class ProcessRunner {
             return future.get();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new ProcessException(List.of(), ProcessException.Reason.INTERRUPTED, "读取进程输出时被中断");
+            throw new ProcessException("读取进程输出时被中断");
         } catch (ExecutionException e) {
             throw new UncheckedIOException(new IOException("读取进程输出失败", e.getCause()));
         }

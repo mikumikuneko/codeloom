@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
+import { readStorage, writeStorage } from '@/lib/storage'
+
 /**
  * 代码块要不要**自动换行**。
  *
@@ -20,12 +22,7 @@ import { useSyncExternalStore } from 'react'
 const KEY = 'codeloom.codeWrap'
 
 function read(): boolean {
-  try {
-    const stored = localStorage.getItem(KEY)
-    return stored === null ? false : stored === 'true'
-  } catch {
-    return false
-  }
+  return readStorage(KEY) === 'true'
 }
 
 let wrapped = read()
@@ -48,11 +45,7 @@ export function useCodeWrap(): [boolean, () => void] {
 
   function toggle() {
     wrapped = !wrapped
-    try {
-      localStorage.setItem(KEY, String(wrapped))
-    } catch {
-      // 存不下只是"下次打开记不住"，这一次照常生效
-    }
+    writeStorage(KEY, String(wrapped))
     for (const listener of listeners) {
       listener()
     }

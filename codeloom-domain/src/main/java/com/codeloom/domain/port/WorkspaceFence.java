@@ -52,7 +52,9 @@ public interface WorkspaceFence {
      * 一个抢锁失败的竞争者会把号推过当前持有者的 token，于是持有者下一次写入
      * 会被自己的守门拒掉（"活着的人被踢出局"）。
      *
-     * @throws IllegalArgumentException 这棵树不存在（会话还没建出它的工作区）
+     * @throws IllegalStateException 这棵树不存在（会话还没建出它的工作区）——
+     *         和 {@link WorkspaceRepository#require} 同一个判据、同一种异常：
+     *         这是库里的行少了，不是请求写错了
      */
     long issue(WorkspaceId workspaceId);
 

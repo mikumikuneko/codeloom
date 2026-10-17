@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 
-import { ApiError } from '@/lib/api'
+import { errorText } from '@/lib/api'
 
 /**
  * 「拉一次数据，管好加载中 / 出错 / 重来」—— 每个页面都要的那三件事。
@@ -14,7 +14,7 @@ import { ApiError } from '@/lib/api'
  * 用户切走之后请求才回来，是这类页面最常见的竞态。少了它 React 会警告、
  * 更糟的是**后回来的旧数据会盖掉新数据**（快速在两个项目之间来回点时就会出现）。
  */
-export interface AsyncState<T> {
+interface AsyncState<T> {
   data: T | null
   error: string | null
   loading: boolean
@@ -41,7 +41,7 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
         if (!cancelled) setData(value)
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof ApiError ? e.message : '连不上服务器')
+        if (!cancelled) setError(errorText(e))
       })
       .finally(() => {
         if (!cancelled) setLoading(false)

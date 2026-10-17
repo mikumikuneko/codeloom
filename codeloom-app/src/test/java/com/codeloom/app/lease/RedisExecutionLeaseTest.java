@@ -170,7 +170,8 @@ class RedisExecutionLeaseTest {
         RedisExecutionLease holder = lease("inst-a");
 
         assertThatThrownBy(() -> holder.tryAcquire(unknown))
-                .isInstanceOf(IllegalArgumentException.class)
+                // 库里的行少了（500），不是请求写错（400）—— 和 WorkspaceRepository.require 同一类
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("工作区不存在");
 
         // 键不在了 —— 是"还回去了"，不是"挂着等 30 秒"。否则这段时间里这棵树谁也进不来

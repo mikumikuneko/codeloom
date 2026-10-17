@@ -2,9 +2,10 @@ import { ChevronRight, CornerDownRight } from 'lucide-react'
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { ThemedToken } from 'shiki'
 
+import { Button } from '@/components/ui/button'
 import { LivePane } from '@/components/workspace/LivePane'
 import { Markdown, StreamingMarkdown } from '@/components/workspace/Markdown'
-import { ApiError, approvals, sessions as sessionsApi, type ToolView } from '@/lib/api'
+import { errorText, approvals, sessions as sessionsApi, type ToolView } from '@/lib/api'
 import { languageOfPath, useHighlighted, useViewportHighlighting } from '@/lib/highlight'
 import { observeStream, usePendingEcho } from '@/lib/pendingEcho'
 import {
@@ -24,7 +25,8 @@ import {
   type TurnChanges,
   type Unfinished,
 } from '@/lib/sessionStream'
-import { diffLines, diffTotals, type DiffRow } from '@/lib/textDiff'
+import { diffLines, wordDiffs, type DiffRow, type DiffSegment } from '@/lib/textDiff'
+import { dayOf, externalUrl, hostOf, type WebSource } from '@/lib/toolPresentation'
 import { useSessionStream } from '@/lib/useSessionStream'
 import { ToolCatalogContext, useTool, useToolCatalog } from '@/lib/useToolCatalog'
 
@@ -401,6 +403,9 @@ function Item({
       // 前缀和正文**并排**（而不是前后拼接）：正文要过 markdown，而 markdown 是块级的
       // —— 直接拼的话，那个「你：」会被挤到自己一行上去
       return (
+        // **这是原本的样子**：句首标出是谁，正文跟在后面。
+        // 和下面那条"还没轮到"的灰显回声用的是同一套排版 —— 回声一落库就换成它，
+        // 位置不该跳一下
         <div className="flex items-start gap-1.5">
           <span className="shrink-0 text-sm leading-6 text-loom-faint">{speaker}：</span>
           <div className="min-w-0 flex-1">
@@ -419,6 +424,8 @@ function Item({
               而它的思考要落库（带工具调用的那条消息必须把思考一起带回去，
               见后端 AgentTurn）。那种轮次只有思考这一行 ——
               渲染一个空的 markdown 只会多出一段空档 */}
+          {/* 正文**贴最左边**：和行首那些记号（点 / 箭头）同一条线，而不是和它们的文字对齐 ——
+              工具行的文字往后缩，是因为它前面有个记号要先占位 */}
           {item.text !== '' && <Markdown>{item.text}</Markdown>}
         </div>
       )
@@ -466,11 +473,10 @@ function Item({
           />
         )
       }
-      return (
-        <p className="text-xs text-muted-foreground">
-          {`${who(nameOf, item.by)}${item.approved ? '批准了那次调用' : '拒绝了那次调用'}`}
-        </p>
-      )
+      // **答复之后不画一行"某某批准了那次调用"**：能批的只有这条会话的主人自己，
+      // 观战的人本来就按不动 —— 那行字等于在告诉你"你刚才点了一下"。
+      // 拒绝也不用单独说：那条调用自己的行上写着"你拒绝了"（见 ToolLine 的结局词）
+      return null
 
     case 'notice': {
       // 带 actor 的是"**某个人**做的一个动作"（回滚）—— 名字按 id 现查，拼在正文前面。
@@ -509,6 +515,115 @@ function Item({
  *       {@code turnSpan(turn)} 的结果拆成两个 prop 到处传。</li>
  * </ul>
  */
+type ToolItem = Extract<StreamItem, { kind: 'tool' }>
+
+/** 一轮里要画的一个单元：一条事件，或者"连续的只读调用"合成的一组。 */
+interface TurnEntry {
+  item: StreamItem
+  at: number
+  /** 有它就是一组（合并的是这几个只读调用） */
+  group?: ToolItem[]
+}
+
+/**
+ * 把**连续的、只读的**翻文件调用合成一组（读文件 / grep / glob）。
+ *
+ * <p>判据是工具**声明的形状**，不是工具名（见 {@code ToolSurface}）。三种情况不进组：
+ * 带卡片的联网搜索（折进去就把"看了哪些网页"藏了）、失败的、没跑完的 ——
+ * 后两种要留在外面让人一眼看见。
+ */
+function groupToolReads(turn: StreamItem[], catalog: Map<string, ToolView> | null): TurnEntry[] {
+  const quiet = (item: StreamItem): item is ToolItem => {
+    if (item.kind !== 'tool' || item.unfinished !== null || item.outcome === null) return false
+    if (!item.outcome.success || item.outcome.presentation != null) return false
+    const shape = catalog?.get(item.name)?.shape
+    return shape === 'read' || shape === 'search'
+  }
+  const entries: TurnEntry[] = []
+  let run: { item: ToolItem; at: number }[] = []
+  const flush = () => {
+    if (run.length >= 2) {
+      entries.push({ item: run[0].item, at: run[0].at, group: run.map((one) => one.item) })
+    } else {
+      run.forEach((one) => entries.push({ item: one.item, at: one.at }))
+    }
+    run = []
+  }
+  turn.forEach((item, at) => {
+    if (quiet(item)) {
+      run.push({ item, at })
+      return
+    }
+    flush()
+    entries.push({ item, at })
+  })
+  flush()
+  return entries
+}
+
+/**
+ * 一组只读调用：一行说清"翻了多少"，点开才是逐条。
+ *
+ * <p>一整轮里读六次文件、搜三次，如果一行一条，二十来行里找"它改了哪儿"就变成了
+ * 一行行扫。合并成一句之后，流读起来是"想了想 → 翻了几份文件 → 改了这里"。
+ */
+function ReadGroup({
+  items,
+  speaker,
+  sessionId,
+  canApprove,
+  onOpenFile,
+  nameOf,
+}: {
+  items: ToolItem[]
+  speaker: string
+  sessionId: string | null
+  canApprove: boolean
+  onOpenFile?: (path: string) => void
+  nameOf: (id: string) => string | null
+}) {
+  const [expanded, setExpanded] = useDisclosure()
+  const catalog = useToolCatalog()
+  const reads = items.filter((item) => catalog?.get(item.name)?.shape === 'read').length
+  const searches = items.length - reads
+  const label = [
+    reads > 0 ? `看了 ${reads} 个文件` : '',
+    searches > 0 ? `搜了 ${searches} 次` : '',
+  ].filter((part) => part !== '').join('、')
+
+  return (
+    <div className="space-y-2">
+      <p className="flex items-baseline gap-2 text-sm">
+        <span className="flex w-4 shrink-0 items-center self-center">
+          {/* 组里每一条都成功才有可能成组（见 groupToolReads），所以这里是一个恒定的成功点。
+              复用工具行那颗 —— 同一个记号不该有第二份尺寸和颜色 */}
+          <StatusDot running={false} failed={false} unfinished={false} label="都成功了" />
+        </span>
+        <span className="text-muted-foreground">{label}</span>
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className={`ml-auto shrink-0 ${TOGGLE}`}
+        >
+          {expanded ? '收起' : '展开'}
+        </button>
+      </p>
+      {expanded &&
+        items.map((item, index) => (
+          <Item
+            key={index}
+            item={item}
+            speaker={speaker}
+            sessionId={sessionId}
+            canApprove={canApprove}
+            onOpenFile={onOpenFile}
+            nameOf={nameOf}
+          />
+        ))}
+    </div>
+  )
+}
+
 function Turn({
   turn,
   change,
@@ -542,6 +657,8 @@ function Turn({
 
 }) {
   const span = turnSpan(turn)
+  /** 工具的声明（认"是不是只读的翻文件"用它，不认工具名） */
+  const catalog = useToolCatalog()
 
   // 这一轮的用量结算。**一轮可能落好几条** —— 见 mergedUsage
   const usages = turn.filter((item) => item.kind === 'usage')
@@ -568,8 +685,18 @@ function Turn({
     <LiveTurn.Provider value={live}>
       {/* scroll-mt-4：跳过来的时候上面留一点缝，不然那一轮的第一行会贴着顶边 */}
       <div ref={anchor} className="scroll-mt-4 space-y-4">
-        {turn.map((item, at) =>
-          item.kind === 'usage' ? (
+        {groupToolReads(turn, catalog).map(({ item, at, group }) =>
+          group !== undefined ? (
+            <ReadGroup
+              key={at}
+              items={group}
+              speaker={speaker}
+              sessionId={sessionId}
+              canApprove={canApprove}
+              onOpenFile={onOpenFile}
+              nameOf={nameOf}
+            />
+          ) : item.kind === 'usage' ? (
             // 用量和"这一轮用了多久"一起画 —— 它们是同一类事实，
             // 而时长是整轮的属性，不该挂在某一条消息上。
             //
@@ -617,6 +744,8 @@ function Turn({
                 是"这个界面不会渲染"的观感。现在两边走同一套渲染，
                 唯一还淡着的只有颜色 */}
             {streaming.reasoning && <Thinking text={streaming.reasoning} running />}
+            {/* 流式正文和落库后重画的那一份**同一个左边界**（都贴最左边），
+                否则答案在"流式长出来"和"落库后重画"之间会横跳 */}
             {streaming.text && <StreamingMarkdown text={streaming.text} />}
           </>
         )}
@@ -765,8 +894,8 @@ function ChangesRow({
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary className="flex w-fit cursor-pointer list-none items-baseline gap-1.5 text-xs text-loom-faint transition-colors hover:text-muted-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 shrink-0 translate-y-0.5 transition-transform group-open:rotate-90" />
+      <summary className={`${FOLD_SUMMARY} w-fit items-baseline gap-1.5 text-xs`}>
+        <FoldChevron />
         {/* 改动太多时后端只记下了前一批 —— 那个数字如实带个"+"，
             而不是拿一个偏小的数当完整的报 */}
         改了 {change.files.length}{change.truncated ? '+' : ''} 个文件
@@ -926,8 +1055,8 @@ function UsageRow({
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-xs text-loom-faint transition-colors hover:text-muted-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 shrink-0 translate-y-0.5 transition-transform group-open:rotate-90" />
+      <summary className={`${FOLD_SUMMARY} w-fit items-center gap-1.5 text-xs`}>
+        <FoldChevron />
         {/* 说"这一轮用了多少"，不说"用量是多少"：后者是把一件事名词化了一下，
             而要读的人得先把它还原成句子。中文里动词开头的句子更好读 */}
         这一轮用了 {formatTokens(input + output)} tokens
@@ -1033,8 +1162,40 @@ function ContextRing({ reading }: { reading: ContextReading }) {
 }
 
 /**
- * 折叠区那颗按钮上写什么。两个折叠区（工具结果、一段 diff）用**同一句话**，
- * 所以只有这一处 —— 各写一遍的话，改文案会漏一处，而两处长得一样、不容易发现。
+ * 折叠按钮长什么样。工具结果、diff、搜索结果**共用这一串** ——
+ * 它们做的是同一件事，长成三个样子只会让人每次重新认一遍。
+ *
+ * <p>平时没有下划线：它是一行辅助文字，不该和正文抢注意力；指上去才出现，
+ * 那一下是在回答"这个能按"。
+ */
+const TOGGLE =
+  'text-loom-faint underline-offset-2 transition-colors hover:text-muted-foreground hover:underline'
+
+/**
+ * 折叠**标题行**共用的样子：整行可点、原生三角不要、灰、指上去变亮。
+ * 三种行（思考 / 用量 / 改动）各自再加宽度和字号。
+ */
+const FOLD_SUMMARY =
+  'flex cursor-pointer list-none text-loom-faint transition-colors hover:text-muted-foreground [&::-webkit-details-marker]:hidden'
+
+/**
+ * 折叠行左边那颗箭头。
+ *
+ * <p>它**占一个固定的 16px 槽并垂直居中**，所以不管这一行是 `items-baseline`
+ * 还是 `items-center`，箭头都落在同一条线上 —— 三处各写一份的时候，
+ * 一处靠 `translate-y` 挪、一处靠 `items-center` 顶，最后谁也不齐。
+ */
+function FoldChevron() {
+  return (
+    <span className="flex w-4 shrink-0 items-center self-center">
+      <ChevronRight className="size-3 transition-transform group-open:rotate-90" />
+    </span>
+  )
+}
+
+/**
+ * 工具结果和 diff 的折叠按钮上写什么。两处用**同一句话**，所以只有这一处 ——
+ * 各写一遍的话，改文案会漏一处，而两处长得一样、不容易发现。
  */
 function expandLabel(expanded: boolean, hidden: number): string {
   return expanded ? '收起' : hidden === 1 ? '还有 1 行' : `还有 ${hidden} 行`
@@ -1134,8 +1295,13 @@ function Thinking({ text, running = false }: { text: string; running?: boolean }
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary className="flex w-full cursor-pointer list-none items-baseline gap-1.5 text-xs text-loom-faint transition-colors hover:text-muted-foreground [&::-webkit-details-marker]:hidden">
-        <ChevronRight className="size-3 shrink-0 translate-y-0.5 transition-transform group-open:rotate-90" />
+      <summary className={`${FOLD_SUMMARY} w-full items-baseline gap-2 text-sm`}>
+        {/* 一行里左边是**行为**（在思考），右边是**可展开**（箭头）——
+            两件事分开，人扫一行时先认出是什么，再决定要不要展开 */}
+        {/* 行首那个**转开的箭头**就是它全部的记号：折叠 / 展开这件事自己就说明
+            "这里还能打开"。不加图标、不在行尾再放一个箭头。
+            它占一个**固定宽度**的槽（见 {@link FoldChevron}），后面那列字才和工具行、正文对齐 */}
+        <FoldChevron />
         <span className="shrink-0">思考</span>
         {summary !== '' && (
           <>
@@ -1147,8 +1313,10 @@ function Thinking({ text, running = false }: { text: string; running?: boolean }
         )}
       </summary>
       {open && (
-        <div className="mt-2 border-l-2 border-border pl-3 text-xs leading-5 text-loom-faint">
-          <Markdown variant="dense">{text}</Markdown>
+        <div className="mt-2 border-l-2 border-border pl-6 text-loom-faint">
+          {/* **和正文同一个字号**，只用颜色和左侧那条线表示"这是它想的，不是它说的" ——
+              Claude Code 也是这么做的（暗色 + 斜体；中文斜体会糊，这里只留暗色） */}
+          <Markdown>{text}</Markdown>
         </div>
       )}
     </details>
@@ -1210,7 +1378,8 @@ function thinkingSummary(text: string, running: boolean): string {
  * 人却找不到任何地方能批。（Claude Code 在这种时候给的是一个能直接答的提示。）
  *
  * <h2>答复之后不用刷新</h2>
- * 那条 {@code ToolApprovalResolved} 会从 SSE 推回来，流自己把它换成"谁批准了那次调用"，
+ * 那条 {@code ToolApprovalResolved} 会从 SSE 推回来，卡片随之收掉（不另画一行
+ * "某某批准了"—— 能批的只有会话主人自己，那句话只是在复述他刚点的那一下），
  * 执行器随后续跑，后面的内容接着长出来。
  */
 function PendingApproval({
@@ -1237,7 +1406,7 @@ function PendingApproval({
     try {
       await approvals.resolve(sessionId, callId, approved)
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -1259,22 +1428,12 @@ function PendingApproval({
           {/* 批准是这一刻**唯一在推动事情的动作**（整轮停着等它），
               所以它是个真的按钮，不是一行字 —— 文字按钮会被扫过去，
               而 agent 停着的时候每一秒都是用户在等 */}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void answer(true)}
-            className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/85 disabled:opacity-50"
-          >
+          <Button size="xs" disabled={busy} onClick={() => void answer(true)}>
             批准
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void answer(false)}
-            className="rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
-          >
+          </Button>
+          <Button size="xs" variant="outline" disabled={busy} onClick={() => void answer(false)}>
             拒绝
-          </button>
+          </Button>
         </span>
       )}
 
@@ -1288,19 +1447,24 @@ function PendingApproval({
 }
 
 /**
- * 一次工具调用 —— **两行**：调用一行，结果一行。
+ * 一次工具调用 —— **一行调用，有的还有一行结果**。
  *
- * <h2>为什么结果必须单独一行</h2>
- * 这一栏从前只有第一行（一个记号 + 工具名），于是人**看得出它跑了，看不出跑出了什么**。
- * 那正是"粗糙"的来源：一次 `read_file` 和一次 `write_file` 在界面上长得一样，
- * 而它们对代码做的事情完全不同。
+ * <h2>结果行只在它带着信息的时候出现</h2>
+ * 搜到的那几行、写文件的结论、失败的报错 —— 这些是这一步的产出，要看得见。
+ * 而"成功读完一个文件""一条成功命令的 stdout"不是：前者只是把调用行又数了一遍，
+ * 后者是回执（那一步做了什么，命令自己那一行已经说了）。它们白占的是
+ * "一步一步"之间最贵的竖直空间。判据集中在 {@link resultWorthShowing}。
  *
- * <p>加上结果行之后，"这一步过没过、动了什么"就在同一处看完了 ——
- * 而完整输出仍然不是给人读的（那是给模型读的），所以只给**前面几行**，
+ * <h2>为什么结果要单独一行，而不是挤进调用行</h2>
+ * 这一栏从前只有调用那行，于是人**看得出它跑了，看不出跑出了什么** ——
+ * 一次 `read_file` 和一次 `write_file` 在界面上长得一样，而它们对代码做的事情
+ * 完全不同。该露的结果露在下一行，扫的时候不用去拆调用行。
+ *
+ * <p>完整输出仍然不是给人读的（那是给模型读的），所以只给**前面几行**，
  * 多的折起来。这个取舍是从 Claude Code 那儿看来的：它给 bash 输出 3 行，
  * 超过就写一句"还有 N 行"。
  *
- * <h2>两行而不是一个框</h2>
+ * <h2>结果行缩进在下面，而不是套一个框</h2>
  * 父子的关系靠**缩进**表达，不靠给每次调用套一个盒子 —— 一段流水里几十次调用，
  * 几十个盒子会把页面变成仪表盘。同样是看它来的。
  *
@@ -1340,46 +1504,51 @@ function ToolLine({
   const running = toolIsRunning(outcome, unfinished)
   // 这个工具**声明的样子**。取不到就是空 —— 那时下面几处各自退化成"显示工具名/原始参数"
   const tool = useTool(name)
-  const detail = summarize(tool, args)
-  const path = pathOf(tool, args)
-  const diff = diffOf(tool, args, outcome)
-  const totals = diff === null ? null : diffTotals(diff)
+  // 参数串**只解析一遍**：主语、路径、diff 都要用它，各解析一次等于同一个 JSON 解三遍
+  const parsed = useMemo(() => parseArgs(args), [args])
+  const detail = summarize(tool, parsed)
+  const path = pathOf(tool, parsed)
+  /** `write_file` 的正文：新建时拿它画代码预览（覆盖时不用，见 ToolResult） */
+  const written = typeof parsed?.content === 'string' ? parsed.content : null
+  // 工具声明的主语是一个外部网址时（抓取），这行本身就是它的入口 ——
+  // 结果里不再重复一条同样的链接
+  const link = tool?.shape === 'web' ? externalUrl(detail) : null
+  // 这次调用改了什么**只算一遍**：下面那一行也要用它去画 diff。
+  // 从前两处各算一遍 LCS，而流式期间父组件每一帧都重渲染 —— 等于每帧算两遍。
+  // 依赖里 outcome 的引用只在结果真的到达时换一次，不是每帧都换
+  const diff = useMemo(() => diffOf(tool, parsed, outcome), [tool, parsed, outcome])
 
-  // 调用行右侧那一小块。三副面孔，**不会同时出现**（失败不给 diff、没跑完更不给）：
-  //   成功 → 改了多少行
+  // 调用行右侧那一小块。**两副面孔**，不会同时出现：
   //   没跑完 → 为什么没跑完
-  //   失败 → **它到底跑起来了没有**
+  //   失败 → 退出码（**只有真的跑起来过才有**）
+  //
+  // 成功时**什么都不写**：这一步做了什么，它自己那一行已经说了（改了哪个文件、
+  // 跑了什么）；改了多少行去 diff 里数，行尾再挂一个 +N −M 是同一件事的第三个说法，
+  // 而它占的是行尾最显眼的位置。
+  //
+  // "跑完了但退出码是 1" 和 "进程压根没跑起来" 是两件事，但后者**不用再写一句话**：
+  // 行首那个红点已经把"这一行没成"说完了，右端再写"没跑成"是用两种记号说同一件事
   const suffix =
     unfinished !== null
       ? UNFINISHED_WORD[unfinished]
-      : failed && outcome !== null
-        ? outcome.exitCode === null
-          ? // 没有退出码 = 那个进程**压根没跑起来**（超时被杀、路径越界、参数不是 JSON…）。
-            // 这和"跑完了但退出码是 1"是两件不同的事：前者不是代码的问题，后者是。
-            // 判据是现成的 —— **有没有退出码**，不必再问后端要一个错误码
-            '没跑成'
-          : `退出码 ${outcome.exitCode}`
-        : totals === null
-          ? null
-          : `+${totals.added} −${totals.removed}`
+      : failed && outcome !== null && outcome.exitCode !== null
+        ? `退出码 ${outcome.exitCode}`
+        : null
 
   return (
-    <div className="text-xs">
+    // **和正文一样大**（14px）。Claude Code 的层级靠颜色和字重，不靠把工具行缩小一号 ——
+    // 缩小之后一段流水就是一屏小字，眼睛要来回换档
+    <div className="text-sm">
       <p className="flex items-baseline gap-2">
-        {/* 记号**按状态上色**：只有失败是红的。成功保持暗色 —— 一段流水里
-            绝大多数调用都是成功的，给它们全部上色等于没有重点。
-            没跑完是灰的，**不是红的**：它没失败。
-
-            `role="img"` + `aria-label` 而不是旁边再挂一个 sr-only：
-            记号是**画给人看的**，读屏器读不出来，所以要说一遍 ——
-            但用 sr-only 的话那句话会进**文本**，于是谁选中复制这段流水，
-            都会得到一堆「已完成」「增加」。语义挂在标签上，文本就是干净的 */}
-        <span
-          role="img"
-          aria-label={stateWord(outcome, unfinished)}
-          className={`shrink-0 ${failed ? 'text-destructive' : 'text-loom-faint'}`}
-        >
-          {mark(outcome, unfinished)}
+        {/* 行首只有一个点：状态（运行中 / 成功 / 失败 / 没跑完）由它的颜色和呼吸来说，
+            行为由紧跟着的动词说。见 {@link StatusDot} */}
+        <span className="flex w-4 shrink-0 items-center self-center">
+          <StatusDot
+            running={running}
+            failed={failed}
+            unfinished={unfinished !== null}
+            label={stateWord(outcome, unfinished)}
+          />
         </span>
 
         {/* 工具名是**动词**，不是接口名：名字回答"在发生什么"，
@@ -1405,6 +1574,18 @@ function ToolLine({
             >
               {detail}
             </button>
+          ) : link !== null ? (
+            // 网址点得开：和文件路径那条同理，只是开到浏览器里
+            <a
+              href={link}
+              target="_blank"
+              rel="noreferrer"
+              className={`min-w-0 truncate font-mono text-loom-faint underline-offset-2 transition-colors hover:text-muted-foreground hover:underline ${
+                running ? 'loom-shimmer' : ''
+              }`}
+            >
+              {detail}
+            </a>
           ) : (
             <span
               className={`min-w-0 truncate font-mono text-loom-faint ${running ? 'loom-shimmer' : ''}`}
@@ -1413,12 +1594,9 @@ function ToolLine({
             </span>
           ))}
 
-        {/* 这一格是"把右侧那一小块推到边上"用的。没有它的话，
-            短摘要的那一行里 +5 −1 会紧跟在路径后面 */}
-        <span className="flex-1" />
-
         {/* 右侧那一小块放在**最右边而且不参与省略**：一行里只该有一处被省略，
-            两处的话两处都读不出来 */}
+            两处的话两处都读不出来。推到边上靠它自己的 `ml-auto` ——
+            再垫一个 `flex-1` 是做同一件事的第二遍 */}
         {suffix !== null && (
           <span className="ml-auto shrink-0 font-mono text-loom-faint">{suffix}</span>
         )}
@@ -1426,7 +1604,9 @@ function ToolLine({
 
       {/* 还没有结果的时候没有结果行 —— 上面那个「…」已经在说这件事了。
           没跑完的也没有：它没有结果可说，原因已经在右边那一格 */}
-      {outcome !== null && <ToolResult name={name} args={args} outcome={outcome} />}
+      {outcome !== null && resultWorthShowing(tool, outcome) && (
+        <ToolResult outcome={outcome} diff={diff} path={path} written={written} />
+      )}
     </div>
   )
 }
@@ -1444,11 +1624,86 @@ const UNFINISHED_WORD: Record<Unfinished, string> = {
   'no-result': '没有结果',
 }
 
+/**
+ * 行首那**一个点**：工具调用的全部视觉标记。
+ *
+ * <p>照 Claude Code（`ToolUseLoader`）的做法：没有按工具分类的图标，
+ * 只有一个 7px 的圆点说状态 —— 运行中呼吸、成功绿、失败红、没跑完是暗的。
+ * 行为由紧跟着的**动词**说（读取 / 修改 / 运行 / 搜索），不需要再来一个图标说一遍；
+ * 两个记号挤在行首，谁都不显眼。
+ *
+ * <p>这颗绿点用的是 `emerald-400`，比 diff 那个 `loom-added-mark` 亮 ——
+ * **两者不是同一个东西**：它是一行只有一颗的"状态"，而 diff 的记号一行一颗、
+ * 铺满整个改动，亮成那个样子会抢走正文。别把它们合并成一个令牌。
+ */
+function StatusDot({ running, failed, unfinished, label }: {
+  running: boolean
+  failed: boolean
+  unfinished: boolean
+  /** 读屏器念的那句"这一行是什么状态" —— 视觉上的状态由颜色和右端承担 */
+  label: string
+}) {
+  const color = failed
+    ? 'bg-destructive'
+    : unfinished
+      ? 'bg-loom-faint/40'
+      : running
+        ? 'bg-loom-faint'
+        : 'bg-emerald-400'
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      className={`size-[7px] shrink-0 self-center rounded-full ${color} ${running ? 'animate-pulse' : ''}`}
+    />
+  )
+}
+
 /** 一次调用的结果。**最多三行**，多的折起来。 */
 const RESULT_PREVIEW_LINES = 3
 
+/**
+ * 搜索结果折叠时显示几条。
+ *
+ * <p>四条：我们的会话栏比 deepseek-harness 的正文列窄得多，一行一条的话四条刚好一屏内看完，
+ * 而八条就开始变成一面墙。多出来的靠"展开其余 N 条"。
+ */
+const SOURCE_PREVIEW_ROWS = 4
+
 /** diff 一次显示几行。**十二行**：改一个函数差不多就是这个量，再多就该折了。 */
 const DIFF_PREVIEW_ROWS = 12
+
+/**
+ * 新建文件时，代码预览一次显示几行。
+ *
+ * <p>**和 Claude Code 同一个数**（`MAX_LINES_TO_RENDER = 10`）：它给的是
+ * "一眼看得出写了什么"的量，而不是"把文件铺开"。多的走「还有 N 行」。
+ */
+const CREATED_FILE_PREVIEW_LINES = 10
+
+/**
+ * 这次调用的结果**值不值得单独占一行**。
+ *
+ * <h2>失败必须说</h2>
+ * 报错是接下来那条路的入口（它要修的就是这个）。藏起来等于让人自己把命令重跑一遍。
+ *
+ * <h2>成功时，读文件和跑命令**都不说**</h2>
+ * 读文件的结果是一整份内容：流里没人读它（要看就在中栏打开），而原来下面那句
+ * "读了 N 行"只是把调用行又数了一遍。跑命令的 stdout 是**回执**，不是这一步
+ * 做了什么 —— 那件事由命令自己那一行和 agent 随后的正文说。它们正是"一步一步"
+ * 之间最占地方的噪音。
+ *
+ * <p>别的工具的成功结果留着：搜索结果是一组要点的链接、写文件是新建出来的那段代码
+ * （覆盖时只给结论）、抓取是标题 —— 那些都是这一步真正的产出。
+ *
+ * <p>认不出工具声明时**照旧显示**：宁可多一行，也不要把真正有用的结果藏掉。
+ */
+function resultWorthShowing(tool: ToolView | undefined, outcome: ToolOutcome): boolean {
+  if (!outcome.success) {
+    return true
+  }
+  return tool?.shape !== 'read' && tool?.shape !== 'execute'
+}
 
 /**
  * 一次调用的结果。
@@ -1463,48 +1718,255 @@ const DIFF_PREVIEW_ROWS = 12
  * 见 {@link diffOf}。
  */
 function ToolResult({
-  name,
-  args,
   outcome,
+  diff,
+  path,
+  written,
 }: {
-  name: string
-  args: string
   outcome: ToolOutcome
+  /** 这次调用改了什么 —— 由上面那一行算好传下来，不在这里重算 */
+  diff: DiffRow[] | null
+  /** 主语路径（工具声明的主体）。上面那一行已经解析过参数，这里不再解析 */
+  path: string | null
+  /** `write_file` 的正文（参数里的 `content`）；别的工具或覆盖时是 null */
+  written: string | null
 }) {
-  const tool = useTool(name)
-  const diff = diffOf(tool, args, outcome)
+  // 后端只给界面看的结构化结果。缺失 / 坏数据 / 旧事件都是 null —— 那时照旧渲染文本
+  const web = outcome.presentation ?? null
 
   return (
-    <div className="mt-1 flex gap-1.5">
+    <div className="mt-1 flex gap-2">
       {/* 那个转角是「这一行属于上面那一次调用」的记号。
-          终端里它是 `⎿`，网页里一个 SVG 更合适 —— 角色一样，写法跟着平台走 */}
-      <CornerDownRight
-        aria-hidden
-        className={`mt-1 size-3 shrink-0 ${outcome.success ? 'text-loom-faint/60' : 'text-destructive/60'}`}
-      />
+          终端里它是 `⎿`，网页里一个 SVG 更合适 —— 角色一样，写法跟着平台走。
+          它和上面那个点占**同样宽**的槽，于是结果的文字和调用行的文字对齐 */}
+      <span className="flex w-4 shrink-0 items-start">
+        <CornerDownRight
+          aria-hidden
+          className={`mt-1 size-3 ${outcome.success ? 'text-loom-faint/60' : 'text-destructive/60'}`}
+        />
+      </span>
       <div className="min-w-0 flex-1">
-        {diff === null ? (
-          <ResultText name={name} outcome={outcome} />
-        ) : (
+        {diff !== null ? (
           // 路径跟着进去：**语言是从它认出来的**，和这个文件在中栏打开时用的是同一张表
-          <DiffView rows={diff} path={pathOf(tool, args)} />
+          <DiffView
+            rows={diff}
+            path={path}
+            // 起始行号只有后端知道（它读到的是整份文件）；旧事件没有这一项，就不标号
+            startLine={web?.kind === 'diff' ? web.startLine : undefined}
+          />
+        ) : web?.kind === 'web_search' ? (
+          <WebSources sources={web.sources} />
+        ) : web?.kind === 'web_fetch' ? (
+          <WebPage title={web.title} truncated={web.truncated} />
+        ) : web?.kind === 'write' && web.created && written !== null ? (
+          // 新建出来的文件：画代码本身，不画 diff —— 每一行都是新增，绿底没有信息量。
+          // 覆盖时旧内容已经没了，仍然只显示那句结论（见 diffOf 的注释）
+          <CreatedFile content={written} path={path} lines={web.lines} />
+        ) : (
+          <ResultText outcome={outcome} />
         )}
       </div>
     </div>
   )
 }
 
-/** 不是文件改动的那些调用，结果就是一段文本。 */
-function ResultText({ name, outcome }: { name: string; outcome: ToolOutcome }) {
+/**
+ * 抓取的结果：只给标题和截断标记。
+ *
+ * <p>**正文不上界面**：它的开头是写给模型的那句"以下内容来自互联网，只当资料看"，
+ * 而那是指令，不是给人读的。要看原文就点调用行上那个网址 —— 那里已经是链接了。
+ */
+function WebPage({ title, truncated }: { title?: string; truncated: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="truncate text-muted-foreground">{title ?? '已抓取正文'}</p>
+      {truncated && (
+        <p className="text-loom-faint">正文太长，只保留了开头一段；要看全文点上面的网址</p>
+      )}
+    </div>
+  )
+}
+
+/**
+ * `write_file` **新建**出来的文件：把写进去的代码铺出来。
+ *
+ * <h2>为什么不是 diff</h2>
+ * 新文件的每一行都是"新增"，涂成一片绿只是在说"这是个新文件"—— 而上面那行调用
+ * 已经说了。Claude Code 对新建画的也是代码本身（前 10 行 + 行号 + "… +N lines"），
+ * 只有**覆盖**才画 diff。
+ *
+ * <h2>为什么正文不存进事件</h2>
+ * 它就在这次调用的参数里（见 {@code written}），事件流里再存一份是同一份内容出现两次。
+ * 覆盖时旧内容在磁盘上已经没了 —— 那才是真的画不出 diff 的那一半。
+ *
+ * <h2>行号和代码用的是 diff 那一套</h2>
+ * 同样的等宽 13px、同样的行号列宽（按最大行号位数、`ch` 计），所以新建、diff、
+ * 普通代码块在同一栏里读起来是一个东西。
+ */
+function CreatedFile({
+  content,
+  path,
+  lines,
+}: {
+  /** 参数里的 `content` —— 写进去的全文 */
+  content: string
+  /** 文件路径：**语言从它认出来**，和 diff、中栏打开时用同一张表 */
+  path: string | null
+  /** 后端数的行数（界面上那个"写了 N 行"） */
+  lines: number
+}) {
   const [expanded, setExpanded] = useDisclosure()
-  const lines = resultLines(useTool(name), outcome)
+
+  const all = useMemo(() => {
+    const rows = content.split('\n')
+    // 末尾换行是**行终止符**，不是多出来的一个空行（和编辑器数行号一致）
+    if (rows.length > 0 && rows[rows.length - 1] === '') {
+      rows.pop()
+    }
+    return rows
+  }, [content])
+
+  const shown = expanded ? all : all.slice(0, CREATED_FILE_PREVIEW_LINES)
+  const hidden = all.length - shown.length
+
+  // **滚到了才分词**，和 diff 那一处一样
+  const anchor = useRef<HTMLDivElement>(null)
+  const seen = useViewportHighlighting(anchor)
+  const language = languageOfPath(path)
+  const tokens = useHighlighted(shown.join('\n'), language, seen)
+
+  const digits = String(Math.max(lines, all.length, 1)).length
+  const numberWidth = `${digits + 2}ch`
+
+  if (all.length === 0) {
+    return <p className="text-loom-faint">（空文件）</p>
+  }
+
+  return (
+    <div ref={anchor} className="min-w-0">
+      <p className="mb-1 text-xs text-loom-faint">{lines} 行</p>
+      <div className="font-mono text-[13px] leading-5">
+        {shown.map((line, index) => (
+          <div key={index} className="flex">
+            <span
+              style={{ width: numberWidth }}
+              className="shrink-0 select-none text-right text-loom-faint/50"
+            >
+              {index + 1}
+            </span>
+            <span className="whitespace-pre-wrap break-all">
+              <DiffLineText tokens={tokens?.[index] ?? null} plain={line} segments={null} changedClass="" />
+            </span>
+          </div>
+        ))}
+        {(hidden > 0 || expanded) && (
+          <div className="flex">
+            {/* 按钮和代码同一列：它属于这段代码，不属于行号那一列 */}
+            <span className="shrink-0" style={{ width: numberWidth }} />
+            <button type="button" onClick={() => setExpanded(!expanded)} className={TOGGLE}>
+              {expandLabel(expanded, hidden)}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * 搜索的结果卡片：折叠时**一条来源一行**（标题 + 域名/日期），展开时每条多两行摘要。
+ *
+ * <p>它比给模型看的那段文本多出来的东西只有一样：**能点开的链接**。
+ * 文本里的 URL 是排给模型读的，人要点的是标题。
+ */
+function WebSources({ sources }: { sources: WebSource[] }) {
+  const [expanded, setExpanded] = useDisclosure()
+  const shown = expanded ? sources : sources.slice(0, SOURCE_PREVIEW_ROWS)
+  const hidden = sources.length - shown.length
+
+  return (
+    <div className="min-w-0 space-y-1">
+      {shown.map((source, index) => {
+        const day = dayOf(source.date)
+        // 和调用行那个网址**同一个守卫**（只认 http/https）：来源里的链接也是外面来的，
+        // 不能因为"它长得像网址"就直接塞进 href
+        const href = externalUrl(source.url)
+        const label = source.title ?? hostOf(source.url)
+        // 标题里已经带着站名时（"Change Log | DeepSeek API Docs"）不再重复一遍，
+        // 只留日期 —— 一行里同一个词出现两次是最刺眼的那种杂乱
+        const site = source.siteName !== undefined && !(source.title ?? '').includes(source.siteName)
+          ? source.siteName
+          : source.siteName === undefined ? hostOf(source.url) : undefined
+        const last = index === shown.length - 1
+        return (
+          <div key={source.url} className="min-w-0">
+            {/* **一条来源一行**：标题在前，来源和日期跟在后面。
+                摘要只在展开时出现 —— 折叠着的时候它才是"杂乱"的来源：
+                八条各占三行，一面墙都是小字 */}
+            <p className="flex min-w-0 items-baseline gap-1.5">
+              {href === null ? (
+                // 认不出是 http/https：照常显示标题，但**不做成链接** ——
+                // 点一个 `javascript:` 或 `file:` 不是"打开来源"
+                <span className="min-w-0 truncate text-muted-foreground">{label}</span>
+              ) : (
+                <a
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="min-w-0 truncate text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  {label}
+                </a>
+              )}
+              <span className="shrink-0 text-loom-faint">
+                {[site, day].filter((part) => part !== undefined && part !== '').join(' · ')}
+              </span>
+              {/* 折叠时：**接在最后一行末尾、靠右**（官网的「查看全部」也在那一行） */}
+              {last && !expanded && hidden > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setExpanded(!expanded)}
+                  className={`ml-auto shrink-0 ${TOGGLE}`}
+                >
+                  {`展开其余 ${hidden} 条`}
+                </button>
+              )}
+            </p>
+            {expanded && source.snippet !== undefined && (
+              <p className="line-clamp-2 text-loom-faint">{source.snippet}</p>
+            )}
+          </div>
+        )
+      })}
+      {/* 展开之后：收起放在**整个列表的末尾、靠右** —— 挂在最后一条来源上会跟着它的长度跑，
+          而那一条往往还有一段摘要，按钮就飘到列表中间去了 */}
+      {expanded && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            className={TOGGLE}
+          >
+            收起
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+/** 不是文件改动、也没有卡片可画的那些调用，结果就是一段文本。 */
+function ResultText({ outcome }: { outcome: ToolOutcome }) {
+  const [expanded, setExpanded] = useDisclosure()
+  const lines = resultLines(outcome)
   const shown = expanded ? lines : lines.slice(0, RESULT_PREVIEW_LINES)
   const hidden = lines.length - shown.length
 
   return (
     <>
       <pre
-        className={`whitespace-pre-wrap break-words font-mono leading-5 ${
+        className={`whitespace-pre-wrap break-words font-mono text-[13px] leading-5 ${
           outcome.success ? 'text-muted-foreground' : 'text-destructive'
         }`}
       >
@@ -1514,7 +1976,7 @@ function ResultText({ name, outcome }: { name: string; outcome: ToolOutcome }) {
         <button
           type="button"
           onClick={() => setExpanded(!expanded)}
-          className="mt-0.5 text-loom-faint transition-colors hover:text-muted-foreground"
+          className={`mt-0.5 ${TOGGLE}`}
         >
           {expandLabel(expanded, hidden)}
         </button>
@@ -1524,17 +1986,32 @@ function ResultText({ name, outcome }: { name: string; outcome: ToolOutcome }) {
 }
 
 /**
- * 一段改动：删的行、加的行、以及它们周围没动的几行。
+ * 一段改动：没动的上下文、删掉的行、加上的行。
  *
- * <h2>记号单独一列</h2>
- * `+` / `−` 占一个固定宽度的列，行号不在这里（前端手上只有"被替换的那一段"，
- * 没有它在文件里的绝对行号 —— 那个数字要后端给）。所以这里老实说是**相对位置**，
- * 不画一个假的 `@@ -12,3 +12,4 @@`。
+ * <h2>行号从后端来</h2>
+ * 前端手上只有"被替换的那一段"，不知道它在文件里的绝对位置 —— 那个数字只有
+ * 后端（真正读到文件的那一侧）知道，随结果一起带过来（{@code startLine}）。
+ * 没带就不标号：按提交看的整段改动就是那种（它可能跨几个 hunk）。
+ *
+ * <h2>哪一侧标哪个号</h2>
+ * 删除的行标**旧**行号（它在新文件里已经没有了），其余一律标**新**行号 ——
+ * 于是往下读到的号是连续递增的，和打开改完之后的文件看到的一致。
+ * 列宽按最大那个行号的位数定，用 `ch`：等宽字体下 1ch 正好一位数字，
+ * 三位数和四位数都对得齐。
+ *
+ * <h2>一对删/加行里再标一层词</h2>
+ * 一行三十个字符只换了一个数，整行涂深只能说明"这行变了"；把变的那几个词
+ * 再深一档，读的人才知道变的是什么。哪几个词换了由 {@link wordDiffs} 算。
  *
  * <h2>颜色不是唯一的信号</h2>
  * 底色只是帮忙扫，`+` / `−` 那两个记号才是真正的信息 —— 它们对读屏器也说得出来。
  */
-export function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null }) {
+export function DiffView({ rows, path, startLine }: {
+  rows: DiffRow[]
+  path: string | null
+  /** 这一段在文件里的起始行号（后端随结果带过来）；没有就不标号 */
+  startLine?: number
+}) {
   const [expanded, setExpanded] = useDisclosure()
   const shown = expanded ? rows : rows.slice(0, DIFF_PREVIEW_ROWS)
   const hidden = rows.length - shown.length
@@ -1552,29 +2029,123 @@ export function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null 
   const newTokens = useHighlighted(sideText(rows, 'removed'), language, seen)
   const oldTokens = useHighlighted(sideText(rows, 'added'), language, seen)
 
+  // 词级差异按**整段**算：收起时露出来的那几行也可能和后面的行配成对
+  const words = useMemo(() => wordDiffs(rows), [rows])
+
+  /**
+   * 行号列的宽度。**先走一遍两侧的行号游标**拿到最大那个数 ——
+   * 不能拿"显示出来的行数"估：中间那些 gap 也占行号。
+   *
+   * <p>两种来源：统一 diff 的行自带号（按提交看的那个入口）；会话里那段改动
+   * 只有起始行，就按增删行数现场推。
+   */
+  const numberWidth = useMemo(() => {
+    let max = startLine ?? 0
+    for (const row of rows) {
+      if (row.kind !== 'gap' && row.line !== undefined) {
+        max = Math.max(max, row.line)
+      }
+    }
+    if (startLine !== undefined) {
+      let oldLine = startLine
+      let newLine = startLine
+      for (const row of rows) {
+        if (row.kind === 'gap') {
+          oldLine += row.hidden
+          newLine += row.hidden
+          max = Math.max(max, oldLine, newLine)
+          continue
+        }
+        max = Math.max(max, row.kind === 'removed' ? oldLine : newLine)
+        if (row.kind === 'removed') {
+          oldLine++
+        } else if (row.kind === 'added') {
+          newLine++
+        } else {
+          oldLine++
+          newLine++
+        }
+      }
+    }
+    // 数字两侧各留一个字符的空，和 Claude Code 的 ` number ` 一样
+    return max > 0 ? `${String(max).length + 2}ch` : null
+  }, [rows, startLine])
+
   // 每一侧各有一个游标：碰到这一侧的行就往下走一格。
   // 它们只在这一次渲染里活，`shown` 又是 `rows` 的前缀，所以两个游标始终对得上
   let newAt = 0
   let oldAt = 0
 
+  // 行号：旧、新各一个游标，从后端给的那一行起数。未变的行两边一起走，
+  // 删掉的行只走旧的一边，新增的只走新的一边 —— 于是改动前后错开的那几行自然对齐
+  let oldLine = startLine ?? 0
+  let newLine = startLine ?? 0
+
   return (
-    <div ref={anchor} className="font-mono text-xs leading-5">
+    <div ref={anchor} className="font-mono text-[13px] leading-5">
       {shown.map((row, index) => {
         if (row.kind === 'gap') {
+          if (startLine !== undefined) {
+            oldLine += row.hidden
+            newLine += row.hidden
+          }
+          // **和正文同一个左边界**：人读的时候眼睛停在代码那一列，
+          // 不该为了这句话往左跑回去
           return (
-            <div key={index} className="pl-4 text-loom-faint/70">
+            <div key={index} className="flex text-loom-faint/70">
+              {numberWidth !== null && <span className="shrink-0" style={{ width: numberWidth }} />}
+              <span className="w-4 shrink-0" />
               {`… ${row.hidden} 行未变`}
             </div>
           )
         }
         const added = row.kind === 'added'
         const removed = row.kind === 'removed'
+        // 上下文行**两侧都有**：它从新侧取颜色（两边文字一样），但旧侧的游标也要跟着走
+        // —— 少了这一步，后面的删行会取到前面某一行上下文的分词，显示出**另一行的内容**
         const tokens = removed ? oldTokens?.[oldAt++] : newTokens?.[newAt++]
+        if (row.kind === 'context') {
+          oldAt++
+        }
+        // 删除的行标**旧**行号（它在新文件里已经没有了），其余一律标**新**行号。
+        // **行自带号时优先用它**（统一 diff 里每行都知道自己是第几行），
+        // 只有会话里那段"只知道起点"的改动才用游标数
+        const number = row.line ?? (startLine === undefined ? null : removed ? oldLine : newLine)
+        if (startLine !== undefined) {
+          if (removed) {
+            oldLine++
+          } else if (added) {
+            newLine++
+          } else {
+            oldLine++
+            newLine++
+          }
+        }
+        // 词级差异：删的那一行用 removed 一侧，加的那一行用 added 一侧
+        const segments = removed
+          ? words[index]?.removed ?? null
+          : added
+            ? words[index]?.added ?? null
+            : null
         return (
           <div
             key={index}
             className={`flex ${added ? 'bg-loom-added' : removed ? 'bg-loom-removed' : ''}`}
           >
+            {number !== null && (
+              <span
+                style={{ width: numberWidth ?? undefined }}
+                className={`shrink-0 select-none text-right ${
+                  added
+                    ? 'text-loom-added-mark/70'
+                    : removed
+                      ? 'text-loom-removed-mark/70'
+                      : 'text-loom-faint/50'
+                }`}
+              >
+                {number}
+              </span>
+            )}
             {/* 语义挂在这个记号上（`role="img"`），**不是**旁边再加一句 sr-only：
                 加了的话，人复制这段 diff 会得到每行前面一个「增加」。
                 记号本身还是 `+` / `−`，复制出去正好是它该有的样子 */}
@@ -1600,19 +2171,25 @@ export function DiffView({ rows, path }: { rows: DiffRow[]; path: string | null 
                   : ''
               }`}
             >
-              <DiffLineText tokens={tokens ?? null} plain={row.text} />
+              <DiffLineText
+                tokens={tokens ?? null}
+                plain={row.text}
+                segments={segments}
+                changedClass={added ? 'bg-loom-added-word' : 'bg-loom-removed-word'}
+              />
             </span>
           </div>
         )
       })}
+      {/* 折叠按钮**和正文同一列**：它属于这段代码，不属于左边那两列 */}
       {(hidden > 0 || expanded) && (
-        <button
-          type="button"
-          onClick={() => setExpanded(!expanded)}
-          className="mt-0.5 pl-4 text-loom-faint transition-colors hover:text-muted-foreground"
-        >
-          {expandLabel(expanded, hidden)}
-        </button>
+        <div className="flex">
+          {numberWidth !== null && <span className="shrink-0" style={{ width: numberWidth }} />}
+          <span className="w-4 shrink-0" />
+          <button type="button" onClick={() => setExpanded(!expanded)} className={TOGGLE}>
+            {expandLabel(expanded, hidden)}
+          </button>
+        </div>
       )}
     </div>
   )
@@ -1636,7 +2213,8 @@ function sideText(rows: DiffRow[], drop: 'added' | 'removed'): string {
 }
 
 /**
- * 一行的文字。有分词就按 token 上色，没有就原样吐出来。
+ * 一行的文字。有分词就按 token 上色，没有就原样吐出来；
+ * 再叠上「哪几个词真的换了」那层更深的底。
  *
  * <p>{@code memo} 是必要的：流式期间父组件每一帧都在重渲染，而分好的 token
  * 在两次分词之间是**同一个引用** —— 不 memo 的话每一帧都要重新 diff 几百个 span。
@@ -1644,18 +2222,40 @@ function sideText(rows: DiffRow[], drop: 'added' | 'removed'): string {
 const DiffLineText = memo(function DiffLineText({
   tokens,
   plain,
+  segments,
+  changedClass,
 }: {
   tokens: ThemedToken[] | null
   plain: string
+  /** 词级差异；null = 整行没有可单独标的 */
+  segments: DiffSegment[] | null
+  /** 真正换了的那几个词上那层更深的底 */
+  changedClass: string
 }) {
-  if (tokens === null) {
-    return <>{plain}</>
+  if (segments === null) {
+    if (tokens === null) {
+      return <>{plain}</>
+    }
+    return (
+      <>
+        {tokens.map((token, index) => (
+          <span key={index} style={{ color: token.color }}>
+            {token.content}
+          </span>
+        ))}
+      </>
+    )
   }
+
   return (
     <>
-      {tokens.map((token, index) => (
-        <span key={index} style={{ color: token.color }}>
-          {token.content}
+      {piecesOf(tokens, segments).map((piece, index) => (
+        <span
+          key={index}
+          style={piece.color === undefined ? undefined : { color: piece.color }}
+          className={piece.changed ? changedClass : undefined}
+        >
+          {piece.text}
         </span>
       ))}
     </>
@@ -1663,28 +2263,58 @@ const DiffLineText = memo(function DiffLineText({
 })
 
 /**
+ * 把「按变化切好的段」和「按语法切好的 token」叠成同一串 span。
+ *
+ * <p>两套切法互不相干（一套按改没改、一套按语法），所以按**字符位置**求交集：
+ * 游标在 token 里往前走，走到段的边界就换一个 changed 标记。
+ * 分词器没准备好时 {@code tokens} 是 null —— 那时整段原样切成 span，只是不上色。
+ */
+function piecesOf(
+  tokens: ThemedToken[] | null,
+  segments: DiffSegment[],
+): { text: string; color?: string; changed: boolean }[] {
+  const pieces: { text: string; color?: string; changed: boolean }[] = []
+  let tokenAt = 0
+  let used = 0
+  for (const segment of segments) {
+    let left = segment.text.length
+    while (left > 0 && tokens !== null && tokenAt < tokens.length) {
+      const token = tokens[tokenAt]!
+      const take = Math.min(left, token.content.length - used)
+      pieces.push({
+        text: token.content.slice(used, used + take),
+        color: token.color,
+        changed: segment.changed,
+      })
+      used += take
+      left -= take
+      if (used >= token.content.length) {
+        tokenAt++
+        used = 0
+      }
+    }
+    // 分词器没吐全（认不出语言、还没分词、或者两边对不齐）：剩下的原样补上
+    if (left > 0) {
+      pieces.push({ text: segment.text.slice(segment.text.length - left), changed: segment.changed })
+    }
+  }
+  return pieces
+}
+
+/**
  * 结果行说什么。
  *
- * <p>{@code read_file} 是唯一的特例：它的输出**就是整个文件内容** ——
- * 把内容铺在流里既是噪声（人刚在左栏看过它），也会把一段对话撑爆。
- * 人要知道的是"它读了多少"，所以这里只报行数。
+ * <p>走到这里的都是**该露出来**的那些（成功率低的读文件、跑命令已经在
+ * {@link resultWorthShowing} 那里被挡掉了）：一句话的结论（"已新建 X（N 行）"）、
+ * 搜索命中的那几行、或者一条命令的报错。原样铺出来就是对的。
  *
- * <p>别的工具的输出本来就是一句话的结论（"已新建 X（N 行）"、"已修改 X（第 N 行附近…）"）
- * 或者真正的命令输出 —— 两种都该原样给人看。
- *
- * <h2>那个特例**只在成功时**成立</h2>
- * 读失败时 {@code output} 是**一句报错**（"没有找到 xxx"），而它不是文件内容。
- * 从前的判断里没有这一条，于是界面上会出现「✗ 失败 读取 X」下面跟着
- * 「读了 1 行」—— 那句话在说它读到了东西，而它什么都没读到。
- * 报错本身就是一句话，原样露出来才对。
+ * <h2>空输出也要有一句话</h2>
+ * 一片空白让人分不清是"没输出"还是"没加载出来"。
  */
-function resultLines(tool: ToolView | undefined, outcome: ToolOutcome): string[] {
+function resultLines(outcome: ToolOutcome): string[] {
   const text = outcome.output.trim()
   if (text === '') {
     return ['（没有输出）']
-  }
-  if (tool?.shape === 'read' && outcome.success) {
-    return [`读了 ${text.split('\n').length} 行`]
   }
   const lines = text.split('\n')
   return outcome.truncated ? [...lines, '（后面的输出被截断了）'] : lines
@@ -1706,18 +2336,6 @@ function verb(tool: ToolView | undefined, name: string): string {
 }
 
 /**
- * 状态记号。
- *
- * <p>四种形态，**四种都是不同的问题**：还在跑（省略号）、跑完了、跑完但不成、
- * 以及**没跑完**（斜杠圆圈 —— 它不是"失败"，别用 ✗ 去说它）。
- */
-function mark(outcome: ToolOutcome | null, unfinished: Unfinished | null): string {
-  if (unfinished !== null) return '⊘'
-  if (outcome === null) return '…'
-  return outcome.success ? '✓' : '✗'
-}
-
-/**
  * 参数里挑一样**最像"它在干什么"**的显示出来（路径、命令、模式），其余丢掉。
  *
  * <p>把整串 JSON 铺在流里，等于让人去解析它 —— 而人只需要认出"它动了哪个文件"。
@@ -1727,13 +2345,16 @@ function mark(outcome: ToolOutcome | null, unfinished: Unfinished | null): strin
  * 顺序本身就是个说不清的东西（"path 比 pattern 更算主语"？），而且它对每个工具都试同一串键。
  * 声明之后，工具没声明主语就是**不显示**，而不是碰巧试中一个别的字段。
  */
-function summarize(tool: ToolView | undefined, argsJson: string): string {
+function summarize(
+  tool: ToolView | undefined,
+  args: Record<string, unknown> | null,
+): string {
   const key = tool?.subjectKey
   // `undefined` 是"这个工具没声明主语"（线上 null 就是字段缺席），和"声明了但取不到值"是两件事
   if (key === undefined) {
     return ''
   }
-  const value = parseArgs(argsJson)?.[key]
+  const value = args?.[key]
   if (typeof value === 'string') return value
   if (Array.isArray(value)) return value.join(' ')
   return ''
@@ -1763,12 +2384,15 @@ function parseArgs(argsJson: string): Record<string, unknown> | null {
  * 所以判据是工具声明的"我的主语是一个工作区路径"（{@link ToolView.subjectIsPath}），
  * 而不是一张工具名名单。
  */
-function pathOf(tool: ToolView | undefined, argsJson: string): string | null {
+function pathOf(
+  tool: ToolView | undefined,
+  args: Record<string, unknown> | null,
+): string | null {
   const key = tool?.subjectKey
   if (tool?.subjectIsPath !== true || key === undefined) {
     return null
   }
-  const path = parseArgs(argsJson)?.[key]
+  const path = args?.[key]
   return typeof path === 'string' && path !== '' ? path : null
 }
 
@@ -1781,13 +2405,12 @@ function pathOf(tool: ToolView | undefined, argsJson: string): string | null {
  */
 function diffOf(
   tool: ToolView | undefined,
-  argsJson: string,
+  args: Record<string, unknown> | null,
   outcome: ToolOutcome | null,
 ): DiffRow[] | null {
   if (outcome === null || !outcome.success || tool?.shape !== 'edit') {
     return null
   }
-  const args = parseArgs(argsJson)
   if (args === null) {
     return null
   }
@@ -1811,8 +2434,11 @@ function diffOf(
   // 而**我们这边有文件面板** —— 想知道这个文件现在长什么样，点一下就是全文。
   // Claude Code 那边是终端，没有"点开看看"这条路，所以它非得把 patch 算出来不可。
   //
-  // 一条画得出来的假 diff 比没有 diff 更坏。结果那一行会说清这次是新建还是覆盖
-  //（见 WriteFileTool），那就够了。
+  // 一条画得出来的假 diff 比没有 diff 更坏。
+  //
+  // **新建**不一样：那次调用本来就带着全文，画成"代码预览"（`CreatedFile`）是忠实的，
+  // 而且和 Claude Code 一致 —— 它新建时画的也是代码本身，只有覆盖才画 diff。
+  // 这里返回 null 之后，`ToolResult` 会看 presentation 里的 `write.created` 决定走哪条。
   return null
 }
 

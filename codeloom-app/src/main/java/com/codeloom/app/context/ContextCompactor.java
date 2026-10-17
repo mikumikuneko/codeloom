@@ -9,6 +9,7 @@ import com.codeloom.agent.llm.LlmResult;
 import com.codeloom.agent.llm.ToolCall;
 import com.codeloom.agent.model.ModelCapabilities;
 import com.codeloom.agent.model.ModelCapabilitiesResolver;
+import com.codeloom.agent.tool.ToolNames;
 import com.codeloom.app.turn.SessionWriter;
 import com.codeloom.domain.event.ContextCompacted;
 import com.codeloom.domain.event.StoredEvent;
@@ -118,9 +119,13 @@ public class ContextCompactor {
      * <p>{@code edit_file} / {@code write_file} **刻意不在内**：它们的结果是
      * "我改了什么"的凭据，清掉之后模型会不记得自己动过哪些文件 ——
      * 而那正是它做下一步判断的依据。读来的东西可以再读一遍，改过的东西记不住就麻烦了。
+     *
+     * <p>联网的两个也在内：抓回来的正文是这批结果里最大的一类，而且可以再搜一次、
+     * 再抓一次。清掉正文不等于丢掉事实 —— 模型仍看得到自己搜过什么，只是内容要重取。
      */
-    private static final Set<String> CLEARABLE_TOOLS =
-            Set.of("read_file", "grep", "glob", "run_command");
+    private static final Set<String> CLEARABLE_TOOLS = Set.of(
+            ToolNames.READ_FILE, ToolNames.GREP, ToolNames.GLOB,
+            ToolNames.RUN_COMMAND, ToolNames.WEB_SEARCH, ToolNames.WEB_FETCH);
 
     /**
      * 连续失败到这个次数就不再试。
@@ -462,14 +467,10 @@ public class ContextCompactor {
      * 单独用它只发生在会话的第一轮，那时还没有任何真实读数。
      */
     private int byCharacters(List<StoredEvent> history, Session session) {
-        int chars = 0;
-        for (LlmMessage message : assembler.assemble(history, session.model().systemPrompt())) {
-            chars += message.content() == null ? 0 : message.content().length();
-            for (ToolCall call : message.toolCalls()) {
-                chars += call.argumentsJson().length();
-            }
-        }
-        return chars / CHARS_PER_TOKEN;
+        // **数哪些字段只有一处**（见 ContextAssembler.charactersOf）；这里只负责把字符换成 token
+        long chars = ContextAssembler.charactersOf(
+                assembler.assemble(history, session.model().systemPrompt()));
+        return (int) Math.min(Integer.MAX_VALUE, chars / CHARS_PER_TOKEN);
     }
 
     /**

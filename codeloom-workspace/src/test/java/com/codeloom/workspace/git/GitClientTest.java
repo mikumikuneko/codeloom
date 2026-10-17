@@ -414,14 +414,6 @@ class GitClientTest {
         }
     }
 
-    private static void deleteFile(Path dir, String name) {
-        try {
-            Files.delete(dir.resolve(name));
-        } catch (IOException e) {
-            throw new UncheckedIOException("删除 " + name + " 失败", e);
-        }
-    }
-
     private static String read(Path dir, String name) {
         try {
             return Files.readString(dir.resolve(name), StandardCharsets.UTF_8);

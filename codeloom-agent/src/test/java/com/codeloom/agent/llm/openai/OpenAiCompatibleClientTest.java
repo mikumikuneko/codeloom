@@ -278,6 +278,29 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    @DisplayName("403 / 404 / 413：没有人会越试越对 —— 都不可重试")
+    void forbiddenMissingAndTooLargeAreNotRetried() throws IOException {
+        for (int code : new int[]{403, 404, 413}) {
+            assertNotRetryable(code);
+        }
+    }
+
+    private void assertNotRetryable(int status) throws IOException {
+        String baseUrl = startServer(exchange -> send(exchange, status, "application/json",
+                ("{\"error\":{\"message\":\"status-" + status + "\"}}")
+                        .getBytes(StandardCharsets.UTF_8)));
+
+        assertThatThrownBy(() -> clientFor(baseUrl).stream(request("hi"), e -> {
+        }, CancellationToken.none()))
+                .as("HTTP %s", status)
+                .isInstanceOf(LlmCallException.class)
+                .satisfies(e -> {
+                    assertThat(((LlmCallException) e).retryable()).isFalse();
+                    assertThat(e).hasMessageContaining(String.valueOf(status));
+                });
+    }
+
+    @Test
     @DisplayName("429 限流：**只发一次**，把失败原样报上来 —— 重试不归这一层")
     void rateLimitIsReportedNotRetried() throws IOException {
         AtomicInteger attempts = new AtomicInteger();

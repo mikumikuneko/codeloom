@@ -129,11 +129,6 @@ public class MyBatisEventStore implements EventStore, EventDiscard {
     }
 
     @Override
-    public long lastSeq(SessionId sessionId) {
-        return mapper.lastSeq(sessionId.value());
-    }
-
-    @Override
     public OptionalInt lastContextTokens(SessionId sessionId) {
         EventRow row = mapper.findLastOfType(sessionId.value(), EventType.TURN_TOKENS_USED.name());
         if (row == null) {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { diffLines, diffTotals } from './textDiff'
+import { diffLines, wordDiff, wordDiffs } from './textDiff'
 
 /**
  * 钉的是这几条：**末尾换行不算一行**、改动之外的上下文会被收成一条 `gap`、
@@ -87,10 +87,55 @@ describe('diffLines', () => {
   })
 })
 
-describe('diffTotals', () => {
-  it('只数新增和删除，跳过的那一段不算', () => {
-    const rows = diffLines('a\nb\nc', 'a\nx\nc')
+describe('wordDiff', () => {
+  it('只标真正换了的那个词，两边各自的其余部分并成整段', () => {
+    expect(wordDiff('const a = 1;', 'const a = 2;')).toEqual({
+      removed: [
+        { text: 'const a = ', changed: false },
+        { text: '1', changed: true },
+        { text: ';', changed: false },
+      ],
+      added: [
+        { text: 'const a = ', changed: false },
+        { text: '2', changed: true },
+        { text: ';', changed: false },
+      ],
+    })
+  })
 
-    expect(diffTotals(rows)).toEqual({ added: 1, removed: 1 })
+  it('一行几乎全换了就不标词 —— 整行涂深和"整行换了"是同一句话', () => {
+    expect(wordDiff('aaaa bbbb cccc dddd', 'eeee ffff gggg hhhh')).toBeNull()
+  })
+
+  it('两行一样时没有可标的', () => {
+    expect(wordDiff('same line', 'same line')).toBeNull()
+  })
+
+  it('空白和标点各自成词，差别不会被粘进旁边的词里', () => {
+    const diff = wordDiff('a>=b', 'a> b')
+
+    expect(diff?.removed.some((segment) => segment.changed && segment.text === '=')).toBe(true)
+  })
+})
+
+describe('wordDiffs', () => {
+  it('删行和紧跟的加行按顺序配对；配上的两边拿到同一份结果', () => {
+    const rows = diffLines('x = 1', 'x = 2')
+    const words = wordDiffs(rows)
+    const removedAt = rows.findIndex((row) => row.kind === 'removed')
+    const addedAt = rows.findIndex((row) => row.kind === 'added')
+
+    expect(words[removedAt]).not.toBeNull()
+    expect(words[removedAt]).toBe(words[addedAt])
+    expect(words[removedAt]!.removed.some((segment) => segment.changed && segment.text === '1')).toBe(true)
+  })
+
+  it('中间隔着没动的行就不配对 —— 那说明它们不是同一处改动', () => {
+    // 删掉的是 x、加上的是 y：中间那句 b 在两边都对得上，所以它们不是一对
+    const rows = diffLines('a\nx\nb', 'a\nb\ny')
+    const words = wordDiffs(rows)
+
+    expect(rows.map((row) => row.kind)).toEqual(['context', 'removed', 'context', 'added'])
+    expect(words.every((entry) => entry === null)).toBe(true)
   })
 })

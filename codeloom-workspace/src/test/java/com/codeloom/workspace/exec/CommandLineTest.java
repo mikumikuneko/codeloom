@@ -146,4 +146,36 @@ class CommandLineTest {
         assertThat(words("   ")).isEmpty();
         assertThat(words(null)).isEmpty();
     }
+
+    // ------------------------------------------------------------------
+    // 串联：&& / || / ; 按段切开，每段各查
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("&& / || / ; 是串联，不是「看不懂」—— 每段各自成一串词")
+    void splitsChainedCommands() {
+        assertThat(CommandLine.simpleCommands("javac A.java && java A"))
+                .contains(List.of(List.of("javac", "A.java"), List.of("java", "A")));
+        assertThat(CommandLine.simpleCommands("a || b"))
+                .contains(List.of(List.of("a"), List.of("b")));
+        assertThat(CommandLine.simpleCommands("a ; b"))
+                .contains(List.of(List.of("a"), List.of("b")));
+    }
+
+    @Test
+    @DisplayName("单个 & 和 | 仍然看不懂 —— 后台执行、管道都不是「依次跑几条」")
+    void singleAmpersandAndPipeStayUnreadable() {
+        assertThat(CommandLine.simpleCommands("a & b")).isEmpty();
+        assertThat(CommandLine.simpleCommands("a | b")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("引号里的 && 不切；空段、引号没配平都算看不懂")
+    void quotesAndEmptySegmentsAreHandled() {
+        assertThat(CommandLine.simpleCommands("echo \"a && b\""))
+                .contains(List.of(List.of("echo", "a && b")));
+        assertThat(CommandLine.simpleCommands("a &&")).isEmpty();
+        assertThat(CommandLine.simpleCommands("&& a")).isEmpty();
+        assertThat(CommandLine.simpleCommands("a && \"b")).isEmpty();
+    }
 }

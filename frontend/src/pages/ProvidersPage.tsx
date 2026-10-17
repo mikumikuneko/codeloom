@@ -5,7 +5,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { ApiError, apiKeys, type ConfiguredKey, type ProviderPreset } from '@/lib/api'
+import { errorText, apiKeys, type ConfiguredKey, type ProviderPreset } from '@/lib/api'
 import { useAsync } from '@/lib/useAsync'
 
 /**
@@ -211,7 +211,7 @@ function ProviderForm({
       setRevealed(false)
       onSaved()
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : '连不上服务器')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -229,7 +229,7 @@ function ProviderForm({
       onRemoved()
       return null
     } catch (e) {
-      return e instanceof ApiError ? e.message : '连不上服务器'
+      return errorText(e)
     }
   }
 

@@ -2,6 +2,7 @@ package com.codeloom.app.session;
 
 import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.app.note.AgentNotes;
+import com.codeloom.app.turn.PendingMessages;
 import com.codeloom.app.turn.SessionProjections;
 import com.codeloom.app.turn.SessionWriter;
 import com.codeloom.app.workspace.WorkspaceProvisioner;
@@ -64,6 +65,7 @@ public class SessionService {
     private final SessionErasure erasure;
     private final AgentNotes notes;
     private final SessionProjections projections;
+    private final PendingMessages pending;
 
     public SessionService(SessionRepository sessions,
                           WorkspaceRepository stored,
@@ -76,7 +78,8 @@ public class SessionService {
                           SessionCheckpoints sessionCheckpoints,
                           SessionErasure erasure,
                           AgentNotes notes,
-                          SessionProjections projections) {
+                          SessionProjections projections,
+                          PendingMessages pending) {
         this.sessions = sessions;
         this.stored = stored;
         this.provisioner = provisioner;
@@ -89,6 +92,7 @@ public class SessionService {
         this.erasure = erasure;
         this.notes = notes;
         this.projections = projections;
+        this.pending = pending;
     }
 
     public Session create(User owner, Project project, ModelConfig model) {
@@ -96,12 +100,7 @@ public class SessionService {
         // 每家密钥独立，选中一个没配过密钥的模型是最常见的误操作。不在这里拦住，
         // 用户会先建出会话、发出第一句话，直到模型调用才收到 401 ——
         // 那时事件流和租约都已经动过了
-        if (clients.findClient(owner.id(), model).isEmpty()) {
-            throw new IllegalArgumentException(
-                    "你还没有配置 " + Providers.displayNameOf(model.provider()) + " 的 API Key，"
-                            + "所以选不了它上面的模型。先去「供应商」页把它配上 —— "
-                            + "每家模型服务的密钥是各自独立的，配了 DeepSeek 不等于配了 Kimi。");
-        }
+        requireConfiguredKey(owner.id(), model, "所以选不了它上面的模型。先去「供应商」页把它配上");
 
         // **系统提示词由平台定，用户不参与**：用户选的是端点和模型，这里一律用平台上那一段，
         // 不看请求带了什么。见 SystemPrompt 的类注释。
@@ -155,10 +154,6 @@ public class SessionService {
             }
         }
         return null;
-    }
-
-    public List<CheckpointView> checkpoints(Session session) {
-        return sessionCheckpoints.of(session).stream().map(CheckpointView::of).toList();
     }
 
     /**
@@ -235,12 +230,7 @@ public class SessionService {
         ModelConfig current = session.model();
         ModelConfig next = new ModelConfig(provider, modelId, current.systemPrompt());
 
-        if (clients.findClient(session.ownerId(), next).isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "你还没有配置 " + Providers.displayNameOf(provider) + " 的 API Key，所以换不过去。"
-                            + "先去「供应商」页把它配上 —— "
-                            + "每家模型服务的密钥是各自独立的，配了一家不等于配了另一家。");
-        }
+        requireConfiguredKey(session.ownerId(), next, "所以换不过去。先去「供应商」页把它配上");
 
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new ResponseStatusException(
                 HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完再换模型"));
@@ -248,6 +238,23 @@ public class SessionService {
             return writer.changeModel(session, next, token).session();
         } finally {
             leases.release(token);
+        }
+    }
+
+    /**
+     * 这个端点上配过密钥没有 —— **建会话和换模型问的是同一个事实**，话也只写一份。
+     *
+     * <p>不在这里拦的话，用户会先建出会话（或换过去），直到模型调用才收到 401 ——
+     * 那时事件流和租约都已经动过了。两种入口都回 400：用户要去做的事是一样的。
+     *
+     * @param action 这个动作自己的那半句（"所以选不了它上面的模型…"）
+     */
+    private void requireConfiguredKey(UserId owner, ModelConfig model, String action) {
+        if (clients.findClient(owner, model).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "你还没有配置 " + Providers.displayNameOf(model.provider()) + " 的 API Key，"
+                            + action + " —— 每家模型服务的密钥是各自独立的，"
+                            + "配了一家不等于配了另一家。");
         }
     }
 
@@ -292,6 +299,9 @@ public class SessionService {
         // 内存里那条投影也一起放下：会话都没了，留着它就是把一段已经删掉的对话
         // 继续搁在内存里。**不清理也不会错**（有上限、迟早被挤掉），但没必要留着
         projections.forget(session.id());
+        // 排队中的留言同理，而且**它们等不到任何一轮** —— 会话没了，没人会来取。
+        // 放在事务之后（和上面 notes.discard 同一个理由）：失败时它们还在，再点一次就行
+        pending.forget(session.id());
     }
 
     private void appendStarted(Session session, Workspace workspace) {
@@ -313,9 +323,9 @@ public class SessionService {
      * 服务端状态不对 —— 500，不是 400。
      */
     private Workspace workspaceOf(Session session) {
-        return stored.find(session.workspaceId()).orElseThrow(() -> new IllegalStateException(
-                "会话 " + session.id() + " 所在的工作区不在库里：" + session.workspaceId()
-                        + "。它本该在建会话时就写好 —— 现在找不到，只可能是那一行被删过。"));
+        // 和别处查库的入口**共用 WorkspaceRepository.require** 的判据与那句话：
+        // "找不到"永远是 500，且理由只有一个 —— 建会话时写好的那一行被删过
+        return stored.require(session.workspaceId());
     }
 
     private static Workspace treeOf(Map<WorkspaceId, Workspace> trees, Session session) {

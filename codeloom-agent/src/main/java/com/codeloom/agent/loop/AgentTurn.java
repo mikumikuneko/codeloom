@@ -36,6 +36,9 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -78,6 +81,20 @@ public final class AgentTurn {
 
     /** 一轮之内最多让模型调多少轮工具。超过就是它在打转，停下来交给人。 */
     private static final int MAX_TOOL_ROUNDS = 25;
+
+    /**
+     * 给模型的时钟读数。一行就够：日期、时刻、时区。
+     *
+     * <p>**不报"经过多久"**：这一轮的每一步都发生在几秒到几分钟内，模型不需要相对时间；
+     * 它需要的是"今天是几号"，以及"用户说的今天按哪个时区算"。
+     */
+    private static String clock() {
+        ZoneId zone = ZoneId.systemDefault();
+        return "现在是 " + LocalDateTime.now(zone).format(CLOCK_FORMAT)
+                + "（" + zone.getId() + "）。用户说「今天」「最近」时按这个时区算。";
+    }
+
+    private static final DateTimeFormatter CLOCK_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     /**
      * 一次模型调用最多试几次（含第一次）。
@@ -462,6 +479,16 @@ public final class AgentTurn {
         // 装进自己的 list（下一步就发给模型，不需要不可变兜底）
         List<LlmMessage> messages = new ArrayList<>();
         bench.assembleMessages(messages);
+        // ★ 时钟放在**请求尾部**，不落成事件。
+        //
+        //   没有它，"今天/最近有什么更新"这类问题会让模型去跑 `date` —— 那是一条
+        //   不在免审批名单里的命令，用户得为"今天是几号"点一次批准。
+        //
+        //   为什么不写成事件：它每轮都重新取，**不是一个事实**。落成事件的话，
+        //   历史里会堆满过期的读数（"现在是 10:00" × 二十条），而模型需要的只是"现在"。
+        //   同一处先例：收尾指令也是直接加在请求尾部。代价是重放这一轮时读到的是
+        //   重放那一刻的时间 —— 对一个时钟来说，那反而是对的。
+        messages.add(LlmMessage.user("[平台指令] " + clock()));
         if (wrapUpRequested) {
             messages.add(LlmMessage.user(TokenBudget.WRAP_UP_INSTRUCTION));
         }
@@ -722,7 +749,8 @@ public final class AgentTurn {
             bench.append(new ToolCancelled(call.id()));
         } else {
             bench.append(new ToolResult(call.id(), outcome.success(), outcome.output(),
-                    outcome.truncated(), outcome.exitCode(), outcome.durationMs(), outcome.mutated()));
+                    outcome.truncated(), outcome.exitCode(), outcome.durationMs(), outcome.mutated(),
+                    outcome.presentation()));
         }
 
         // 用工具**回报的事实**，不是"能力声明 && 执行成功"的布尔运算。
@@ -878,7 +906,7 @@ public final class AgentTurn {
         }
 
         ToolContext context = new ToolContext(input.worktree(), input.commandExecutor(),
-                input.cancellation(), input.requiresApproval(), reads);
+                input.cancellation(), input.requiresApproval(), reads, input.web());
         long startedAt = System.nanoTime();
         try {
             return tool.get().execute(context, arguments)
@@ -992,8 +1020,9 @@ public final class AgentTurn {
                             + "开头和结尾如下：\n" + retained)
                     .orElse("（这一轮的工具输出总量已达上限，且落盘失败，只留下头尾）\n\n" + retained);
             toolOutputChars += body.length();
-            return new ToolOutcome(outcome.success(), body, true, outcome.exitCode(),
-                    outcome.durationMs(), outcome.failure(), outcome.mutated());
+            // **不要在这里拼新 record**：那会把 todoUpdate / presentation 一并丢掉
+            //（见 ToolOutcome.withOutput 的注释）
+            return outcome.withOutput(body, true);
         }
 
         /**

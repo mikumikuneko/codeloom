@@ -3,7 +3,8 @@ import { Navigate, useLocation } from 'react-router-dom'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { ApiError } from '@/lib/api'
+import { Label } from '@/components/ui/label'
+import { errorText } from '@/lib/api'
 import { useAuth } from '@/stores/auth'
 
 /**
@@ -49,7 +50,7 @@ export function LoginPage() {
     } catch (e) {
       // 后端的 detail 是特意写给调用方看的（"这个账号已被占用"/"账号或密码不对"），
       // 直接显示它 —— 自己再编一套文案就等于把后端的分类丢掉
-      setError(e instanceof ApiError ? e.message : '连不上服务器，稍后再试')
+      setError(errorText(e))
     } finally {
       setBusy(false)
     }
@@ -77,17 +78,21 @@ export function LoginPage() {
         </div>
 
         <div className="space-y-4">
-          <Field label="账号">
+          <div className="space-y-1.5">
+            <Label htmlFor="login-username">账号</Label>
             <Input
+              id="login-username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
               required
             />
-          </Field>
+          </div>
 
-          <Field label="密码">
+          <div className="space-y-1.5">
+            <Label htmlFor="login-password">密码</Label>
             <Input
+              id="login-password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -96,12 +101,18 @@ export function LoginPage() {
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               required
             />
-          </Field>
+          </div>
 
           {mode === 'register' && (
-            <Field label="用户名" hint="别人看到的名字。留空就用账号">
-              <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-            </Field>
+            <div className="space-y-1.5">
+              <Label htmlFor="login-display-name">用户名</Label>
+              <Input
+                id="login-display-name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">别人看到的名字。留空就用账号</p>
+            </div>
           )}
         </div>
 
@@ -134,20 +145,3 @@ export function LoginPage() {
   )
 }
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <label className="block space-y-1.5">
-      <span className="text-sm text-foreground">{label}</span>
-      {children}
-      {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
-    </label>
-  )
-}

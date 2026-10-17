@@ -1,5 +1,6 @@
 package com.codeloom.agent.tool;
 
+import com.codeloom.agent.web.WebAccess;
 import com.codeloom.domain.port.CancellationToken;
 import com.codeloom.domain.event.TodoListUpdated;
 import com.codeloom.domain.port.CommandExecutor;
@@ -62,7 +63,7 @@ class ToolTest {
      */
     private ToolContext asking(CommandExecutor executor, CommandApproval requiresApproval) {
         return new ToolContext(worktree, executor, CancellationToken.none(), requiresApproval,
-                new ReadLedger());
+                new ReadLedger(), WebAccess.none());
     }
 
     /**
@@ -230,7 +231,9 @@ class ToolTest {
                     {"path":"Foo.java","old_string":"void a() {}","new_string":"void b() {}"}"""));
 
             assertThat(outcome.success()).isFalse();
-            assertThat(outcome.output()).contains("read_file");
+            // 只说"还没读过"——"先用 read_file…"那句是给模型的指导，已经删了
+            //（它会原样进工具结果，界面上就成了教训人的话）
+            assertThat(outcome.output()).contains("还没读过");
             // 一个字都没写进去
             assertThat(readBack("Foo.java")).contains("void a()");
         }
@@ -294,7 +297,8 @@ class ToolTest {
                     {"path":"Existing.java","content":"class Replaced {}\\n"}"""));
 
             assertThat(outcome.success()).isFalse();
-            assertThat(outcome.output()).contains("edit_file");
+            // 只说状态，不再把"用 edit_file / 先读一遍"那半句指导塞进结果（见上面同一道门）
+            assertThat(outcome.output()).contains("还没读过").contains("覆盖");
             assertThat(readBack("Existing.java")).isEqualTo("class Existing {}\n");   // 原文件完好
         }
 
@@ -309,6 +313,28 @@ class ToolTest {
 
             assertThat(outcome.success()).isTrue();
             assertThat(readBack("Existing.java")).isEqualTo("class Replaced {}\n");
+        }
+
+        @Test
+        @DisplayName("新建还是覆盖、多少行 —— 这两个事实随结果给界面（presentation）")
+        void tellsTheUiWhetherItCreatedOrOverwrote() {
+            ToolOutcome created = new WriteFileTool().execute(context, args("""
+                    {"path":"New.java","content":"a\\nb\\n"}"""));
+
+            assertThat(created.success()).isTrue();
+            assertThat(created.presentation())
+                    .contains("\"kind\":\"write\"")
+                    .contains("\"created\":true")
+                    .contains("\"lines\":2");
+
+            // 覆盖一遍：数目和"不是新建"都得如实给出来
+            readFirst("New.java");
+            ToolOutcome overwritten = new WriteFileTool().execute(context, args("""
+                    {"path":"New.java","content":"c"}"""));
+
+            assertThat(overwritten.presentation())
+                    .contains("\"created\":false")
+                    .contains("\"lines\":1");
         }
 
         @Test
@@ -520,7 +546,8 @@ class ToolTest {
                     args("{\"path\":\"已有.txt\",\"content\":\"新的\"}"));
 
             assertThat(outcome.success()).isFalse();
-            assertThat(outcome.output()).contains("还没读过").contains("read_file");
+            // 和 edit_file 那道门同一个口径：只说状态，不重复工具描述里已经写过的指导
+            assertThat(outcome.output()).contains("还没读过").contains("覆盖").doesNotContain("read_file");
             // 而且**一个字都没动**
             assertThat(Files.readString(worktree.resolve("已有.txt"))).isEqualTo("原来的内容");
         }

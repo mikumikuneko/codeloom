@@ -118,7 +118,6 @@ public class TurnExecutor {
     private final TurnInputFactory inputFactory;
     private final TurnBroadcaster broadcaster;
     private final TurnWorkspace turnWorkspace;
-    private final UserRepository users;
 
     public TurnExecutor(SessionRepository sessions,
                         ProjectRepository projects,
@@ -131,8 +130,7 @@ public class TurnExecutor {
                         TurnRequestRepository requests,
                         TurnInputFactory inputFactory,
                         TurnBroadcaster broadcaster,
-                        TurnWorkspace turnWorkspace,
-                        UserRepository users) {
+                        TurnWorkspace turnWorkspace) {
         this.sessions = sessions;
         this.projects = projects;
         this.leases = leases;
@@ -145,7 +143,6 @@ public class TurnExecutor {
         this.inputFactory = inputFactory;
         this.broadcaster = broadcaster;
         this.turnWorkspace = turnWorkspace;
-        this.users = users;
     }
 
     /** 用户发了话，跑一轮。 */

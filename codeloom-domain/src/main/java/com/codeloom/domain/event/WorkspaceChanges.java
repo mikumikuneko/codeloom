@@ -57,10 +57,6 @@ public record WorkspaceChanges(String commitSha, List<FileChange> files, boolean
         implements PersistentEvent {
 
     /** 没截断（绝大多数情况）。 */
-    public WorkspaceChanges(String commitSha, List<FileChange> files) {
-        this(commitSha, files, false, null);
-    }
-
     public WorkspaceChanges {
         files = files == null ? List.of() : List.copyOf(files);
     }

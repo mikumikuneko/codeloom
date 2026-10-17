@@ -25,7 +25,7 @@ public final class TodoWriteTool implements Tool {
 
     @Override
     public String name() {
-        return "todo_write";
+        return ToolNames.TODO_WRITE;
     }
 
     @Override

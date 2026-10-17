@@ -33,16 +33,6 @@ export function slotsOf(memberIds: string[]): Map<string, PersonSlot> {
 }
 
 /** 色位对应到 Tailwind 的颜色类。集中在这里，免得各处各写一遍字符串。 */
-export const personText: Record<PersonSlot, string> = {
-    a: 'text-loom-a',
-    b: 'text-loom-b',
-}
-
-export const personBorder: Record<PersonSlot, string> = {
-    a: 'border-loom-a',
-    b: 'border-loom-b',
-}
-
 export const personDot: Record<PersonSlot, string> = {
     a: 'bg-loom-a',
     b: 'bg-loom-b',

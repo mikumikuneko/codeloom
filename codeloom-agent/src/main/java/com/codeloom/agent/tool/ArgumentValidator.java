@@ -2,7 +2,6 @@ package com.codeloom.agent.tool;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -27,7 +26,8 @@ import java.util.Set;
  * {@link ToolOutcome#failed} —— 和别的工具失败一样，模型读一眼就能自己改。
  *
  * <h2>只认我们用到的那一小撮，但**认了就得执行**</h2>
- * 支持 {@code type}、{@code properties}、{@code required}、{@code items}、{@code enum}。
+ * 支持 {@code type}、{@code properties}、{@code required}、{@code items}、{@code enum}、
+ * {@code additionalProperties}（只认 {@code false}：它让多余参数变成一次报错）。
  * 另外四个（{@code description} / {@code title} / {@code default} / {@code examples}）
  * 是**注释**，不是约束 —— 它们在白名单里，但读了也不用执行。
  *
@@ -45,7 +45,6 @@ import java.util.Set;
  */
 public final class ArgumentValidator {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
      * 我们认识的关键字。
@@ -55,7 +54,7 @@ public final class ArgumentValidator {
      * 就会出现"在白名单里、却没有代码去读它"这种状态 —— 那正是这个类要消灭的东西。
      */
     private static final Set<String> KNOWN_KEYWORDS = Set.of(
-            "type", "properties", "required", "items", "enum",
+            "type", "properties", "required", "items", "enum", "additionalProperties",
             "description", "title", "default", "examples");
 
     /** 一份编好的 schema。递归，因为参数可以嵌套（清单就是对象数组）。 */
@@ -74,8 +73,17 @@ public final class ArgumentValidator {
     private record ListOf(Spec element) implements Spec {
     }
 
-    /** 对象：只查它自己声明的那些属性，以及它们当中哪些是必填的。 */
-    private record Fields(Map<String, Spec> properties, List<String> required) implements Spec {
+    /**
+     * 对象：查它自己声明的那些属性、它们当中哪些是必填的，以及
+     * （{@code closed} 时）**有没有多出来的属性**。
+     *
+     * <p>{@code closed} 来自 schema 里的 {@code "additionalProperties": false}。
+     * 没有它的时候，模型多传的参数会被**静默丢掉** —— 它以为设了过滤条件，
+     * 而工具根本没看见那一项。那正是这个类在别处一律拒绝的那种"声明了却不执行的约束"，
+     * 只不过这次是**输入**被悄悄丢掉。
+     */
+    private record Fields(Map<String, Spec> properties, List<String> required, boolean closed)
+            implements Spec {
     }
 
     private final Fields root;
@@ -167,7 +175,7 @@ public final class ArgumentValidator {
             String keyword = it.next();
             if (!KNOWN_KEYWORDS.contains(keyword)) {
                 throw new IllegalArgumentException(where + " 里有我们不认识的关键字 `" + keyword + "`。"
-                        + "我们只执行 type / properties / required / items / enum。"
+                        + "我们只执行 type / properties / required / items / enum / additionalProperties。"
                         + "放过去等于**声明了一条没人执行的约束** —— 对模型来说那比不声明更糟，"
                         + "它会以为自己受着一条其实不存在的保护。schema 片段：" + spec);
             }
@@ -183,7 +191,25 @@ public final class ArgumentValidator {
         for (JsonNode name : spec.path("required")) {
             required.add(name.asText());
         }
-        return new Fields(properties, required);
+        return new Fields(properties, required, additionalPropertiesIsClosed(spec, where));
+    }
+
+    /**
+     * 读 {@code additionalProperties}。只收布尔值。
+     *
+     * <p>写成一份 schema（"多出来的字段必须长这样"）我们不实现：那要再写一遍递归校验，
+     * 而现在的用法只有"不许有多的"。收下却不执行，比不收更糟 —— 同 {@link #rejectUnknownKeywords}。
+     */
+    private static boolean additionalPropertiesIsClosed(JsonNode spec, String where) {
+        JsonNode value = spec.path("additionalProperties");
+        if (value.isMissingNode()) {
+            return false;
+        }
+        if (!value.isBoolean()) {
+            throw new IllegalArgumentException(where + " 的 additionalProperties 只支持 true / false，"
+                    + "收到的是：" + value + "。");
+        }
+        return !value.asBoolean();
     }
 
     /**
@@ -286,7 +312,28 @@ public final class ArgumentValidator {
                 return problem;
             }
         }
+        if (fields.closed()) {
+            for (Iterator<String> it = value.fieldNames(); it.hasNext(); ) {
+                String name = it.next();
+                if (!fields.properties().containsKey(name)) {
+                    return Optional.of(unknownParameter(where, name, fields.properties().keySet()));
+                }
+            }
+        }
         return Optional.empty();
+    }
+
+    /**
+     * 多了不认识的参数。
+     *
+     * <p>把**能用的那几个**一起报出来：模型据此改一次就够了。只说"多了一个参数"，
+     * 它得再猜一轮该删哪个、能不能换成别的。
+     */
+    private static String unknownParameter(String where, String name, Set<String> allowed) {
+        String list = allowed.isEmpty() ? "什么参数都不接受" : "只接受：" + String.join("、", allowed);
+        return where.isEmpty()
+                ? "多了不认识的参数 `" + name + "`。这个工具" + list + "。"
+                : where + "里多了不认识的字段 `" + name + "`；它" + list + "。";
     }
 
     /**
@@ -337,7 +384,7 @@ public final class ArgumentValidator {
 
     private static JsonNode parse(String schemaJson) {
         try {
-            return MAPPER.readTree(schemaJson);
+            return ToolJson.MAPPER.readTree(schemaJson);
         } catch (JsonProcessingException e) {
             throw new IllegalArgumentException("工具的 parametersJsonSchema 不是合法 JSON：" + schemaJson, e);
         }

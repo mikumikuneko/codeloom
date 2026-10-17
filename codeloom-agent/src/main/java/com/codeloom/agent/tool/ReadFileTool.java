@@ -24,14 +24,13 @@ public final class ReadFileTool implements Tool {
      * **不该再走那一轮的总量限制**（见 {@link Tool#selfBounded()}），
      * 那意味着它必须自己设上界：不然就是把一个实际上无限大的东西直接灌进上下文。
      *
-     * <p>取值和 {@code run_command} 的输出上限一致。两个都是"一次调用的产出"这件事，
-     * 用两个不同的数字只会让下一个读代码的人以为它们之间有什么区别。
+     * <p>取值和 {@code run_command}、{@code web_fetch} 共用同一个常量
+     * （{@link ToolLimits#MAX_OUTPUT_CHARS}）：三个都是"一次调用的产出"这件事，
+     * 用不同的数字只会让下一个读代码的人以为它们之间有什么区别。
      */
-    private static final int MAX_OUTPUT_CHARS = 100_000;
-
     @Override
     public String name() {
-        return "read_file";
+        return ToolNames.READ_FILE;
     }
 
     @Override
@@ -67,7 +66,7 @@ public final class ReadFileTool implements Tool {
      * <p>所以它**不参与**那一轮的总量限制：对它的落盘提示是一条**循环指令**
      *（被落盘的正是这条 read 的结果），理由与两家的做法见 {@link Tool#selfBounded()}。
      *
-     * <p>代价是它必须真的有界 —— 见 {@link #MAX_OUTPUT_CHARS}。
+     * <p>代价是它必须真的有界 —— 见 {@link ToolLimits#MAX_OUTPUT_CHARS}。
      */
     @Override
     public boolean selfBounded() {
@@ -119,7 +118,7 @@ public final class ReadFileTool implements Tool {
                     truncated = true;               // 后面还有内容，但行数已经读够了
                     break;
                 }
-                if (out.length() >= MAX_OUTPUT_CHARS) {
+                if (out.length() >= ToolLimits.MAX_OUTPUT_CHARS) {
                     // 行数还没到，**总量**先到顶了。一个压缩过的 JS、一行大 JSON 就能走到这儿
                     truncated = true;
                     break;

@@ -75,8 +75,8 @@ public class SessionProjections {
     private final Map<SessionId, Live> live = new LinkedHashMap<>(16, 0.75f, true);
 
     public SessionProjections(EventStore events, ContextAssembler assembler,
-                              @Value("${codeloom.live-projections:128}") int maxLive,
-                              @Value("${codeloom.live-projections-bytes:32MB}") DataSize maxLiveBytes) {
+                              @Value("${codeloom.live-projections}") int maxLive,
+                              @Value("${codeloom.live-projections-bytes}") DataSize maxLiveBytes) {
         if (maxLive <= 0 || maxLiveBytes.toBytes() <= 0) {
             throw new IllegalArgumentException(
                     "常驻投影的上限必须是正数，收到 条数=" + maxLive + " 字节=" + maxLiveBytes);

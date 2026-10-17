@@ -82,18 +82,19 @@ class ChatMessagePersistenceTest extends AbstractPersistenceTest {
     }
 
     @Test
-    @DisplayName("【精度边界】created_at 是 DATETIME(3)，毫秒以下会被截掉 —— 这是已知且可接受的")
-    void subMillisecondPrecisionIsTruncated() {
+    @DisplayName("【精度边界】created_at 是 DATETIME(3)：**返回的那条和读回来的那条必须是同一个时刻**")
+    void subMillisecondPrecisionIsTruncatedOnTheWayIn() {
         // 时间戳用的是 DATETIME(3)（建表时定的：同一会话可能在同一毫秒内落多条事件，
-        // 秒级精度排不出先后）。代价就是微秒以下不存在。
-        // 这里把它写成一个测试而不是一句注释，是为了让「精度到毫秒为止」这件事
-        // 在有人将来想按纳秒比较时间时能立刻被想起来。
+        // 秒级精度排不出先后）。所以微秒以下不存在 —— 关键是**在写进去之前就截**：
+        // 否则广播出去的那条（append 的返回值）和历史接口读回来的那条时间不同，
+        // 同一条消息会带着两个时刻（和事件落库那条同一个做法）
         Instant withNanos = Instant.parse("2026-09-25T10:00:00.123456789Z");
 
         ChatMessage saved = chat.append(projectId, ALICE, "精度", null, null, withNanos);
 
-        assertThat(saved.createdAt()).isEqualTo(withNanos);   // 领域对象里仍是原值
+        Instant stored = Instant.parse("2026-09-25T10:00:00.123Z");
+        assertThat(saved.createdAt()).isEqualTo(stored);
         assertThat(chat.findAfter(projectId, saved.id().value() - 1, 1).getFirst().createdAt())
-                .isEqualTo(Instant.parse("2026-09-25T10:00:00.123Z"));   // 库里只剩到毫秒
+                .isEqualTo(stored);
     }
 }

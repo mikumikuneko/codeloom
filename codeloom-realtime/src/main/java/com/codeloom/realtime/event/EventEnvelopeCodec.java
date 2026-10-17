@@ -6,6 +6,7 @@ import com.codeloom.domain.session.SessionId;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.DateTimeException;
 import java.time.Instant;
 
 /**
@@ -86,10 +87,14 @@ public final class EventEnvelopeCodec {
                     node.hasNonNull(FIELD_SEQ) ? node.get(FIELD_SEQ).asLong() : null,
                     Instant.parse(require(node, FIELD_AT).asText()),
                     events.decode(type, require(node, FIELD_PAYLOAD).toString()));
-        } catch (IllegalArgumentException | NullPointerException e) {
+        } catch (IllegalArgumentException | NullPointerException | DateTimeException e) {
             // 上面那一串都可能因为某个键缺失或格式不对而抛。事件信封是**跨进程**的
             // 传输格式，坏数据的来源比库里的行多得多（版本不一致的旧实例、手工改过的消息），
-            // 所以这里统一转成可辨认的异常，而不是漏一个 NullPointerException 出去
+            // 所以这里统一转成可辨认的异常，而不是漏一个 NullPointerException 出去。
+            //
+            // ★ `Instant.parse` 抛的 `DateTimeParseException` **不是** `IllegalArgumentException`
+            //（它的祖上是 `DateTimeException → RuntimeException`）—— 少了这一支，
+            // 坏时间戳会成为唯一一个漏出去的形状，和这里"统一转成可辨认异常"的承诺相反
             throw new EventCodecException("事件信封解码失败：" + json, e);
         }
     }
