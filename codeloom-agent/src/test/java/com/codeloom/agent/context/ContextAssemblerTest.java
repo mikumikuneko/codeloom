@@ -26,6 +26,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -37,6 +40,19 @@ class ContextAssemblerTest {
 
     private static final String SYSTEM = "你是一个协作开发助手。";
     private static final SessionId SESSION = SessionId.of("s1");
+    private static final Instant AT = Instant.parse("2026-09-25T10:00:00Z");
+
+    /** 用户消息后面跟着的那行时钟。它取自事件落库时间，所以测试里是固定的。 */
+    private static String clockAt(Instant at) {
+        ZoneId zone = ZoneId.systemDefault();
+        return "[平台指令] 现在是 " + LocalDateTime.ofInstant(at, zone)
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                + "（" + zone.getId() + "）。用户说「今天」「最近」时按这个时区算。";
+    }
+
+    private static String said(String text) {
+        return text + "\n\n" + clockAt(AT);
+    }
 
     /**
      * 装配器。**"按 id 查用户名"那个办法由这里给** —— 投影里只有一处用它：
@@ -52,7 +68,7 @@ class ContextAssemblerTest {
     /** 追加一条事件，**返回它的 seq** —— 回滚要靠序号指认"退到哪一条"，见 {@link SessionRewound}。 */
     private long append(Event event) {
         long seq = events.size() + 1L;
-        events.add(new StoredEvent(SESSION, seq, Instant.parse("2026-09-25T10:00:00Z"), event));
+        events.add(new StoredEvent(SESSION, seq, AT, event));
         return seq;
     }
 
@@ -487,7 +503,7 @@ class ContextAssemblerTest {
         assertThat(messages).hasSize(3);
         assertThat(messages.get(1).role()).isEqualTo(LlmRole.USER);
         assertThat(messages.get(1).content()).contains("摘要").contains("我答了一句");
-        assertThat(messages.get(2).content()).isEqualTo("第三句");
+        assertThat(messages.get(2).content()).isEqualTo(said("第三句"));
     }
 
     @Test
@@ -505,7 +521,7 @@ class ContextAssemblerTest {
         assertThat(messages.get(1).content()).contains("第二次的摘要");
         // 用第一条水位线的话，中期那句话会漏出来 —— 而它早该被后一次压缩覆盖掉
         assertThat(messages.get(1).content()).doesNotContain("第一次的摘要内容");
-        assertThat(messages.get(2).content()).isEqualTo("最新的话");
+        assertThat(messages.get(2).content()).isEqualTo(said("最新的话"));
     }
 
     @Test
@@ -532,7 +548,7 @@ class ContextAssemblerTest {
         // 而那一轮的代码还留在盘上 —— 模型面对自己刚写的东西却没有上下文。
         // Claude Code 的 /rewind 就是把这些留住的
         assertThat(messages).extracting(LlmMessage::content)
-                .containsExactly(SYSTEM, "第一轮", "我改了 A.java");
+                .containsExactly(SYSTEM, said("第一轮"), "我改了 A.java");
     }
 
     @Test
@@ -572,7 +588,7 @@ class ContextAssemblerTest {
         // 按 sha 取**最早**那条匹配会退到"会话刚开始"，把用户选的第一轮之后的
         // 东西**也一起清掉**。认序号才退得到他指的那一条：第一轮的两条都留着
         assertThat(assemble()).extracting(LlmMessage::content)
-                .containsExactly(SYSTEM, "第一轮", "答一");
+                .containsExactly(SYSTEM, said("第一轮"), "答一");
     }
 
     @Test
@@ -674,7 +690,7 @@ class ContextAssemblerTest {
         assertThat(messages.getFirst().role()).isEqualTo(LlmRole.SYSTEM);
         // **系统提示词要原样留着**：它不属于对话，一起清掉会让后续每一次调用都缓存未命中
         assertThat(messages.getFirst().content()).isEqualTo(SYSTEM);
-        assertThat(messages.get(1).content()).isEqualTo("这次换个做法");
+        assertThat(messages.get(1).content()).isEqualTo(said("这次换个做法"));
         // 被回滚掉的那些轮次一个字都不该留下
         assertThat(messages).noneMatch(m -> "改好了".equals(m.content()));
         assertThat(messages).noneMatch(m -> "改一下 A.java".equals(m.content()));
@@ -712,8 +728,8 @@ class ContextAssemblerTest {
     }
 
     @Test
-    @DisplayName("【清单】再写一次是**覆盖**：模型只看见一份，历史里不会堆一摞旧清单")
-    void aSecondWriteReplacesTheFirst() {
+    @DisplayName("【清单】再写一次是**追加一份快照**：旧的不动（缓存），最新的在最后")
+    void aSecondWriteAppendsASnapshot() {
         append(todo("第一步"));
         append(new UserMessage("继续"));
         append(new TodoListUpdated(List.of(
@@ -721,9 +737,12 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 每一份都留在历史里的话，几十轮之后上下文里全是过期清单 ——
-        // 白烧 token，而且破坏了"前缀不变"（每一轮的旧清单区都在变）
-        assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(1);
+        // 旧的快照留在历史里，内容不再变化 —— 下一次请求的前缀因此是严格延伸的。
+        // 最新那一份在最后，模型以它为准。
+        assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(2);
+        assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单"))
+                .extracting(LlmMessage::content)
+                .anySatisfy(content -> assertThat(content).contains("第一步"));
         assertThat(messages.getLast().content()).contains("第二步").doesNotContain("第一步");
     }
 
@@ -744,12 +763,33 @@ class ContextAssemblerTest {
                 .anyMatch(content -> content.contains("前面聊过要做这几件事"));
         assertThat(messages).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("好，我开始了"));
-        // ……但清单**不在**被替换的那部分里：它照旧摆在最后。
+        // ……但清单**不在**被替换的那部分里：它的快照还在历史里（最新的那份）。
         // 工具结果就做不到这一点（它会被 ToolResultsCleared 清掉），而计划丢了，
         // 模型就会忘了自己做到第几步 —— 这是长任务里最贵的一种失忆
-        assertThat(messages.getLast().content())
-                .startsWith("[当前任务清单")
-                .contains("跑测试");
+        assertThat(messages).extracting(LlmMessage::content)
+                .anySatisfy(content -> assertThat(content)
+                        .startsWith("[当前任务清单")
+                        .contains("跑测试"));
+    }
+
+    @Test
+    @DisplayName("【清单·压缩】水位线之前只带最新一份，旧的由摘要代表 —— 不把整摞旧快照搬过来")
+    void compactionKeepsOnlyTheLatestTodoSnapshot() {
+        append(new UserMessage("开始"));
+        append(todo("第一步"));
+        append(todo("第二步"));
+        long cutoff = append(new AssistantMessage("好", null));
+        append(new ContextCompacted(cutoff, "前面聊过要做一些事"));
+        append(new UserMessage("继续"));
+
+        List<LlmMessage> messages = assemble();
+
+        assertThat(messages).extracting(LlmMessage::content)
+                .anySatisfy(content -> assertThat(content)
+                        .startsWith("[当前任务清单")
+                        .contains("第二步"));
+        assertThat(messages).extracting(LlmMessage::content)
+                .noneMatch(content -> content.contains("第一步"));
     }
 
     @Test
@@ -769,15 +809,18 @@ class ContextAssemblerTest {
     }
 
     @Test
-    @DisplayName("【清单】空清单 = 清空，不再注入那一块")
-    void anEmptyListInjectsNothing() {
+    @DisplayName("【清单】空清单 = 追加一条「已经清空」，旧快照不会继续冒充当前")
+    void anEmptyListAppendsAClearedSnapshot() {
         append(todo("第一步"));
         // 模型把整件事做完了，于是把清单清空（全做完时写一份空清单，
         // 而不是留着一份全打勾的）
         append(new TodoListUpdated(List.of()));
 
-        assertThat(assemble()).extracting(LlmMessage::content)
-                .noneMatch(content -> content.contains("当前任务清单"));
+        List<LlmMessage> messages = assemble();
+        assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(2);
+        assertThat(messages.getLast().content())
+                .startsWith("[当前任务清单")
+                .contains("已经清空");
     }
 
     // ------------------------------------------------------------------
@@ -1008,8 +1051,8 @@ class ContextAssemblerTest {
     }
 
     @Test
-    @DisplayName("【推进】清单在末尾只出现一份 —— 推进几次都不会越堆越多")
-    void theTodoBlockIsNotAccumulated() {
+    @DisplayName("【推进】清单快照只追加、不改写：分两次推进和一次推进结果相同")
+    void theTodoSnapshotsAreAppendOnly() {
         append(todo("跑测试"));
         append(new UserMessage("继续"));
         append(new TodoListUpdated(List.of(
@@ -1020,9 +1063,9 @@ class ContextAssemblerTest {
         projection.advance(events.subList(0, 1), sink);
         projection.advance(events, sink);
 
-        // 清单是"当前状态"，不是"历史里的一段话"：它每一轮都重新摆在末尾，
-        // 而不是每推进一次就多压一条
-        assertThat(sink).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(1);
+        // 第一次推进写下一份快照；第二次推进只在清单变化时追加新的。
+        // 旧的那份原样留在前缀里 —— 这正是缓存能命中的原因。
+        assertThat(sink).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(2);
         assertThat(sink.getLast().content())
                 .contains("当前任务清单")
                 .contains("跑测试");

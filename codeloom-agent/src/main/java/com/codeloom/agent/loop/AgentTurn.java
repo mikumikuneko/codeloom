@@ -29,6 +29,9 @@ import com.codeloom.domain.port.Workspace;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -36,9 +39,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -79,22 +79,13 @@ import java.util.stream.Stream;
  */
 public final class AgentTurn {
 
+    private static final Logger log = LoggerFactory.getLogger(AgentTurn.class);
+
+    /** 上一次发给模型的请求；**只用于诊断日志**，不参与任何判断。 */
+    private List<LlmMessage> previousRequest = List.of();
+
     /** 一轮之内最多让模型调多少轮工具。超过就是它在打转，停下来交给人。 */
     private static final int MAX_TOOL_ROUNDS = 25;
-
-    /**
-     * 给模型的时钟读数。一行就够：日期、时刻、时区。
-     *
-     * <p>**不报"经过多久"**：这一轮的每一步都发生在几秒到几分钟内，模型不需要相对时间；
-     * 它需要的是"今天是几号"，以及"用户说的今天按哪个时区算"。
-     */
-    private static String clock() {
-        ZoneId zone = ZoneId.systemDefault();
-        return "现在是 " + LocalDateTime.now(zone).format(CLOCK_FORMAT)
-                + "（" + zone.getId() + "）。用户说「今天」「最近」时按这个时区算。";
-    }
-
-    private static final DateTimeFormatter CLOCK_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     /**
      * 一次模型调用最多试几次（含第一次）。
@@ -479,16 +470,8 @@ public final class AgentTurn {
         // 装进自己的 list（下一步就发给模型，不需要不可变兜底）
         List<LlmMessage> messages = new ArrayList<>();
         bench.assembleMessages(messages);
-        // ★ 时钟放在**请求尾部**，不落成事件。
-        //
-        //   没有它，"今天/最近有什么更新"这类问题会让模型去跑 `date` —— 那是一条
-        //   不在免审批名单里的命令，用户得为"今天是几号"点一次批准。
-        //
-        //   为什么不写成事件：它每轮都重新取，**不是一个事实**。落成事件的话，
-        //   历史里会堆满过期的读数（"现在是 10:00" × 二十条），而模型需要的只是"现在"。
-        //   同一处先例：收尾指令也是直接加在请求尾部。代价是重放这一轮时读到的是
-        //   重放那一刻的时间 —— 对一个时钟来说，那反而是对的。
-        messages.add(LlmMessage.user("[平台指令] " + clock()));
+        // 时钟**不在这里加**：它已经跟着每条用户消息进了投影（见 MessageFold）。
+        // 每次请求再补一行会把上一次请求的尾部截掉 —— 下一轮的前缀就接不上缓存了。
         if (wrapUpRequested) {
             messages.add(LlmMessage.user(TokenBudget.WRAP_UP_INSTRUCTION));
         }
@@ -499,6 +482,13 @@ public final class AgentTurn {
                 input.tools().definitions(),
                 input.capabilities().maxOutputTokens());
 
+        // 诊断用：这一次请求是不是上一次的严格延伸。前缀缓存的前提就是它。
+        // **只在 DEBUG 开着时算** —— 关着的时候连这次比较都不做（它是热路径，
+        // 上下文越长，逐条 equals 越贵）。只写 token 数量和这个布尔值，不写正文。
+        boolean extendsPrevious = log.isDebugEnabled()
+                && messages.size() >= previousRequest.size()
+                && messages.subList(0, previousRequest.size()).equals(previousRequest);
+
         // **重试在这一层，不在 provider 客户端里。**
         //
         // 客户端拿不到"值不值得再来一次"要看的上下文（第几轮了、用户还在不在等、
@@ -507,7 +497,15 @@ public final class AgentTurn {
         // 也知道这是第几次尝试。
         for (int attempt = 1; ; attempt++) {
             try {
-                return input.client().stream(request, liveListener, input.cancellation());
+                LlmResult result = input.client().stream(request, liveListener, input.cancellation());
+                if (log.isDebugEnabled()) {
+                    TokenUsage used = result.usage();
+                    log.debug("模型调用 session={} messages={} input={} cached={} output={} extendsPrevious={}",
+                            input.sessionId(), messages.size(), used.inputTokens(),
+                            used.cachedInputTokens(), used.outputTokens(), extendsPrevious);
+                    previousRequest = List.copyOf(messages);
+                }
+                return result;
             } catch (LlmCallException e) {
                 if (!e.retryable() || attempt == MAX_ATTEMPTS) {
                     throw e;      // 不该重试，或者试完了 —— 把最后那个失败报出去

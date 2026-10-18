@@ -2,6 +2,7 @@ package com.codeloom.agent.context;
 
 import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.ToolCall;
+import com.codeloom.agent.tool.ToolNames;
 import com.codeloom.domain.event.AgentNoteDelivered;
 import com.codeloom.domain.event.AssistantDelta;
 import com.codeloom.domain.event.AssistantMessage;
@@ -31,6 +32,10 @@ import com.codeloom.domain.event.UserMessage;
 import com.codeloom.domain.event.VerificationResult;
 import com.codeloom.domain.event.WorkspaceChanges;
 import com.codeloom.domain.user.UserId;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -51,6 +56,12 @@ import java.util.function.Function;
  * 所以投影时要把它们重新合成一条。
  */
 final class MessageFold {
+
+    /**
+     * 时钟的格式。**只到分钟**：秒对人没意义，而更细的粒度会让同一次交互里的每一条消息
+     * 都变成不同的前缀 —— 缓存恰好是按前缀算的。
+     */
+    private static final DateTimeFormatter CLOCK_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final List<LlmMessage> messages;
     /** 正文已经被清掉的那些调用 id（由 {@link ContextAssembler.Projection} 在折之前扫出来）。 */
@@ -215,7 +226,19 @@ final class MessageFold {
             }
             case UserMessage user -> {
                 flush();
-                messages.add(LlmMessage.user(user.text()));
+                // 时钟**跟着这句话走**，而不是每次请求再追加一行：
+                // 下一轮请求里这一条仍然是前缀的一部分，缓存才接得上。
+                // 用的是**事件落库那一刻**，不是装配时的 now() —— 同一份事件流
+                // 必须投影出逐字符相同的结果（见 ContextAssembler 的类注释）。
+                messages.add(LlmMessage.user(user.text() + "\n\n" + clockAt(stored.occurredAt())));
+            }
+            case TodoListUpdated updated -> {
+                // **每次变化追加一份快照**，不重新注入当前那份：
+                // 旧快照留在历史里是不变的（缓存能命中），最新一份在最后。
+                // 每条快照带自己的时刻和"以最后一份为准"，长会话里旧的那几份不会
+                // 再冒充当前；空清单也追加一条"已经清空"。
+                flush();
+                messages.add(LlmMessage.user(todoSnapshot(updated, stored.occurredAt())));
             }
             case AgentNoteDelivered note -> {
                 // **来源必须标出来**。消息格式里没有"第三方"这个角色，所以别人的留言
@@ -300,11 +323,6 @@ final class MessageFold {
             // 而那件事它读文件就看得见。把"平台做了一次同步"塞进来，
             // 只会让每轮的消息前缀多一段和它的判断无关的东西
             case SessionSynced ignored -> {
-            }
-            // 清单**不在这里进上下文**：它在装配的最后单独注入一条
-            // （见 ContextAssembler.Projection），因为要的是"最后一份、摆在末尾"，
-            // 而不是"每一份都留在历史里"
-            case TodoListUpdated ignored -> {
             }
             // 易失事件不落库，正常不会出现在这里；真出现了也忽略，
             // 因为完整正文已经由 AssistantMessage 覆盖了
@@ -508,5 +526,48 @@ final class MessageFold {
     private static String senderOf(Function<UserId, String> displayNameOf, UserId id) {
         String name = displayNameOf.apply(id);
         return name == null || name.isBlank() ? "协作者" : name;
+    }
+
+    /**
+     * 一条用户消息后面的时钟。
+     *
+     * <p>取的是**这条消息落库的时刻**，不是装配那一刻：同一份事件流在任何时候重放，
+     * 都必须投影出逐字符相同的消息（缓存的前提）。代价是它反映"用户发这句话的时候"，
+     * 而不是"模型正在跑的时候" —— 对"今天/最近"这类问题，前者才是用户关心的。
+     */
+    private static String clockAt(Instant at) {
+        ZoneId zone = ZoneId.systemDefault();
+        return "[平台指令] 现在是 " + LocalDateTime.ofInstant(at, zone).format(CLOCK_FORMAT)
+                + "（" + zone.getId() + "）。用户说「今天」「最近」时按这个时区算。";
+    }
+
+    /**
+     * 一份清单快照。
+     *
+     * <p>带上**这份快照的时刻**和"以最后一份为准"：长会话里旧快照会留在历史里，
+     * 模型靠时间和这句话判断哪份是当前，而不是靠"它恰好在最后"。
+     */
+    private static String todoSnapshot(TodoListUpdated updated, Instant at) {
+        ZoneId zone = ZoneId.systemDefault();
+        String time = LocalDateTime.ofInstant(at, zone).format(CLOCK_FORMAT);
+        String header = "[当前任务清单 · " + time + " —— 你自己列的，用 "
+                + ToolNames.TODO_WRITE + " 更新它；以最后一份为准]\n";
+        return updated.items().isEmpty() ? header + "（已经清空）" : header + renderTodos(updated.items());
+    }
+
+    /**
+     * 清单写成几行字。
+     *
+     * <p>状态用**模型自己的词**（pending / in_progress / completed，和工具参数里那三个
+     * 字符串一模一样）：它写进去、它再读回来，中间不该经过一次翻译。
+     */
+    private static String renderTodos(List<TodoListUpdated.Item> items) {
+        StringBuilder text = new StringBuilder();
+        for (int index = 0; index < items.size(); index++) {
+            TodoListUpdated.Item item = items.get(index);
+            text.append(index + 1).append(". [").append(item.state().name().toLowerCase()).append("] ")
+                    .append(item.content()).append('\n');
+        }
+        return text.toString();
     }
 }

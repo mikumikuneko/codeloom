@@ -27,7 +27,7 @@ import java.util.Set;
  *
  * <p>为什么按切点砍、而不是回滚就整体清空：回滚把**代码**也退回去了（同一棵树），
  * 所以切点之前读到的内容今天依然成立，切点之后看到的那份代码**已经不存在了** ——
- * 该作废的正是那一段，不是整本账。判据与 {@link TodoTracker} 逐字相同。
+ * 该作废的正是那一段，不是整本账。切点判据与其它 {@link Derived} 一样（见 {@link Derived#cutOf}）。
  */
 final class ReadPathTracker implements Derived {
 

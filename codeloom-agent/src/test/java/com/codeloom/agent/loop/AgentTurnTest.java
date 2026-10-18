@@ -105,16 +105,32 @@ class AgentTurnTest {
     }
 
     @Test
-    @DisplayName("每次请求的尾部带一行时钟 —— 没有它，「今天」会让模型去跑 date 并要人批")
-    void sendsTheClockWithEveryRequest() {
+    @DisplayName("时钟跟着用户消息进投影 —— 「今天」不用跑 date，也不会每次请求重发")
+    void sendsTheClockWithTheUserMessage() {
         ScriptedLlm client = new ScriptedLlm(ScriptedLlm.answer("好"));
 
         new AgentTurn().run(input(client));
 
-        String last = client.requests().getFirst().messages().getLast().content();
-        assertThat(last)
-                .startsWith("[平台指令] 现在是 ")
+        String user = client.requests().getFirst().messages().getLast().content();
+        assertThat(user)
+                .contains("[平台指令] 现在是 ")
                 .contains(ZoneId.systemDefault().getId());
+    }
+
+    @Test
+    @DisplayName("【缓存】下一次请求是上一次的严格前缀 —— 时钟不会再被重发一遍")
+    void theNextRequestIsAPrefixExtension() {
+        ScriptedLlm client = new ScriptedLlm(
+                ScriptedLlm.toolCall("call_1", "read_file", "{\"path\":\"A.java\"}"),
+                ScriptedLlm.answer("读到了"));
+
+        new AgentTurn().run(input(client));
+
+        List<LlmMessage> first = client.requests().getFirst().messages();
+        List<LlmMessage> second = client.requests().get(1).messages();
+        // 第二次请求必须以上一次为**逐条相同**的前缀；否则服务商的前缀缓存
+        // 在时钟那一行就断了
+        assertThat(second.subList(0, first.size())).isEqualTo(first);
     }
 
     @Test

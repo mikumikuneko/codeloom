@@ -2,7 +2,6 @@ package com.codeloom.agent.context;
 
 import com.codeloom.agent.llm.LlmMessage;
 import com.codeloom.agent.llm.ToolCall;
-import com.codeloom.agent.tool.ToolNames;
 import com.codeloom.domain.event.ContextCompacted;
 import com.codeloom.domain.event.SessionRewound;
 import com.codeloom.domain.event.StoredEvent;
@@ -28,14 +27,15 @@ import java.util.function.Supplier;
  * <h2>为什么必须是确定性投影</h2>
  * 模型服务商的 prompt 缓存是**前缀匹配**的，命中价比未命中低得多。
  * 所以同一个事件流必须投影出**逐字符相同**的消息前缀 —— 这是纯函数，
- * 不依赖时间、不依赖随机数、不做任何"看起来更聪明"的润色。
+ * 不依赖**当前**时间（时钟取事件自带的 {@code occurredAt}）、不依赖随机数、
+ * 不做任何"看起来更聪明"的润色。
  *
  * <p>推论：事件**只往尾部追加消息**（三种会回头改已有消息的事件除外，见下）——
  * 这条性质是上面那个缓存便宜的全部来源，动它之前先想清楚代价。
  *
- * <h2>这一块由三个类分担</h2>
+ * <h2>这一块由两个类分担</h2>
  * {@link Projection} 是**跨轮往前推进**的那条；它把"折一遍"交给 {@link MessageFold}
- *（只管把一批事件变成消息），任务清单由 {@link TodoTracker} 单独跟着走。
+ *（把一批事件变成消息，时钟和任务清单也在那里投影成消息）。
  * 本文件只放门面和那条可推进的投影。
  *
  * <h2>不在上下文里的事件</h2>
@@ -176,8 +176,6 @@ public final class ContextAssembler {
          * （见 {@code ContextCompacted}）。0 = 没压过。
          */
         private long watermark;
-        /** 清单现在的样子。**不受水位线约束**：它每一轮都被重新注入，"压缩之后计划还在"正是它的用处。 */
-        private final TodoTracker todos = new TodoTracker();
         /** 这条对话里 {@code read_file} 读过哪些文件（工作区相对路径），见 {@link #readPaths()}。 */
         private final ReadPathTracker reads = new ReadPathTracker();
         /** 尾部那次批准了、但还没补跑的调用，见 {@link #pendingApprovedCall()}。 */
@@ -193,7 +191,7 @@ public final class ContextAssembler {
          *
          * <p>顺序无所谓：几份事实之间没有依赖，各自看各自的事件。
          */
-        private final List<Derived> derived = List.of(todos, reads, approvals);
+        private final List<Derived> derived = List.of(reads, approvals);
 
         private Projection(String systemPrompt, Function<UserId, String> displayNameOf,
                            Supplier<List<StoredEvent>> wholeStream) {
@@ -261,15 +259,6 @@ public final class ContextAssembler {
 
             sink.clear();
             sink.addAll(messages);
-
-            // 任务清单**最后注入、只注入一份**，而且它**不进**上面那份消息列表
-            // （进了的话每折一次就多一条）。它是"当前状态"不是"历史里的一段话"：
-            // 模型每一轮都该在末尾看见它，而不是让它淹没在此前几千条消息里。
-            // 这也正是它比"一条工具结果"值钱的地方 —— 工具结果会被压缩清掉，它不会
-            TodoListUpdated current = todos.current();
-            if (current != null && !current.items().isEmpty()) {
-                sink.add(LlmMessage.user(TODO_HEADER + renderTodos(current.items())));
-            }
         }
 
         /**
@@ -305,11 +294,12 @@ public final class ContextAssembler {
             }
 
             for (StoredEvent stored : fresh) {
-                // 派生事实看**所有**事件 —— 压缩的水位线管不着它们（"压缩之后计划还在"
-                // 正是清单存在的理由）；而回滚管得着，那由它们各自消化（见 Derived）
+                // 派生事实看**所有**事件；而回滚管得着，那由它们各自消化（见 Derived）
                 for (Derived fact : derived) {
                     fact.accept(stored);
                 }
+                // 水位线之前的清单**不在这里折**：begin 已经把最新那份带到摘要之后，
+                // 更早的由摘要代表。水位线之后的照常追加。
                 if (stored.seq() > watermark) {
                     messageFold.accept(stored);
                 }
@@ -347,7 +337,7 @@ public final class ContextAssembler {
          * 从头开始那一下：系统提示词、压缩摘要、水位线、正文被清过的调用集合
          * 都在这一刻定下来。
          *
-         * <p>派生状态（清单、读过哪些文件、尾部那只事件）**不在这里**折：
+         * <p>派生状态（读过哪些文件、尾部那只事件）**不在这里**折：
          * 由 {@link #fold(List)} 那趟遍历统一折，而且只有那一处 —— 走到这一支时，
          * 那趟遍历手里的 {@code fresh} 就是整条流。
          */
@@ -364,27 +354,24 @@ public final class ContextAssembler {
             if (compaction != null) {
                 messageFold.acceptSummary(compaction.summary());
                 watermark = compaction.droppedUpToSeq();
+                // 水位线之前的旧快照不再一份份搬过来 —— 它们已经被摘要代表了。
+                // 只把水位线前**最新**的那份带到摘要之后：计划还在，历史不堆。
+                latestTodoAtOrBefore(events, watermark).ifPresent(messageFold::accept);
             }
         }
 
-        /** 清单消息的开头。同样得点明"这是状态，不是谁刚说的一句话"。 */
-        private static final String TODO_HEADER =
-                "[当前任务清单 —— 你自己列的，用 " + ToolNames.TODO_WRITE + " 更新它]\n";
-
-        /**
-         * 清单写成几行字。
-         *
-         * <p>状态用**模型自己的词**（pending / in_progress / completed，和工具参数里那三个
-         * 字符串一模一样）：它写进去、它再读回来，中间不该经过一次翻译。
-         */
-        private static String renderTodos(List<TodoListUpdated.Item> items) {
-            StringBuilder text = new StringBuilder();
-            for (int index = 0; index < items.size(); index++) {
-                TodoListUpdated.Item item = items.get(index);
-                text.append(index + 1).append(". [").append(item.state().name().toLowerCase()).append("] ")
-                        .append(item.content()).append('\n');
+        /** 水位线之前（含）最后一份清单快照。压缩之后只带这一份，旧的由摘要代表。 */
+        private static Optional<StoredEvent> latestTodoAtOrBefore(List<StoredEvent> events, long watermark) {
+            StoredEvent latest = null;
+            for (StoredEvent stored : events) {
+                if (stored.seq() > watermark) {
+                    break;
+                }
+                if (stored.event() instanceof TodoListUpdated) {
+                    latest = stored;
+                }
             }
-            return text.toString();
+            return Optional.ofNullable(latest);
         }
 
         /**
