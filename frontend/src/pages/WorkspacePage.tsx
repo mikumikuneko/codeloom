@@ -2,6 +2,7 @@ import { LogOut, MessageSquarePlus, Settings } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
+import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { ChatPanel } from '@/components/workspace/ChatPanel'
 import { CodeView } from '@/components/workspace/CodeView'
 import { ProjectDiffView } from '@/components/workspace/ProjectDiffView'
@@ -102,6 +103,19 @@ export function WorkspacePage() {
   const [theirSession, setTheirSession] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
+  /** 「合并」的确认框。同步不需要 —— 它只动自己的树；合并会动到共享的主干 */
+  const [confirmingMerge, setConfirmingMerge] = useState(false)
+
+  // 同步/合并这类结果只是"刚才那一下"的回执，不是常驻状态。留着不走，
+  // 顶栏中间就会一直挂着一句几小时前的话，还以为现在还在发生。
+  // 失败也在五秒后收掉：那句话已经看得到，真要再确认就再点一次。
+  useEffect(() => {
+    if (notice === null) {
+      return
+    }
+    const timer = window.setTimeout(() => setNotice(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
 
   /**
    * 聊天室里有几条是**我没看的时候**来的。
@@ -577,7 +591,11 @@ export function WorkspacePage() {
                 variant="ghost"
                 size="sm"
                 disabled={busy || conflictPending}
-                title={conflictPending ? '先裁决冲突，或者放弃合并' : undefined}
+                title={
+                  conflictPending
+                    ? '先裁决冲突，或者放弃合并'
+                    : '把主干的改动拉进我的工作区，只影响我的树'
+                }
                 className="text-muted-foreground"
                 onClick={() =>
                   void act('SYNC', () => merge.sync(mySession), (status) => ({
@@ -592,13 +610,12 @@ export function WorkspacePage() {
                 variant="outline"
                 size="sm"
                 disabled={busy || conflictPending}
-                title={conflictPending ? '先裁决冲突，或者放弃合并' : undefined}
-                onClick={() =>
-                  void act('MERGE', () => merge.intoMain(mySession), (status) => ({
-                    tone: 'plain',
-                    text: status === 'FAST_FORWARD' ? '合进主干了' : '合进主干了（有一笔合并提交）',
-                  }))
+                title={
+                  conflictPending
+                    ? '先裁决冲突，或者放弃合并'
+                    : '把我的改动合进主干，对方也看得到'
                 }
+                onClick={() => setConfirmingMerge(true)}
               >
                 合并
               </Button>
@@ -917,6 +934,26 @@ export function WorkspacePage() {
           </div>
         </section>
       </div>
+
+      {/* 合并会动到**共享的主干**（对方也看得到，而且会接着验证），先问一句。
+          同步不动别人的东西，所以不拦 —— 给它一个 title 说明就够了。 */}
+      {confirmingMerge && mySession !== null && (
+        <ConfirmDialog
+          title="合进主干"
+          description="把你在这条会话里的改动合进主干，对方也能看到。有冲突的话会停下来，在中间裁决。"
+          confirmLabel="合并"
+          confirmVariant="default"
+          onConfirm={async () => {
+            await act('MERGE', () => merge.intoMain(mySession), (status) => ({
+              tone: 'plain',
+              text: status === 'FAST_FORWARD' ? '合进主干了' : '合进主干了（有一笔合并提交）',
+            }))
+            setConfirmingMerge(false)
+            return null
+          }}
+          onClose={() => setConfirmingMerge(false)}
+        />
+      )}
     </div>
   )
 }

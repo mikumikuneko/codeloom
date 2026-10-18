@@ -11,7 +11,10 @@ import {
 } from '@/components/ui/dialog'
 
 /**
- * 危险操作的确认框：一件**没有回收站**的事，先问一句再动手。
+ * 确认框：一件**没有回收站**的事，或者会动到**共享的那份**的事，先问一句再动手。
+ *
+ * <p>默认的红色确认键是给前者的；后者（比如"合进主干"）传
+ * {@code confirmVariant="default"} —— 它没有把东西删掉，只是会让对方也看到。
  *
  * <h2>为什么用它，而不是浏览器的 confirm</h2>
  * 那个弹窗是浏览器自己的：样式和这个界面无关、位置贴在窗口最上面、而且会把整个页面冻住。
@@ -31,12 +34,18 @@ export function ConfirmDialog({
   title,
   description,
   confirmLabel,
+  confirmVariant = 'destructive',
   onConfirm,
   onClose,
 }: {
   title: string
   description: string
   confirmLabel: string
+  /**
+   * 确认键的样子。默认红色 —— 这个框大多数时候问的是"删了就没有了"。
+   * 普通确认（比如"合进主干"）传 {@code default}：它会动到共享的那份，但不是不可逆。
+   */
+  confirmVariant?: 'default' | 'destructive'
   /** 返回一句给人看的错误，或者 null 表示成功。成功之后要不要关，由调用方决定。 */
   onConfirm: () => Promise<string | null>
   onClose: () => void
@@ -76,7 +85,7 @@ export function ConfirmDialog({
           </Button>
           <Button
             type="button"
-            variant="destructive"
+            variant={confirmVariant}
             onClick={() => void run()}
             disabled={busy}
           >
