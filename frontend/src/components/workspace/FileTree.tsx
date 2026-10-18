@@ -292,7 +292,14 @@ export function FileTree({
   )
 }
 
-/** 缩进一格多少像素。**和下面 paddingLeft 用的是同一个数** —— 参考线要对齐它。 */
+/**
+ * 缩进一格多少像素。**和下面 paddingLeft 用的是同一个数**。
+ *
+ * <p>**不画缩进参考线。** 层级靠缩进本身表达；浅目录里那条线只是噪音，
+ * 项目根那一根尤其没有信息量（每一行都有，说的只是"这些都在项目里"）。
+ * 要加回去之前先想清楚它解决的是哪个具体问题 —— 深目录里"看不出属于谁"
+ * 才值得画线，而那不是现在这棵树的样子。
+ */
 const INDENT = 12
 /** 一行的内容从哪儿开始（也就是缩进 0 那一层的位置）。 */
 const ROW_PAD = 8
@@ -340,7 +347,7 @@ function ProjectRow({
         event.preventDefault()
         onMenu({ x: event.clientX, y: event.clientY, path: PROJECT_ROOT, directory: true })
       }}
-      className="relative flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent"
+      className="flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent"
       style={{ paddingLeft: ROW_PAD }}
     >
       <ChevronRight
@@ -522,10 +529,9 @@ function Node({
           // **文字是白的，颜色只给图标**（见 index.css 里那两条 loom-folder / loom-code）。
           // 白字 + 彩色小图标，满屏撒着一点点颜色 —— 那是 IDEA 的树好看的真正原因，
           // 而"给文字也上色"正好是它的反面：同一屏上会出现两组有颜色的字
-          className="relative flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent"
+          className="flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent"
           style={{ paddingLeft: depth * INDENT + ROW_PAD }}
         >
-          <Guides depth={depth} />
           {/* 箭头保持灰：它是"这一行能展开"的记号，不是一个标题 */}
           <ChevronRight
             className={`size-3.5 shrink-0 text-loom-faint transition-transform ${expanded ? 'rotate-90' : ''}`}
@@ -560,12 +566,11 @@ function Node({
       // 和目录同一个亮度、同一个悬停 —— 两行的区别全在图标上（形状 + 颜色）。
       // **"这一行是不是选中的"由那块填充回答**，不再靠"从暗变亮"回答第二次：
       // 一个信号只回答一个问题
-      className={`relative flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent ${
+      className={`flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent ${
         isSelected ? 'bg-selected' : ''
       }`}
       style={{ paddingLeft: depth * INDENT + ROW_PAD + 12 }}
     >
-      <Guides depth={depth} />
       {/* 代码是暖色、其余保持中性 —— 三种状态里有一种"没有颜色"，
           这样"有颜色"才是一句有用的话，而不是到处都在喊 */}
       <FileIcon
@@ -576,33 +581,7 @@ function Node({
   )
 }
 
-/**
- * 缩进参考线：**每一层祖先在这一行里留下一根竖线**。
- *
- * <h2>为什么它值得画</h2>
- * 深目录里没有它基本读不了。这个仓库自己也够深（后端那串包名叠起来就是这个量级）——
- * 那一层的每一行左边有八根一模一样的缩进，而**数缩进是数不准的**：
- * 你能看出"它比上面深"，看不出"它属于谁"。一根线就把那个问题解决了。
- *
- * <p>线画在行**内部**（绝对定位、不占布局）：每行各画自己那几根，
- * 相邻两行首尾相接，看上去就是一整条贯通的线。
- */
-function Guides({ depth }: { depth: number }) {
-  return (
-    <>
-      {Array.from({ length: depth }, (_, level) => (
-        <span
-          key={level}
-          aria-hidden
-          className="absolute inset-y-0 w-px bg-border"
-          style={{ left: level * INDENT + ROW_PAD }}
-        />
-      ))}
-    </>
-  )
-}
-
-/** 树里那些不是节点的行（读取中 / 读不到 / 空目录）。它们同样带参考线。 */
+/** 树里那些不是节点的行（读取中 / 读不到 / 空目录）。缩进和节点行用同一套。 */
 function Plain({
   depth,
   muted,
@@ -614,10 +593,9 @@ function Plain({
 }) {
   return (
     <p
-      className={`relative py-1 pr-2 text-sm ${muted ? 'text-loom-faint' : ''}`}
+      className={`py-1 pr-2 text-sm ${muted ? 'text-loom-faint' : ''}`}
       style={{ paddingLeft: depth * INDENT + ROW_PAD + 12 }}
     >
-      <Guides depth={depth} />
       {children}
     </p>
   )
