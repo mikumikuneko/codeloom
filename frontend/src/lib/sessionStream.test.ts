@@ -11,6 +11,7 @@ import {
   toolIsRunning,
   turnIsActive,
   turnStateOf,
+  usageLineVisible,
   workspaceWrites,
   type Frame,
   type StreamItem,
@@ -103,6 +104,70 @@ describe('这一轮在不在跑：看状态，不看条目的形状', () => {
 
   it('turnStateOf 取的是**最后**那条状态', () => {
     expect(turnStateOf(stream([state('THINKING'), state('EXECUTING_TOOL')]))).toBe('EXECUTING_TOOL')
+  })
+})
+
+describe('用量行只在真正跑完之后出现', () => {
+  /** 一次审批 + 挂起那一刻的用量；`after` 是批准之后续跑/收尾的那些帧 */
+  const approvedTurn = (after: Frame[] = []) =>
+    stream([
+      event('USER_MESSAGE', { text: '跑' }),
+      ask('c1'),
+      event('TOOL_APPROVAL_REQUESTED', { callId: 'c1' }),
+      event('TOOL_APPROVAL_RESOLVED', { callId: 'c1', approved: true }),
+      event('TURN_TOKENS_USED', { inputTokens: 10, outputTokens: 2 }),
+      ...after,
+    ])
+
+  it('挂起等人批：不画', () => {
+    const pending = stream([
+      event('USER_MESSAGE', { text: '跑' }),
+      ask('c1'),
+      event('TOOL_APPROVAL_REQUESTED', { callId: 'c1' }),
+      state('AWAITING_APPROVAL'),
+      event('TURN_TOKENS_USED', { inputTokens: 10, outputTokens: 2 }),
+    ])
+    expect(usageLineVisible(pending, true, false)).toBe(false)
+  })
+
+  it('批准之后、续跑还没产出：那条 WAITING_USER 不算跑完（这是这次修的那个洞）', () => {
+    expect(usageLineVisible(approvedTurn([state('WAITING_USER')]), true, false)).toBe(false)
+  })
+
+  it('续跑在想 / 在跑工具：不画', () => {
+    expect(usageLineVisible(approvedTurn([state('THINKING')]), true, false)).toBe(false)
+    expect(usageLineVisible(approvedTurn([state('EXECUTING_TOOL')]), true, false)).toBe(false)
+  })
+
+  it('续跑真的跑完（有了新正文 / 终态）：画', () => {
+    expect(
+      usageLineVisible(
+        approvedTurn([
+          state('THINKING'),
+          event('ASSISTANT_MESSAGE', { text: '好了' }),
+          state('WAITING_USER'),
+        ]),
+        true,
+        false,
+      ),
+    ).toBe(true)
+    expect(usageLineVisible(approvedTurn([state('FAILED')]), true, false)).toBe(true)
+  })
+
+  it('被停住的一轮就算状态还没落到终态也画（失败 / 打断 / 拒绝）', () => {
+    expect(usageLineVisible(stream([event('USER_MESSAGE', { text: '跑' }), state('EXECUTING_TOOL')]), true, true)).toBe(true)
+  })
+
+  it('历史轮次：老数据没有状态条目也照画；停在审批上的仍藏着', () => {
+    expect(usageLineVisible(stream([event('USER_MESSAGE', { text: '跑' })]), false, false)).toBe(true)
+    expect(usageLineVisible(stream([event('USER_MESSAGE', { text: '跑' }), state('THINKING')]), false, false)).toBe(true)
+    expect(
+      usageLineVisible(
+        stream([event('USER_MESSAGE', { text: '跑' }), state('AWAITING_APPROVAL')]),
+        false,
+        false,
+      ),
+    ).toBe(false)
   })
 })
 

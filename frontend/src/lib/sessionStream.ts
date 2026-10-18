@@ -135,6 +135,52 @@ export function turnIsActive(turn: StreamItem[]): boolean {
   return isActive(turnStateOf(turn))
 }
 
+/**
+ * 这一轮**跑完了没有** —— 用量那一行只在这时才画。
+ *
+ * <h2>为什么不能只看"等不等批准"</h2>
+ * 挂起等人批时那一轮会先结算一次（状态 `AWAITING_APPROVAL`、落一条用量），
+ * 批准之后它**接着跑**（`WAITING_USER → THINKING → EXECUTING_TOOL`）。
+ * 只判"是不是 AWAITING_APPROVAL"的话，批准后的续跑一开始就会把挂起那一刻的用量
+ * 露出来 —— 屏幕上写着"这一轮用了 4,894 tokens"，而这一轮还在干活，
+ * 等它真跑完那个数还会再变一次。人看到的是"先出现、又消失/跳一下"。
+ *
+ * <p>所以判据是**终态**：`WAITING_USER` / `FAILED`，或者这一轮已经被停住
+ * （失败、打断、拒绝留下的 `turnEnd`）。历史轮次（`live === false`）只要不是
+ * 停在审批上就算结束 —— 老数据里可能没有状态条目，不能把它们全藏掉。
+ *
+ * <p>还有一处更细的：**批准之后那一瞬间**，后端会先把状态从 `AWAITING_APPROVAL`
+ * 推到 `WAITING_USER`，然后才开始续跑。那一瞬的 `WAITING_USER` 不是"这一轮完了"，
+ * 而是"挂起那一段收完了" —— 如果把用量露出来，人就会看到它出现一下、续跑一开始
+ * 又消失。判据是这一轮**最后一条实质条目**：如果它就是那条刚被批准的审批，
+ * 说明续跑还没产出任何东西，不能画。
+ *
+ * @param turn    这一轮的条目
+ * @param live    这是不是**最后那一轮**（只有它有"还在跑"这种可能）
+ * @param stopped 这一轮是否留下了一条 `turnEnd` 通知（失败 / 打断 / 拒绝）
+ */
+export function usageLineVisible(turn: StreamItem[], live: boolean, stopped: boolean): boolean {
+  const state = turnStateOf(turn)
+  if (stopped) {
+    return true
+  }
+  if (state === 'WAITING_USER' || state === 'FAILED') {
+    // 批准之后、续跑开始之前那一下：最后一条实质条目是那条审批，说明还没有新产出
+    return !(live && state === 'WAITING_USER' && justResolvedApproval(turn))
+  }
+  // 历史轮次：没有状态条目（老数据）或者停在某个非审批状态，都算已经结束。
+  // 停在 AWAITING_APPROVAL 的旧轮次仍然藏着 —— 它确实还在等人，只是人已经走了。
+  return !live && state !== 'AWAITING_APPROVAL'
+}
+
+/** 这一轮的最后一条实质条目是不是一条**刚被批准**的调用。状态 / 用量 / 检查点不算实质。 */
+function justResolvedApproval(turn: StreamItem[]): boolean {
+  const last = turn.findLast(
+    (item) => item.kind !== 'state' && item.kind !== 'checkpoint' && item.kind !== 'usage',
+  )
+  return last?.kind === 'approval' && last.approved === true
+}
+
 /** 一轮改动的增删合计。两处都在算它（会话流那一行、回滚面板那一行），算的地方只留一个。 */
 export function changeTotals(files: ChangedFile[]): { added: number; deleted: number } {
   return {

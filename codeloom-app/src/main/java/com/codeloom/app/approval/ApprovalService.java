@@ -11,7 +11,9 @@ import com.codeloom.domain.session.Session;
 import com.codeloom.domain.session.SessionId;
 import com.codeloom.domain.session.SessionState;
 import com.codeloom.domain.user.UserId;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Optional;
 
@@ -82,8 +84,13 @@ public class ApprovalService {
 
         Optional<LeaseToken> acquired = leases.tryAcquire(session);
         if (acquired.isEmpty()) {
-            // "正在执行中"现在可能是**同一个人的另一条会话**在执行 —— 它们共用一棵树
-            throw new IllegalStateException("这条会话正在执行中，等它跑完再答复");
+            // "正在执行中"现在可能是**同一个人的另一条会话**在执行 —— 它们共用一棵树。
+            //
+            // 409 而不是 500：**挂起那一刻本身还在收尾**（写 checkpoint、用量，再放锁），
+            // 而审批卡片在 TOOL_APPROVAL_REQUESTED 到达时就画出来了 —— 手快的人可能
+            // 在那几毫秒里点下去。那不是"服务器坏了"，是"还没停稳，再点一次"。
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "这一轮还在收尾，等它停下来再答复");
         }
 
         LeaseToken token = acquired.get();

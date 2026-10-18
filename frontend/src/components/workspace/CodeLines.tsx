@@ -67,8 +67,8 @@ export function CodeLines({
       <div className="flex">
         <div
           aria-hidden
-          className="shrink-0 select-none pr-4 text-right text-loom-faint"
-          style={{ width: `calc(${gutter} + 1rem)` }}
+          className="shrink-0 select-none pr-6 text-right text-loom-faint"
+          style={{ width: `calc(${gutter} + 1.5rem)` }}
         >
           {shown.map((_, index) => (
             <div key={index}>{index + 1}</div>

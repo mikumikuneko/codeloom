@@ -13,9 +13,9 @@ import {
   groupIntoTurns,
   changeTotals,
   toolIsRunning,
-  turnStateOf,
   turnChanges,
   turnIsActive,
+  usageLineVisible,
   workspaceWrites,
   type ContextReading,
   type NoticeTone,
@@ -684,17 +684,14 @@ function Turn({
   const stopped = turn.some((one) => one.kind === 'notice' && one.turnEnd !== undefined)
 
   /**
-   * 还有一条**没答复的待批卡片**。
+   * 这一轮**真的跑完了没有** —— 用量行只在跑完之后画。
    *
-   * <p>挂起等人批**不算这一轮收场**：后端那一刻也会收尾一次（记一笔账单、状态转到
-   * AWAITING_APPROVAL），照画的话，屏幕上会冒出"这一轮用了 8,538 tokens · 用时 21 秒"，
-   * 而那一轮明明还在等人 —— 看的人会以为它结束了。
-   *
-   * <p>它和投影那边问的是**同一个事实**（这一轮的状态，见 {@code turnStateOf}）。
-   * 从前后者是去数"这一块里还有没有没答复的审批卡片" —— 同一个问题两个来源，
-   * 两边一旦不同步就会自相矛盾。
+   * <p>只判"是不是还挂着等人批"是不够的：挂起那一刻后端会先结算一次，批准之后
+   * 它**接着跑**，而那段时间里状态已经离开 AWAITING_APPROVAL 了 —— 照画的话，
+   * 续跑一开始就会冒出挂起那一刻的用量，等真跑完再变一次。判据见
+   * {@link usageLineVisible}：终态才算完成。
    */
-  const awaitingApproval = turnStateOf(turn) === 'AWAITING_APPROVAL'
+  const finished = usageLineVisible(turn, live, stopped)
 
   return (
     <LiveTurn.Provider value={live}>
@@ -719,8 +716,8 @@ function Turn({
             //   （挂起那一刻一条、答完续跑之后一条），各画各的就会在屏幕上出现
             //   两行"这一轮用了多少"、两行"改了 2 个文件" —— 而你说的"一轮"
             //   是你发的那一句话，不是后端的执行单位
-            // **挂起等人批时不画**（除非那一轮已经被停住了）—— 见 awaitingApproval
-            (at === lastUsageAt && usage !== null && (!awaitingApproval || stopped)) ? (
+            // **没跑完不画**：挂起等人批、以及批准之后的续跑，都还在这一轮里 —— 见 finished
+            (at === lastUsageAt && usage !== null && finished) ? (
               <TurnTail
                 key={at}
                 item={usage}
@@ -1861,6 +1858,9 @@ function CreatedFile({
 
   const digits = String(Math.max(lines, all.length, 1)).length
   const numberWidth = `${digits + 2}ch`
+  // 数字和正文之间留 1.5rem：数字右对齐，`pr` + 同宽的 `calc` 会把数字整体往左推，
+  // 而不是把正文挤到右边（见 CodeLines 同一处）
+  const numberBox = `calc(${numberWidth} + 1.5rem)`
 
   if (all.length === 0) {
     return <p className="text-loom-faint">（空文件）</p>
@@ -1873,8 +1873,8 @@ function CreatedFile({
         {shown.map((line, index) => (
           <div key={index} className="flex">
             <span
-              style={{ width: numberWidth }}
-              className="shrink-0 select-none text-right text-loom-faint/50"
+              style={{ width: numberBox }}
+              className="shrink-0 select-none pr-6 text-right text-loom-faint/50"
             >
               {index + 1}
             </span>
@@ -1886,7 +1886,7 @@ function CreatedFile({
         {(hidden > 0 || expanded) && (
           <div className="flex">
             {/* 按钮和代码同一列：它属于这段代码，不属于行号那一列 */}
-            <span className="shrink-0" style={{ width: numberWidth }} />
+            <span className="shrink-0" style={{ width: numberBox }} />
             <button type="button" onClick={() => setExpanded(!expanded)} className={TOGGLE}>
               {expandLabel(expanded, hidden)}
             </button>
@@ -2095,6 +2095,10 @@ export function DiffView({ rows, path, startLine }: {
     return max > 0 ? `${String(max).length + 2}ch` : null
   }, [rows, startLine])
 
+  // 数字和正文之间再留半格（和 CreatedFile / CodeLines 一致）：数字右对齐 +
+  // 同宽的 calc，数字整体往左推，正文的起点不变
+  const numberBox = numberWidth === null ? null : `calc(${numberWidth} + 0.5rem)`
+
   // 每一侧各有一个游标：碰到这一侧的行就往下走一格。
   // 它们只在这一次渲染里活，`shown` 又是 `rows` 的前缀，所以两个游标始终对得上
   let newAt = 0
@@ -2117,7 +2121,7 @@ export function DiffView({ rows, path, startLine }: {
           // 不该为了这句话往左跑回去
           return (
             <div key={index} className="flex text-loom-faint/70">
-              {numberWidth !== null && <span className="shrink-0" style={{ width: numberWidth }} />}
+              {numberBox !== null && <span className="shrink-0" style={{ width: numberBox }} />}
               <span className="w-4 shrink-0" />
               {`… ${row.hidden} 行未变`}
             </div>
@@ -2158,8 +2162,8 @@ export function DiffView({ rows, path, startLine }: {
           >
             {number !== null && (
               <span
-                style={{ width: numberWidth ?? undefined }}
-                className={`shrink-0 select-none text-right ${
+                style={{ width: numberBox ?? undefined }}
+                className={`shrink-0 select-none pr-2 text-right ${
                   added
                     ? 'text-loom-added-mark/70'
                     : removed
@@ -2208,7 +2212,7 @@ export function DiffView({ rows, path, startLine }: {
       {/* 折叠按钮**和正文同一列**：它属于这段代码，不属于左边那两列 */}
       {(hidden > 0 || expanded) && (
         <div className="flex">
-          {numberWidth !== null && <span className="shrink-0" style={{ width: numberWidth }} />}
+          {numberBox !== null && <span className="shrink-0" style={{ width: numberBox }} />}
           <span className="w-4 shrink-0" />
           <button type="button" onClick={() => setExpanded(!expanded)} className={TOGGLE}>
             {expandLabel(expanded, hidden)}

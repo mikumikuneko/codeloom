@@ -41,11 +41,11 @@ const MIN_RIGHT = 280
 /**
  * 中间那一片的下限：**刚好放下行号和一点内容**。
  *
- * <p>算出来的：代码区左右各 16px 内边距 + 行号列 40px + 它右边 16px 间距 = 88，
+ * <p>算出来的：代码区左右各 16px 内边距 + 行号列 40px + 它右边 24px 间距 = 96，
  * 留几个像素的余量。所以"拖到头"的样子确实是「只剩行号」——
  * 这个数是照着 {@code CodeLines} 的实际排版量出来的，不是估的。
  */
-const MIN_MIDDLE = 96
+const MIN_MIDDLE = 104
 
 const STORAGE_KEY = 'codeloom.panes'
 
