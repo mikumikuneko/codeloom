@@ -97,8 +97,13 @@ public class ApprovalService {
         // 这一轮是**就此停住**，还是接着跑。见下面那段注释
         boolean stopHere;
         try {
+            // 租约只挡住后来的写者，不会让请求开头那份快照变新。等锁期间另一轮
+            // （或一次换模型）可能已经改过 state/model；append 会把整行写回去，
+            // 所以先重读一次。
+            Session current = sessions.findById(sessionId).orElseThrow(
+                    () -> new IllegalStateException("会话不存在：" + sessionId));
             SessionWriter.Written written = writer.append(
-                    session, new ToolApprovalResolved(callId, approved, resolvedByUserId, reason), token);
+                    current, new ToolApprovalResolved(callId, approved, resolvedByUserId, reason), token);
 
             SessionWriter.Written latest = written;
             if (!approved) {

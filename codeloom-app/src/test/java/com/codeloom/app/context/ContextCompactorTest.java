@@ -106,7 +106,10 @@ class ContextCompactorTest {
                 new UserMessage("x".repeat(4_000)),
                 usage(200, 64_000));
 
-        assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(1_000);
+        // 4,000 个字符 + 投影追加的 64 字符平台时钟，按"四字符一 token"是 1,016。
+        // 时钟现在住在投影里（见 MessageFold 的 UserMessage 分支），估算看到的是
+        // 实际要发给模型的那段文本，不是原始正文
+        assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(1_016);
     }
 
     @Test
@@ -114,7 +117,8 @@ class ContextCompactorTest {
     void fallsBackToTheEstimateBeforeAnyReadingExists() {
         List<StoredEvent> history = withEvents(new UserMessage("x".repeat(400)));
 
-        assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(100);
+        // 同上：400 字符正文 + 64 字符时钟 = 464，按四字符一 token 是 116
+        assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(116);
     }
 
     @Test

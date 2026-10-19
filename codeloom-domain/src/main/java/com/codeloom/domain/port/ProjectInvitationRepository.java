@@ -23,6 +23,18 @@ public interface ProjectInvitationRepository {
     Optional<ProjectInvitation> findByToken(String token);
 
     /**
+     * 加锁读一张邀请，给"读到之后要改它"的调用方用。
+     *
+     * <p>普通的 {@link #findByToken} 在 REPEATABLE READ 下读到的是事务开始时的快照；
+     * 即使之后拿到了项目锁，再用普通查询重读，看到的仍然是旧值。这里读最新已提交版本，
+     * 并把这一行锁到事务结束。
+     *
+     * <p><strong>调用方必须已经在事务里，并且先拿项目锁</strong>：本表的写者都按
+     * 「项目 → 邀请」的顺序加锁，反过来会和 {@code issue} 撞出死锁。
+     */
+    Optional<ProjectInvitation> findByTokenForUpdate(String token);
+
+    /**
      * 这个项目下的**邀请行**：还在外面飘的、以及已经作废的，都在里面。
      *
      * <p>它回答的是**数据**问题："这个项目产生过哪些邀请"。至于其中哪些该出现在界面上，

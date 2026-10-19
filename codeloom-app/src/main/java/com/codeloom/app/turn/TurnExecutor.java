@@ -262,14 +262,25 @@ public class TurnExecutor {
         LeaseWatchdog watchdog = LeaseWatchdog.start(leases, token, cancellation);
 
         // 用它跟踪"当前会话"。回调改不了外部局部变量，而 catch 里需要**最新**的那个 ——
-        // 拿旧状态去写 FAILED 会把审计流里的迁移记错
-        AtomicReference<Session> current = new AtomicReference<>(session);
+        // 拿旧状态去写 FAILED 会把审计流里的迁移记错。
+        //
+        // **租约只挡住后来的写者，不会让请求开头读到的快照变新。** 等锁期间可能已经
+        // 有另一轮跑完、把 turn_index 推进了；拿旧快照去 advance/settle 会把那个号写回去。
+        // 所以拿到锁之后第一件事是重读会话，后面所有迁移都从这份当前状态出发。
+        AtomicReference<Session> current = new AtomicReference<>();
         // 声明在 try 外面：失败那条路也要用它去提交这一轮已经落到磁盘上的改动
         // （见 fail 里的 commitQuietly）。**它可能一直是 null** —— 连工作区都没建起来时
         Workspace workspace = null;
         try {
-            Project project = requireProject(session.projectId());
-            workspace = turnWorkspace.ensure(session, project);
+            current.set(requireSession(sessionId));
+            // 等锁期间那一轮可能停在"等人批"了。那句话还是该排队，不能拿
+            // AWAITING_APPROVAL 去走 advance(THINKING) —— 那会撞状态机。
+            if (current.get().state() == SessionState.AWAITING_APPROVAL
+                    && newUserMessage.isPresent()) {
+                return new Attempt(queue(sessionId, newUserMessage.get()), false);
+            }
+            Project project = requireProject(current.get().projectId());
+            workspace = turnWorkspace.ensure(current.get(), project);
 
             // FAILED 只能先回 IDLE 再进 THINKING（状态机的约束），所以重试是两步
             apply(current, writer.retryFromFailed(current.get(), token));
@@ -451,7 +462,7 @@ public class TurnExecutor {
      *
      * <h2>三条边界</h2>
      * <ul>
-     *   <li><b>只报新建</b>（见 {@link FileChange#created}）：新建一个文件几乎总意味着
+     *   <li><b>只报新建</b>（见 {@link FileChange#created()}）：新建一个文件几乎总意味着
      *       "我要做一块新东西"，而改一个已有文件可能只是修个 typo。全报的话，
      *       对方连收十轮就把它当背景噪声了</li>
      *   <li><b>只提醒，不拦</b>：该不该重复做是**人**的判断。平台替两个人决定

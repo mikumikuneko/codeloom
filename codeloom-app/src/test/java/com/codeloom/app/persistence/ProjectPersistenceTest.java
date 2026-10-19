@@ -35,6 +35,18 @@ class ProjectPersistenceTest extends AbstractPersistenceTest {
     }
 
     @Test
+    @DisplayName("lockAndFind 的锁定读能同时装配项目行和成员行")
+    void lockAndFindReadsTheWholeAggregate() {
+        Project project = newProject("codeloom 锁读", ALICE, BOB);
+        projects.save(project);
+
+        // 项目行和成员行是两条锁定读，只有真库能验证后者没有把成员读丢
+        //（Project 的紧凑构造器会在成员为空时直接抛）
+        assertThat(projects.lockAndFind(project.id())).contains(project);
+        assertThat(projects.lockAndFind(ProjectId.generate())).isEmpty();
+    }
+
+    @Test
     @DisplayName("成员被移除后旧成员真的从表里没了（全删再全插那一步）")
     void savingAgainDropsRemovedMembers() {
         Project project = newProject("codeloom 退人", ALICE, BOB);

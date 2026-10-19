@@ -287,8 +287,10 @@ class TurnExecutorTest {
         assertThat(seen).anySatisfy(m -> assertThat(m.content()).contains("这就是摘要"));
         // 原文一个字都不该再送出去
         assertThat(seen).noneSatisfy(m -> assertThat(m.content()).contains("啰嗦"));
-        // 而用户**这一轮**说的话必须还在 —— 压缩赶在它落库之前，就是为了这个
-        assertThat(seen).anySatisfy(m -> assertThat(m.content()).isEqualTo("现在做点新的"));
+        // 而用户**这一轮**说的话必须还在 —— 压缩赶在它落库之前，就是为了这个。
+        // 用 contains 而不是 isEqualTo：投影会在用户消息后面追加平台时钟
+        //（见 MessageFold 的 UserMessage 分支），这条断言只关心原话还在不在
+        assertThat(seen).anySatisfy(m -> assertThat(m.content()).contains("现在做点新的"));
     }
 
     @Test

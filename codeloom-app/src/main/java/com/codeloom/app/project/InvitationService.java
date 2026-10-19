@@ -72,8 +72,10 @@ public class InvitationService {
      */
     @Transactional
     public ProjectInvitation issue(Project project, UserId by) {
-        Instant now = Instant.now();
         projects.lock(project.id());
+        // 时间在拿到锁之后再取：等锁的那段可能跨过一次合并，用旧时刻生成的
+        // 过期时间会比"现在"少一截 —— 虽然是毫秒级，但没有理由留这个缝
+        Instant now = Instant.now();
         for (ProjectInvitation existing : invitations.findByProject(project.id())) {
             if (existing.isUsableAt(now)) {
                 invitations.save(existing.revokedAt(now));
@@ -103,17 +105,36 @@ public class InvitationService {
                 .toList();
     }
 
-    /** 撤销一张还没被接受的邀请。 */
+    /**
+     * 撤销一张还没被接受的邀请。
+     *
+     * <h2>先锁项目，再锁着读邀请</h2>
+     * 第一次 {@code findByToken} 只用来拿项目 id —— 它读到的是事务快照，不能拿来判断
+     * 状态。拿到项目锁之后，用 {@link ProjectInvitationRepository#findByTokenForUpdate}
+     * 读最新版本；否则 {@code issue} 刚作废的那张、或 {@code accept} 刚兑现的那张，
+     * 会被这次撤销拿着旧状态覆盖掉。
+     */
     @Transactional
     public void revoke(Project project, String token) {
-        ProjectInvitation invitation = invitations.findByToken(token)
+        ProjectInvitation located = invitations.findByToken(token)
                 // **不区分"不存在"和"不是这个项目的"**：发这条请求的人已经是这个项目的成员，
                 // 他能看到的凭据清单里本来就没有别的项目的东西。分开报错只会多一个能试的接口
                 .filter(found -> found.projectId().equals(project.id()))
                 .orElseThrow(notFound());
+
+        projects.lock(located.projectId());
+        ProjectInvitation invitation = invitations.findByTokenForUpdate(token)
+                .filter(found -> found.projectId().equals(project.id()))
+                .orElseThrow(notFound());
+
         if (invitation.revokedAt() != null) {
             // 撤销是幂等的：再点一次不该报错，那本来就是这个动作该有的样子
             return;
+        }
+        if (invitation.acceptedBy() != null) {
+            // 和领域方法里的判断同一句话：接受之后再撤销，那个人已经是成员了
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "这张邀请已经被接受了，撤销它没有意义");
         }
         invitations.save(invitation.revokedAt(Instant.now()));
     }
@@ -150,8 +171,18 @@ public class InvitationService {
      */
     @Transactional
     public Project accept(String token, User invitee) {
+        // 第一次查只用来拿项目 id。它读到的是事务快照，**不能拿来判断** ——
+        // 真正的状态在拿到项目锁之后用锁定读再取一次。
+        ProjectInvitation located = invitations.findByToken(token).orElseThrow(notFound());
+
+        // 先锁项目，再锁着读邀请和项目成员：
+        // - 普通 findById 会用第一次查询建立的快照，锁拿到了、读到的还是旧成员；
+        // - 旧成员集合会让"加一个人"的 save 把别人刚加进来的人删掉。
+        Project project = projects.lockAndFind(located.projectId()).orElseThrow(() ->
+                new IllegalStateException("邀请指向的项目不存在：" + located.projectId()));
+        ProjectInvitation invitation = invitations.findByTokenForUpdate(token).orElseThrow(notFound());
+
         Instant now = Instant.now();
-        ProjectInvitation invitation = invitations.findByToken(token).orElseThrow(notFound());
         // 判据和理由是**同一个**（`unusableReasonAt`），不存在"判了却说不清为什么"这种缝。
         // 三种作废原因分开说：合成一句"这张邀请已经不能用了"的话，人的第一反应是"为什么"，
         // 而那个答案本来就在手里
@@ -159,11 +190,6 @@ public class InvitationService {
         if (unusable.isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, unusable.get());
         }
-
-        // 先锁再读：锁的是"这个项目现在有几个成员"这件事，而它必须和下面的写入在同一个事务里
-        projects.lock(invitation.projectId());
-        Project project = projects.findById(invitation.projectId()).orElseThrow(() ->
-                new IllegalStateException("邀请指向的项目不存在：" + invitation.projectId()));
 
         if (project.hasMember(invitee.id())) {
             provisioner.ensure(invitee.id(), project);

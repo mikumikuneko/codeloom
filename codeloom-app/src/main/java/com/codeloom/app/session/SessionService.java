@@ -205,8 +205,10 @@ public class SessionService {
                 HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完再回滚"));
         try {
             workspaces.resetTo(workspace, checkpoint.commitSha());
-            return writer.rewind(session, checkpoint.commitSha(), checkpoint.turnIndex(),
-                    target.seq(), byUserId, token).session();
+            // 同 switchModel：请求开头那份会话可能已经过期（比如等锁期间跑完了一轮）。
+            // 回滚只该改 turn_index 和位置，不该把旧的 state/model 一起写回去。
+            return writer.rewind(requireSession(session.id()), checkpoint.commitSha(),
+                    checkpoint.turnIndex(), target.seq(), byUserId, token).session();
         } finally {
             leases.release(token);
         }
@@ -235,7 +237,10 @@ public class SessionService {
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new ResponseStatusException(
                 HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完再换模型"));
         try {
-            return writer.changeModel(session, next, token).session();
+            // 控制器送来的是请求开始时的快照；等锁期间另一轮可能已经推进了
+            // state/turn_index。{@code withModel} 会把这些字段一起写回去，所以必须
+            // 从锁之后的新状态出发，否则一次换模型会把已完成的一轮"退回去"。
+            return writer.changeModel(requireSession(session.id()), next, token).session();
         } finally {
             leases.release(token);
         }
@@ -326,6 +331,15 @@ public class SessionService {
         // 和别处查库的入口**共用 WorkspaceRepository.require** 的判据与那句话：
         // "找不到"永远是 500，且理由只有一个 —— 建会话时写好的那一行被删过
         return stored.require(session.workspaceId());
+    }
+
+    /**
+     * 拿锁之后重新读会话 —— 租约只保证"接下来没有第二个写者"，
+     * 不保证调用方手里那份请求开始时的快照还是新的。
+     */
+    private Session requireSession(SessionId id) {
+        return sessions.findById(id).orElseThrow(() ->
+                new IllegalStateException("会话不存在：" + id));
     }
 
     private static Workspace treeOf(Map<WorkspaceId, Workspace> trees, Session session) {

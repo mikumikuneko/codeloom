@@ -93,6 +93,26 @@ public class MyBatisProjectRepository implements ProjectRepository {
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * <p>项目行和成员行都用锁定读，而不是先 {@code lock} 再 {@link #findById}：
+     * 后者的普通查询会用事务开始时的快照，锁拿到了、读到的却还是旧成员。
+     */
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public Optional<Project> lockAndFind(ProjectId id) {
+        ProjectRow row = mapper.findByIdForUpdate(id.value());
+        if (row == null) {
+            return Optional.empty();
+        }
+        Set<UserId> members = new LinkedHashSet<>();
+        for (ProjectMemberRow member : mapper.findMembersForUpdate(id.value())) {
+            members.add(UserId.of(member.userId()));
+        }
+        return Optional.of(row.toDomain(members));
+    }
+
+    /**
      * 项目行 + 成员 → 聚合。三个读方法共用。
      *
      * <p>成员缺失时传空集，让 {@code Project} 的紧凑构造器抛「项目至少要有一名成员」。

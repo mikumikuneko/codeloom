@@ -39,6 +39,13 @@ public interface ProjectMapper {
     ProjectRow findById(@Param("id") String id);
 
     /**
+     * 加锁读出项目行。和 {@link #findById} 的区别是它读**最新已提交版本**，
+     * 并把行锁到事务结束 —— 普通查询在一个先读过别的东西的事务里会一直看旧快照。
+     */
+    @Select("SELECT " + ProjectRow.COLUMNS + " FROM project WHERE id = #{id} FOR UPDATE")
+    ProjectRow findByIdForUpdate(@Param("id") String id);
+
+    /**
      * 某人参与的项目，分页。JOIN 而不是先查 id 再 IN，省一次往返，也天然去重。
      *
      * <p>{@code ORDER BY} 必须稳定，否则 {@code OFFSET} 翻页会漏条或重复 ——
@@ -69,6 +76,18 @@ public interface ProjectMapper {
             </script>
             """)
     List<ProjectMemberRow> findMembers(@Param("projectIds") Collection<String> projectIds);
+
+    /**
+     * 加锁读出一个项目的成员行。和 {@link #findMembers} 的分工同
+     * {@link #findByIdForUpdate}：给"读到之后要基于成员集合做决定"的调用方用。
+     */
+    @Select("""
+            SELECT project_id AS projectId, user_id AS userId
+              FROM project_member
+             WHERE project_id = #{projectId}
+             FOR UPDATE
+            """)
+    List<ProjectMemberRow> findMembersForUpdate(@Param("projectId") String projectId);
 
     /**
      * 加锁读出项目行，给"改动共享主干"的操作（合并）做互斥用。

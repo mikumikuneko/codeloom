@@ -75,6 +75,11 @@ public class ProjectDeparture {
     public boolean leave(Project project, UserId leaver) {
         ProjectId projectId = project.id();
 
+        // 参数里的 project 是请求进来时读到的快照，可能已经过期（比如对方也点了退出）。
+        // 先锁项目，再用锁定读拿**当前**成员；两个人都退出时，后到的那个必须看到
+        // 先到的已经走了，否则会把对方重新写回成员表。
+        Project current = projects.lockAndFind(projectId).orElse(null);
+
         // ★ 顺序不能动：这两条靠 session 表定位，必须在会话行被删之前跑
         events.byProjectAndOwner(projectId, leaver);
         requests.discardByProjectAndOwner(projectId, leaver);
@@ -82,9 +87,15 @@ public class ProjectDeparture {
 
         workspaces.delete(WorkspaceId.of(leaver, projectId));
 
-        if (!project.isLastMember(leaver)) {
+        if (current == null || !current.hasMember(leaver)) {
+            // 项目已经没了（上一次退出删掉了），或者这个人已经走了。
+            // 个人数据已经清过；返回 true 让调用方继续清仓库目录，重复删除是幂等的。
+            return current == null;
+        }
+
+        if (!current.isLastMember(leaver)) {
             // 还有人：只是少一个成员。房主走了的话，新房主在领域方法里定下来
-            projects.save(project.withMemberRemoved(leaver));
+            projects.save(current.withMemberRemoved(leaver));
             return false;
         }
 
