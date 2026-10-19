@@ -29,7 +29,7 @@ public class ProjectDiff {
      * 正文的字符上限。
      *
      * <p>一次格式化能改几千行，而**人看的那一份**不需要全部。截断了会如实标记
-     * （见 {@link FileDiff#truncated}），界面据此说"没显示全" ——
+     * （见 {@link FileDiff#truncated()}），界面据此说"没显示全" ——
      * 那比"打不开"有用，也比假装这就是全部诚实。
      */
     private static final int MAX_CHARS = 200_000;

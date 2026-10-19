@@ -83,8 +83,8 @@ public class TurnWorkspace {
      * 工作区没有改动时提交返回的是**当前 HEAD**、不报错 —— 一个只说话不动手的轮次也该有个
      * 位置可回。于是"没动过手"和"真的产出了代码"交出来的 sha **一模一样**，而下游有地方要按
      * "这一轮做了什么"来算：拿同一个 sha 去算 {@code <sha>^!}，算出来的是**上一个提交**的改动，
-     * 同一个文件会被每一轮反复报一遍。前后两个 sha 一起交出去，那个问题由 {@link Commit#created}
-     * 回答，调用方不必自己从 sha 相同去猜。
+     * 同一个文件会被每一轮反复报一遍。前后两个 sha 一起交出去，那个问题由
+     * {@link Commit#created()} 回答，调用方不必自己从 sha 相同去猜。
      *
      * <p>{@code before} 走 {@link WorkspaceManager#find} **现读**，不用传进来的那个
      * {@code workspace}：{@link Workspace} 有两副面孔（见它的类注释），库里那份在事务提交之前

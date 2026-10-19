@@ -579,7 +579,7 @@ public final class GitClient {
      *
      * <p>**允许截断**，所以不走 {@link #runWhole}（那条路把截断当失败）。
      * 这里的正文是给人看的：少一截仍然有用，而一份被截断的 diff 会由
-     * {@link FileDiff#truncated} 如实说出来。
+     * {@link FileDiff#truncated()} 如实说出来。
      */
     public FileDiff diffOfFile(Path directory, String commitSha, String gitPath, int maxChars) {
         List<String> command = buildCommand(directory, null, List.of(

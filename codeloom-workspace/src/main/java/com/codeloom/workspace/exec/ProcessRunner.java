@@ -314,7 +314,7 @@ public final class ProcessRunner {
      * <p>注意进程被杀时流会异常关闭，那是**预期路径**，不当错误处理。
      *
      * <p>{@code static} 且包级可见是为了能拿一段**构造好的**字节流去断言它，
-     * 见 {@link ProcessRunnerTest} —— 同 {@link #decode(byte[], Charset)}。
+     * 见 {@code ProcessRunnerTest} —— 同 {@link #decode(byte[], Charset)}。
      */
     static Captured capture(InputStream in, int limit, Charset fallback) {
         if (limit <= 0) {

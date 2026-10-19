@@ -23,7 +23,7 @@ import java.util.stream.Collectors;
  * 走的仍然是同一条链路 —— 只是"地址从哪儿来"多一个分支。
  *
  * <h2>为什么请求地址不发给前端</h2>
- * {@code GET /api/providers} 只回 id、显示名和官网。{@link Preset#officialUrl} 是给人点过去的
+ * {@code GET /api/providers} 只回 id、显示名和官网。{@link Preset#officialUrl()} 是给人点过去的
  * 那个网址，**不是**我们发请求的地址；请求地址留在服务端。前端拿到它没有用处（请求不由它发），
  * 而露出来只会让人以为那是可以改的。
  */
