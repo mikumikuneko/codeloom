@@ -28,12 +28,10 @@ import java.util.zip.ZipInputStream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 下载项目（zip），真 HTTP。
+ * 项目下载（zip）的端到端测试。
  *
- * <h2>为什么它值得一个测试</h2>
- * 这条路上有两件会**悄悄**坏掉的事：导的是哪个提交（主干，不是某个人的半成品），
- * 以及谁能下（只有成员）。"点一下下载"看起来太简单，简单到不会有人去想这两件 ——
- * 所以它们要有名字。
+ * <p>这条路上有两件会悄悄坏掉的事：导出的是哪个提交（主干，而不是某个人的半成品），
+ * 以及谁能下载（只有成员）。"点一下下载"看起来太简单，这两条需要各自的用例。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -91,14 +89,14 @@ class ProjectArchiveApiTest {
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.headers().firstValue("content-type").orElse("")).contains("zip");
-        // 下载而不是"在页面上打开它"：靠的就是这个头
+        // 是下载而不是在页面上打开，靠的正是这个响应头
         assertThat(response.headers().firstValue("content-disposition").orElse(""))
                 .contains("attachment").contains(".zip");
 
         List<String> entries = zipEntries(response.body());
-        // 建项目时种下的那个 README 在**基点提交**里 —— 它在包里，说明导的是主干那个提交的内容
+        // 建档时种下的 README 在基点提交里；它出现在包中，说明导出的是主干提交的内容
         assertThat(entries).contains("README.md");
-        // 而它不该带仓库里那一层目录名：下载一个项目，不该多出一级 untitled/
+        // 包里不应带仓库里那一层目录名：下载项目不该多出 untitled/
         assertThat(entries).noneMatch(name -> name.startsWith("untitled/"));
     }
 
@@ -115,7 +113,7 @@ class ProjectArchiveApiTest {
 
     // ------------------------------------------------------------------
 
-    /** 读 zip 的条目名。只读条目名就够 —— 它的内容由 git 保证，这里要钉的是"包里是什么形状"。 */
+    /** 读 zip 条目名；内容由 git 保证，这里要钉的是包的形状。 */
     private static List<String> zipEntries(InputStream body) throws Exception {
         List<String> names = new ArrayList<>();
         try (ZipInputStream zip = new ZipInputStream(body)) {

@@ -35,31 +35,19 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 「追加一条事件」与「推进它背后的那些行」的**唯一实现点**，两件事在同一个事务里。
+ * 追加事件并推进背后数据行的唯一实现点，两件事在同一事务里。
  *
- * <p><b>落库之后的宣布也从这里走</b>（见 {@link Written}）：全项目只有这一个类往事件流里写，
- * 所以"谁落库、谁负责让它被看到"这条义务有一个落点，而不是散在调用方的自觉里 ——
- * 从前散着的时候，回滚、换模型、两条同步一次都没发过，而且不报错。
+ * <p>落库后的宣布也从这里走（见 {@link Written}）：全项目只有这个类写事件流，
+ * "谁落库谁负责让它被看到"因此有唯一落点；此前散在调用方，回滚、换模型和两条同步都漏过，
+ * 且不报错。
  *
- * <p>"背后的那些行"是两类，分得很清楚：
- * <ul>
- *   <li>**会话行** —— {@code state}、{@code turn_index}、模型配置。它们是会话的属性。
- *   <li>**工作区行** —— {@code head_commit}。它是**树的**属性，因为 HEAD 属于那棵树。
- *       同一个人的两条会话会写同一行，这正是"换会话不换代码"的落点。
- * </ul>
+ * <p>背后的行分两类：会话行（{@code state}、{@code turn_index}、模型配置）是会话的属性；
+ * 工作区行的 {@code head_commit} 是树的属性，同一人的两条会话写同一行，
+ * 这是"换会话不换代码"的落点。
  *
- * <h2>为什么它必须是一个独立的 bean</h2>
- * 因为 Spring 的 {@code @Transactional} 只在**跨 bean 调用**时生效 —— 执行器在自己内部
- * 调自己的方法是拿不到代理的，事务不会开。而这两件事必须绑定：
- * {@code Session} 的类注释里写着「每追加一条 {@code SessionStateChanged}，
- * 都要在同一次事务里保存这个聚合，否则两者会对不上」。把事务边界放在一个独立 bean 上，
- * 是让那条约束有一个**能指着看**的落点，而不是散落在调用方的自觉里。
- *
- * <h2>为什么执行器自己不开一整轮的事务</h2>
- * 一整轮放进一个事务，意味着这些行的排它锁被持有到整轮结束。而租约可能在那期间到期、
- * 别的实例正要接管 —— 它会被这把我们自己都不再持有的锁堵住，
- * 最后以锁超时收场，而真实原因（"那条会话的执行者卡住了"）反而看不出来。
- * 所以这里的每次调用都是**一小段**事务，一次一条事件。
+ * <p>必须是独立 bean：{@code @Transactional} 只在跨 bean 调用时生效，而事件与行必须绑定。
+ * 执行器也不开整轮事务：那会把行锁持有到整轮结束，租约到期、别的实例接管时会被一把已不属于
+ * 自己的锁堵住，以锁超时收场并掩盖真实原因。因此每次调用是一小段事务，一次一条事件。
  */
 @Component
 public class SessionWriter {
@@ -67,11 +55,8 @@ public class SessionWriter {
     private static final Logger log = LoggerFactory.getLogger(SessionWriter.class);
 
     /**
-     * 一条 {@code WorkspaceChanges} 里最多记几个文件。
-     *
-     * <p>它保的是**这条事件别把事件流撑得过大**：
-     * 一次格式化把整个仓库改一遍是完全可能的，而那条事件的正文会跟着流进每一个读它的地方。
-     * 超了就只记前一批，并把 {@code truncated} 记成 true —— 界面如实说"没记全"。
+     * 一条 {@code WorkspaceChanges} 最多记录的文件数，防止事件被撑得过大：一次格式化可能改动
+     * 整个仓库，而事件正文会流经每个读取方。超出时只记前一批，{@code truncated} 为 true。
      */
     private static final int MAX_RECORDED_FILES = 500;
 
@@ -91,20 +76,15 @@ public class SessionWriter {
     }
 
     /**
-     * 一次写入的产物：推进后的会话，以及**这次真正落库的事件**。
+     * 一次写入的产物：推进后的会话，以及这次真正落库的事件。
      *
-     * <h2>构造它就是宣布它 —— 所以这个构造函数是私有的</h2>
-     * "落库的那几条事件必须送到正在看的人那里"这条义务挂在**构造**上
-     * （交给 {@link EventAnnouncer}，由它等到事务提交）：谁能新建一个 {@code Written}，
-     * 谁就已经把它交了出去。于是这个类里**没有"忘了推"这个状态** ——
-     * 想返回一次写入的结果，就绕不过构造函数。
+     * <p>构造即宣布：构造函数把事件交给 {@link EventAnnouncer}（由它等到事务提交）。
+     * 谁新建 {@code Written}，谁就已经完成了宣布，因此本类不存在"忘了推"的状态。
+     * 用内部类而非 record，是为了私有构造函数能够到外层的 {@code announcer}。
      *
-     * <p>它是个内部类而不是 {@code record}，唯一的原因就是这个：私有构造函数得够得着
-     * 外层那个 {@code announcer}。
-     *
-     * <p>{@link #events()} 于是**不再是一条义务**，只是"这次写了哪些"这个事实本身 ——
-     * 有人要拿它的 seq 当投影坐标（见 {@code TurnExecutor.applyOne}），
-     * 有人要从里面找这一轮新建的文件（见 {@code TurnExecutor.createdIn}）。
+     * <p>{@link #events()} 只是"这次写了哪些"这个事实：调用方拿 seq 当投影坐标
+     * （见 {@code TurnExecutor.applyOne}），或从中找本轮新建的文件
+     * （见 {@code TurnExecutor.createdIn}）。
      */
     public final class Written {
 
@@ -117,28 +97,30 @@ public class SessionWriter {
             announcer.announce(this.events);
         }
 
+        /** @return 推进后的会话 */
         public Session session() {
             return session;
         }
 
-        /** 这次真正落库的事件，按落库顺序。 */
+        /** @return 这次真正落库的事件，按落库顺序 */
         public List<StoredEvent> events() {
             return events;
         }
     }
 
     /**
-     * 一条会话的开头：{@code SessionStarted} 和第 0 个 checkpoint，一次落下来。
+     * 一条会话的开头：{@code SessionStarted} 和第 0 个 checkpoint 一次写入。
      *
-     * <p>两件事必须同一次写入 —— 它们是同一句话的"这棵树上来了条新会话"和"从哪儿开始数"。
+     * <p>两件事必须同时：它们是"这棵树上来了新会话"和"从哪儿开始数"。
+     * 第 0 个 checkpoint 不能省：checkpoint 只在每轮结束才打，没有它就无法撤销第一轮的
+     * 全部改动，而那是回滚最常用的场景。它记录这棵树当时的位置：同一人的第二条会话，
+     * 第 0 个点落在第一条会话结束处，所以撤销这条会话会退到它开始说话之前，
+     * 换会话不会退回代码。
      *
-     * <p><b>第 0 个 checkpoint 为什么不能省</b>：**每轮结束才打下一个 checkpoint**，
-     * 没有它的话"撤销第一轮的全部改动"就没有可回的点，而那是回滚最常用的那一次。
-     * 它记的是这棵树**当时**的位置：同一个人的第二条会话，第 0 个点落在第一条会话干完之后
-     * 的地方，所以"撤销这一条会话的全部改动"退到的正是"它开始说话之前" ——
-     * 换会话本来就不该把代码退回去。
+     * <p>这两条事件都不映射状态迁移，因此不改变会话状态。
      *
-     * <p>它不碰会话状态：这两条事件在 {@code TurnStates} 里都不映射迁移。
+     * @param workspace 会话所在的工作区
+     * @return 写入结果
      */
     @Transactional
     public Written startSession(Session session, Workspace workspace, LeaseToken token) {
@@ -153,10 +135,13 @@ public class SessionWriter {
     }
 
     /**
-     * 追加一条事件；如果它引起状态变化，同事务把会话聚合一起推进。
+     * 追加一条事件；如果它引起状态变化，在同一事务里推进会话聚合。
      *
-     * <p>顺序是「先记事实，再改状态」：{@code SessionStateChanged} 排在触发它的那条事件后面，
-     * 回放时读起来就是「发生了什么 → 于是状态变成什么」。
+     * <p>先记事实再改状态：{@code SessionStateChanged} 排在触发事件之后，回放时是
+     * "发生了什么，于是状态变成什么"。
+     *
+     * @param event 要落库的事件
+     * @return 写入结果
      */
     @Transactional
     public Written append(Session session, PersistentEvent event, LeaseToken token) {
@@ -175,11 +160,13 @@ public class SessionWriter {
     }
 
     /**
-     * 把一个不是由某条业务事件触发的状态迁移落下来：一轮开始进 {@code THINKING}、
-     * 一轮结束进 {@code WAITING_USER} 或 {@code FAILED}。
+     * 落下一个不由业务事件触发的状态迁移：一轮开始进 {@code THINKING}，结束进
+     * {@code WAITING_USER} 或 {@code FAILED}。
      *
-     * @param reason 人类可读的原因，用于排障。落进 {@code SessionStateChanged}，
-     *               于是「这轮为什么停」在审计流里看得见，而不是只能猜
+     * @param next   目标状态；与当前相同时不写事件
+     * @param reason 人类可读的原因，落进 {@code SessionStateChanged}，让"这轮为什么停"
+     *               在审计流里可见
+     * @return 写入结果
      */
     @Transactional
     public Written advance(Session session, SessionState next, String reason, LeaseToken token) {
@@ -192,29 +179,19 @@ public class SessionWriter {
     }
 
     /**
-     * 一轮收尾：记下这一轮的产出位置、这一轮花了多少、状态回到 {@code finalState}、轮次号推进一格。
+     * 一轮收尾：记录产出位置、用量，把状态切到 {@code finalState}，并按规则推进轮次号。
      *
-     * <h2>这几件事必须在一个事务里</h2>
-     * <ul>
-     *   <li><b>checkpoint</b>：{@code commitSha} 是这一轮改完之后工作区的位置，
-     *       它同时是"回滚到下一轮开始前"的那个目标
-     *   <li><b>用量</b>：这一轮的账单。它和"这一轮结束"是同一件事的两面 ——
-     *       分两次写就会出现"跑完了却没记账"，而那种缺口事后补不回来
-     *   <li><b>工作区的 head_commit</b>：那棵树上那个指针要跟着走，否则界面上显示的
-     *       "当前代码在哪个 commit"是旧的
-     *   <li><b>轮次号</b>：它存在的理由就是让 checkpoint 与对话能互相对上，所以
-     *       checkpoint 记下的那个数**必须**是这里算出来的那个（见下）
-     * </ul>
-     * 分开写的话，中间任何一步失败都会留下"checkpoint 记了但轮次号没推"这种状态 ——
-     * 而那个错不会报异常，只会让对齐关系悄悄错位。
+     * <p>这几件事必须在同一事务里：checkpoint 记录的是本轮结束后工作区的位置，也是下一次
+     * 回滚的目标；用量和"这一轮结束"是同一件事的两面，分两次写会留下永远补不回来的缺口；
+     * 工作区的 {@code head_commit} 必须跟着走，否则界面显示的代码位置是旧的；checkpoint
+     * 记录的轮次号必须与这里算出的一致，否则 checkpoint 与对话会悄悄错位而不报异常。
      *
-     * @param commit     这一轮的产出位置，以及它是不是这一轮新造出来的（见
-     *                   {@link TurnWorkspace.Commit}）；**可空** —— 提交失败、或者调用方
-     *                   手上根本没有工作区时没有可回的点，那两种情况下只收尾、不打 checkpoint
-     * @param finalState 这一轮停在哪：正常结束是 {@code WAITING_USER}，
-     *                   挂着等人批是 {@code AWAITING_APPROVAL}。**轮次号推不推由它决定**
-     *                   ——见 {@link #completes}
-     * @param reason     这一轮为什么停下来，落进 {@code SessionStateChanged}，审计时看得见
+     * @param commit     本轮产出位置及是否新造出提交（见 {@link TurnWorkspace.Commit}）；
+     *                   可为 null：提交失败或根本没有工作区时没有可回的点，只收尾、不打 checkpoint
+     * @param finalState 停在 {@code WAITING_USER}，或挂着等人批的 {@code AWAITING_APPROVAL}；
+     *                   轮次号是否推进由它决定（见 {@link #completes}）
+     * @param reason     停止原因，落进 {@code SessionStateChanged}
+     * @return 写入结果
      */
     @Transactional
     public Written finishTurn(Session session, TurnWorkspace.Commit commit, String reason,
@@ -224,33 +201,22 @@ public class SessionWriter {
     }
 
     /**
-     * 一轮**没能正常收尾**时的结算。三种情况走这里：
+     * 一轮未能正常收尾时的结算。三种情况：模型调用失败（{@code FAILED}）；用户停止
+     * （回 {@code WAITING_USER}，原因写 {@code CANCELLED}）；用户拒绝挂起的调用且没有留下
+     * 指示，该轮就此停住（见 {@code ApprovalService}）。
      *
-     * <ul>
-     *   <li>模型调用炸了（{@code FAILED}）
-     *   <li>用户按了停止（回 {@code WAITING_USER}，原因写 {@code CANCELLED}）
-     *   <li>用户**拒绝**了一次挂起的调用、而且没留下指示 —— 那一轮就此停住
-     *       （见 {@code ApprovalService}：Claude Code 在这一支上直接中止整个回合）
-     * </ul>
+     * <p>与 {@link #finishTurn} 的唯一区别是没有用量：这一轮没有 {@code TurnOutcome}，
+     * 记 0 是假账。
      *
-     * <p>和 {@link #finishTurn} 的唯一区别是**没有账单** —— 那一轮没有 {@code TurnOutcome}，
-     * 用量无从得知，而记一笔 0 是假账。
+     * <p>{@code commit} 不为 null 时仍要打 checkpoint："能不能回退"与这一轮结果无关。
+     * 不打的话，打断后 agent 写出的文件是未跟踪的，而 {@code reset --hard} 不碰未跟踪
+     * 文件，回滚会以为什么都没发生；给这一轮一个位置，半成品也可回退。{@code commit}
+     * 为 null（提交失败或没有工作区）时没有可回的点，只收尾、不打 checkpoint。轮次号
+     * 按同一规则处理（见 {@link #completes}）：失败或被用户叫停都意味着这次交互结束，
+     * 下一句该是新的一轮。
      *
-     * <h2>为什么它也要打 checkpoint</h2>
-     * 因为"能不能回退"跟这一轮最后跑成什么样**无关**：位置是在一轮**开始时**就落下的，
-     * 于是那一轮被打断、或者炸了，代码照样退得回去。
-     *
-     * <p>我们不那样做还有个具体的洞：打断之后 agent 写的那些文件**没有被提交**，
-     * 于是对 git 来说是未跟踪的，而 {@code reset --hard} 不碰未跟踪文件 ——
-     * 回滚会以为什么都没发生（{@code TurnWorkspace.commit} 的注释里，"未跟踪"这个根因
-     * 已经害过两次）。给这一轮一个位置，就把那个洞堵上了：半成品照样可退。
-     *
-     * <p>轮次号按同一条规则处理（见 {@link #completes}）：用户等到的是一次失败、
-     * 或者是他自己叫停的，**这次交互对他就已经结束了**，下一句话该是新的一轮。
-     *
-     * @param commit 这一轮改动提交出来的位置；**可空** —— 提交失败时给 null（见
-     *               {@code TurnExecutor.commitQuietly}），或者调用方手上根本没有工作区
-     *               （审批那条路就是），那种情况下这个位置确实没有可回的点
+     * @param commit 本轮提交出来的位置；可为 null，提交失败或没有工作区时确实没有可回的点
+     * @return 写入结果
      */
     @Transactional
     public Written abortTurn(Session session, TurnWorkspace.Commit commit, SessionState finalState,
@@ -259,42 +225,36 @@ public class SessionWriter {
     }
 
     /**
-     * 一轮的结算 —— {@link #finishTurn} 和 {@link #abortTurn} 共用的那一段。
+     * {@link #finishTurn} 与 {@link #abortTurn} 共用的结算逻辑。
      *
-     * <p>放在一处是因为**顺序是有讲究的**：checkpoint 必须在轮次号算出来之后写
-     * （否则两者记的不是同一个数），状态迁移必须和工作区指针在同一个事务里
-     * （否则中间失败会留下"checkpoint 记了但指针没动"这种不报错的错位）。
-     * 两份各写一遍的话，这些讲究迟早会有一份走样。
+     * <p>放在一处是因为顺序有讲究：checkpoint 必须在轮次号算出之后写，否则两者记录的不是
+     * 同一个数；状态迁移必须与工作区指针在同一事务里，否则中途失败会留下"checkpoint 记了、
+     * 指针没动"这种不报错的错位。
      *
-     * @param commit  这一轮的产出位置，以及它是不是这一轮新造出来的；**可空**
-     * @param between 除了 checkpoint 和状态之外还要落的事件（正常收尾是那一轮的账单，
-     *                失败收尾没有）—— 顺序是「checkpoint → 它 → 状态变化」
+     * @param commit  本轮产出位置及是否新造出提交；可为 null
+     * @param between 除 checkpoint 与状态外还要落的事件（正常收尾是账单，失败收尾没有），
+     *                顺序为 checkpoint、它、状态变化
      */
     private Written settle(Session session, TurnWorkspace.Commit commit, SessionState finalState,
                            String reason, List<PersistentEvent> between, LeaseToken token) {
         Objects.requireNonNull(session, "session");
         Objects.requireNonNull(finalState, "finalState");
 
-        // **轮次号先算出来**，因为 checkpoint 和会话行记的必须是同一个数 ——
-        // 否则同一次交互的两条 checkpoint（挂起、跑完）会记下两个不同的数
+        // 轮次号先算出来：checkpoint 和会话行记录的必须是同一个数，
+        // 否则同一次交互的两条 checkpoint（挂起、跑完）会写下不同的号
         Session closed = completes(finalState) ? session.nextTurn() : session;
 
         List<StoredEvent> appended = new ArrayList<>();
         if (commit != null) {
             appended.add(events.append(session.id(),
                     new CheckpointCreated(commit.sha(), closed.turnIndex()), token));
-            // **这一轮改了哪些文件：在写的时候算一次**，算完落进流里。
-            // 之后读的人（回滚界面、会话流）照着读就行 —— 不再问 git、也不受它变没变的影响。
-            // 见 {@code WorkspaceChanges} 的类注释
-            //
-            // **只有这一轮真的造出了提交才算**：没有改动时 {@code commit.sha()} 还是上一个
-            // HEAD，拿它算出来的是**上一轮**的文件，于是同一个文件被每一轮反复报一遍
-            //（见 TurnWorkspace.Commit.created）
+            // 本轮改了哪些文件在写入时算一次并落进流里，之后读的人照读即可，
+            // 不再问 git，也不受它后续变化影响（见 WorkspaceChanges）。
+            // 只有真的造出新提交才算：没有改动时 sha 还是上一个 HEAD，
+            // 算出来的是上一轮的改动，同一文件会被每轮反复报（见 TurnWorkspace.Commit.created）
             if (commit.created()) {
-                // ★ 传的是 `closed`，不是 `session` —— 这条事件和上面那条 checkpoint
-                //   必须记**同一个号**（那个号在 settle 开头算出来，见那段注释）。
-                //   从前传 `session` 看不出问题，只是因为这条事件当时压根没记号；
-                //   界面上"这一轮改了哪些文件"要挂到哪一轮，全看这个数
+                // 传 closed 而不是 session：这条事件必须与上面的 checkpoint 记同一个轮次号，
+                // 界面上"这一轮改了哪些文件"挂到哪一轮全看这个数
                 changesOf(closed, commit.sha()).ifPresent(record ->
                         appended.add(events.append(session.id(), record, token)));
             }
@@ -303,18 +263,17 @@ public class SessionWriter {
             appended.add(events.append(session.id(), event, token));
         }
 
-        // 状态可能**已经是**它了：挂起时，ToolApprovalRequested 那条事件已经把会话推到了
-        // AWAITING_APPROVAL，这里再推一次就是自迁移，而状态机明确拒绝自迁移 ——
-        // 不只是事件不该落，`withState` 内部那一层校验也会直接抛。
-        // 这不算丢信息：那一轮为什么停，审计里有 ToolApprovalRequested 说得很清楚
+        // 状态可能已经是它：挂起时 ToolApprovalRequested 已把会话推到 AWAITING_APPROVAL，
+        // 再推一次就是状态机拒绝的自迁移，withState 内部校验也会抛。
+        // 这不丢信息：为什么停，审计里有 ToolApprovalRequested
         if (finalState != session.state()) {
             appended.add(events.append(session.id(),
                     new SessionStateChanged(session.state(), finalState, reason), token));
             closed = closed.withState(finalState);
         }
 
-        // 代码位置记在**工作区**那一行上，不是会话行上：HEAD 是树的属性，
-        // 而同一棵树可能正被同一个人的几条会话轮着用
+        // 代码位置记在工作区行上，不是会话行：HEAD 是树的属性，
+        // 同一棵树可能被同一个人的几条会话轮着使用
         if (commit != null) {
             workspaces.save(workspaces.require(session.workspaceId()).withHeadCommit(commit.sha()));
         }
@@ -324,35 +283,27 @@ public class SessionWriter {
     }
 
     /**
-     * 这一轮**跑完了**吗 —— 判据只有一条：它停在哪儿。
+     * 这一轮是否算跑完，判据只有它停在哪儿。
      *
-     * <h2>一轮 = 用户说一句 + 模型答完</h2>
-     * 这是给人看的单位（见 {@code CheckpointCreated} 的注释），所以"轮次"只在**一次完整交互
-     * 结束**时推进一格。挂在 {@code AWAITING_APPROVAL} 上的那一轮不算：用户确实说过一句话，
-     * 但模型还在等他点那个批准，这次交互还没答完 —— 批准之后接着跑完的那一刻才推。
+     * <p>一轮 = 用户说一句 + 模型答完，这是给人看的单位，所以只在完整交互结束时推进一格。
+     * 停在 {@code AWAITING_APPROVAL} 不算：用户说过话，但模型还在等批准，交互尚未答完，
+     * 批准后继续跑完时才推进。失败（{@code FAILED}）和用户停止（{@code CANCELLED}）都算跑完，
+     * 因为用户已经等到结果，下一句该是新的一轮。
      *
-     * <p>另外两种收场**都算跑完**，只是结束得不体面：模型调用失败（{@code FAILED}）、
-     * 用户按了停止（{@code WAITING_USER} + 原因 {@code CANCELLED}）。用户都已经等到结果了，
-     * 而下一句话本来就该是新的一轮。
-     *
-     * <p>判据用 {@code finalState} 而不是"这一轮有没有追加用户消息"：
-     * 挂起那条路上确实追加了消息，可它没跑完；而批准之后的续跑没有追加消息，可它跑完了。
+     * <p>用 {@code finalState} 而不是"有没有追加用户消息"判断：挂起路径确实追加了消息但没跑完，
+     * 批准后的续跑没有追加消息却跑完了。
      */
     private static boolean completes(SessionState finalState) {
         return finalState != SessionState.AWAITING_APPROVAL;
     }
 
     /**
-     * 这一次提交引入了哪些改动，**项目相对路径**；**算不出来时返回空**
-     * （也就是那一轮不记这条事件）。
+     * 这次提交引入了哪些改动，路径为项目相对；算不出来时返回空，即那一轮不记这条事件。
      *
-     * <p>为什么这么定 —— 问 git 而不是数文件工具、算不出来时宁可没有记录也不记一条
-     * "什么都没改" —— 都写在 {@link WorkspaceChanges} 的类注释上。
+     * <p>为什么问 git 而不是统计文件工具、为什么宁可没有记录也不记"什么都没改"，
+     * 见 {@link WorkspaceChanges}。"这一轮什么都没改"不会走到这里（见 {@link #settle}）。
      *
-     * <p>**"这一轮什么都没改"不归这里管**：那种轮次连问都不会问一次，见 {@link #settle}。
-     *
-     * <p><b>它有界</b>：任何异常都吞在这一层，收尾照常进行 —— 记不下这一轮的改动，
-     * 不该让整轮失败。
+     * <p>异常全部吞在本层，收尾照常进行：记不下改动不该让整轮失败。
      */
     private Optional<WorkspaceChanges> changesOf(Session session, String commitSha) {
         Optional<Workspace> workspace = trees.find(session.workspaceId());
@@ -386,16 +337,15 @@ public class SessionWriter {
     }
 
     /**
-     * 把崩溃时悬着的工具调用收成"被打断"，一条一个事件。
+     * 把崩溃时悬着的工具调用收成"被打断"，一条调用一个事件。
      *
-     * <h2>为什么这里**不**用 {@link #append}</h2>
-     * 状态机把 {@code ToolInterrupted} 映射成回到 {@code THINKING}，那条映射服务的是
-     * "这一轮还在跑，回去接着想"。而崩溃恢复时**没有那一轮** —— 照那条映射写下去，
-     * 会话会挂在一个**没有任何执行者**的"正在跑"上面，而且不报错。
+     * <p>不能用 {@link #append}：状态机把 {@code ToolInterrupted} 映射回 {@code THINKING}，
+     * 那是给"这一轮还在跑"用的；崩溃恢复时没有那一轮，照映射写会让会话挂在一个没有任何
+     * 执行者的"正在跑"状态上，且不报错。恢复只补事实、不接着跑，所以这里只落事件、不碰状态，
+     * 与 {@link #startSession} 同形。
      *
-     * <p>恢复的立场是"只补事实、不接着跑"（见那篇决策），所以这里只落事件，不碰状态。
-     *
-     * <p>这条和 {@link #startSession} 是同一个形状：**落一条事实，但状态机不该因此动**。
+     * @param callIds 执行到一半的调用 id
+     * @return 写入结果
      */
     @Transactional
     public Written interruptUnfinished(Session session, List<String> callIds, LeaseToken token) {
@@ -408,30 +358,21 @@ public class SessionWriter {
     }
 
     /**
-     * 回滚：记一条 {@code SessionRewound}，同事务把**代码位置**和**对话位置**一起拨回去。
+     * 回滚：记一条 {@code SessionRewound}，同事务把代码位置和对话位置一起拨回。
      *
-     * <p>三样东西必须在同一个事务里：代码位置（工作区行的 {@code head_commit}）、
-     * 对话位置（会话行的 {@code turn_index}）、以及"发生过回滚"这个事实。
-     * 漏掉轮次号，checkpoint 与对话的对应就悄悄错位了 —— 而那是按 turn 找代码时才会发现的
-     * 那种错。
+     * <p>三样必须在同一事务：工作区行的 {@code head_commit}、会话行的 {@code turn_index}，
+     * 以及"发生过回滚"这个事实。漏掉轮次号会让 checkpoint 与对话悄悄错位。
      *
-     * <h2>共享的树让这一步的含义变了，这件事得说清楚</h2>
-     * 树属于**人 + 项目**，所以**回滚退掉的是整棵树** —— 包括同一个人的**其他会话**
-     * 在那之后提交的东西。那些提交不是消失了（sha 还在，按 sha 还能找回来），
-     * 而是从当前分支上退了下来。
+     * <p>树属于「人 + 项目」，所以回滚退掉整棵树，包括同一人其他会话之后提交的内容；
+     * 那些提交仍可按 sha 找回，只是从当前分支退下。同步带进来的别人的提交也会退掉，
+     * 但不伤害任何人，理由见 {@code SessionService.rewind}。
      *
-     * <p>这是"同一棵树上不区分是哪条会话改的"的直接后果，也是刻意的：
-     * 对同一个人来说"撤销"本来就该整块撤销。
-     *
-     * <p>**别人的**提交也会被退掉（同步把它们带进来过），但那不伤害任何人 ——
-     * 理由写在 {@code SessionService.rewind} 的注释里，那里也是那道旧检查被删掉的地方。
-     *
-     * @param toTurnIndex     回滚之后写在会话行上的轮次（从哪儿继续数就靠它）。
-     *                        **它不进事件，也不是定位键** —— 理由见 {@link SessionRewound}
-     * @param toCheckpointSeq 退回到的那条 checkpoint 在事件流里的序号。**它是"退到哪儿"
-     *                        的正式记录**（投影靠它找回对话边界），sha 只回答"代码在哪"
-     * @param byUserId         谁下的手。**记 id 而不是用户名** —— 追责要的是身份，
-     *                         而用户名会变（见 {@link SessionRewound}）
+     * @param toCommitSha     回滚后的代码位置
+     * @param toTurnIndex     回滚后写在会话行上的轮次；不进事件，也不是定位键
+     * @param toCheckpointSeq 目标 checkpoint 的事件序号，是"退到哪儿"的正式记录；
+     *                        sha 只回答代码在哪
+     * @param byUserId        发起者 id，不是用户名；追责要身份，而用户名会变
+     * @return 写入结果
      */
     @Transactional
     public Written rewind(Session session, String toCommitSha, int toTurnIndex, long toCheckpointSeq,
@@ -449,14 +390,15 @@ public class SessionWriter {
     }
 
     /**
-     * 记下一次同步：主干的最新状态被拉进了这棵树的工作区。
+     * 记下一次同步：主干的最新状态被拉进这棵树的工作区。
      *
-     * <p>形状和 {@link #rewind} 一样 —— <strong>事件和 {@code head_commit} 那一列在同一个事务里</strong>。
-     * 不同步推进的话，回滚、checkpoint、下一次合并会全都按一个错的位置去算，而那种错
-     * **不会报错**，只会让结果莫名其妙。
+     * <p>与 {@link #rewind} 同形：事件和 {@code head_commit} 必须在同一事务里。否则回滚、
+     * checkpoint 和下一次合并都会按错的位置计算，且不报错。
      *
-     * @param fromHead 同步前的 HEAD。**由调用方从 git 读出来传进来**，不从这个聚合的行里取 ——
-     *                 行在空项目起步时是 null，而 git 那边这时候可能已经有个真实位置了
+     * @param fromHead 同步前的 HEAD，由调用方从 git 读取后传入；不要取聚合行里的值，
+     *                 那一列可能落后或为空，而 git 的 HEAD 才是此刻的事实
+     * @param toHead   同步后的 HEAD
+     * @return 写入结果
      */
     @Transactional
     public Written sync(Session session, String fromHead, String toHead, LeaseToken token) {
@@ -470,13 +412,14 @@ public class SessionWriter {
     }
 
     /**
-     * 换模型：落一条 {@code ModelChanged}，同事务把会话行上的模型改掉。
+     * 换模型：落一条 {@code ModelChanged}，同事务更新会话行的模型。
      *
-     * <p>和状态迁移同一个模式（{@link #advance} 也是"事件 + 列"）：**事件保证可审计、
-     * 可重放，列保证读取快**——每一轮开始都要读模型，不能让每次跑一轮都去扫事件流。
+     * <p>与状态迁移同一模式：事件保证可审计、可重放，列保证每轮开始读模型不必扫事件流。
+     * 两者必须同事务：只落事件不改列，下一轮仍用旧模型；只改列不落事件，重放时没有答案；
+     * 这种错不会抛异常，只会让两边悄悄错开。
      *
-     * <p>两者必须在同一个事务里：只落事件不改列，下一轮还用旧模型；只改列不落事件，
-     * 重放时"这一轮为什么换了个模型"就没了答案。而那个错不会报异常，只会让两边悄悄错开。
+     * @param model 新配置
+     * @return 写入结果
      */
     @Transactional
     public Written changeModel(Session session, ModelConfig model, LeaseToken token) {
@@ -490,11 +433,12 @@ public class SessionWriter {
     }
 
     /**
-     * 迁到 {@code IDLE} 再进 {@code THINKING}，供失败重试用。
+     * 把 {@code FAILED} 迁回 {@code IDLE}，供失败重试；调用方随后再迁到 {@code THINKING}。
      *
-     * <p>为什么不能一步从 {@code FAILED} 到 {@code THINKING}：状态机里 {@code FAILED}
-     * 只能回 {@code IDLE}（见 {@link SessionState}）。那条约束是刻意的 ——
-     * 「重试」在语义上就是"回到空闲、重新开始"，而不是"从错误状态直接继续跑"。
+     * <p>不能一步从 {@code FAILED} 到 {@code THINKING}：状态机只允许 {@code FAILED} 回
+     * {@code IDLE}（见 {@link SessionState}）。重试在语义上就是回到空闲、重新开始。
+     *
+     * @return 写入结果；当前不是 {@code FAILED} 时不写事件
      */
     @Transactional
     public Written retryFromFailed(Session session, LeaseToken token) {

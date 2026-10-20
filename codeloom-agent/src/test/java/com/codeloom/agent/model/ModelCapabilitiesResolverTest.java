@@ -6,13 +6,8 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 模型能力表。
- *
- * <h2>为什么值得单独钉住</h2>
- * 这张表里的每个数都**直接改变行为**：窗口决定什么时候压缩、输出上限决定请求体里的
- * {@code max_tokens}。而它们的出处是"官方文档写着的，或者我们实测出来的"——
- * 既然是查来的，就得有一条断言把查到的值固定在那儿，否则某次手滑把 384_000 写成 384
- * 不会有任何人发现（压缩水位照样算，只是请求被服务商拒）。
+ * 模型能力表。窗口决定压缩时机，输出上限进入请求的 {@code max_tokens}；
+ * 这些值来自官方文档或实测，必须有断言固定，避免手误后静默改变行为。
  */
 class ModelCapabilitiesResolverTest {
 
@@ -24,8 +19,7 @@ class ModelCapabilitiesResolverTest {
             ModelCapabilities capabilities = ModelCapabilitiesResolver.resolve(modelId);
 
             assertThat(capabilities.contextWindow()).as("%s 的窗口", modelId).isEqualTo(1_000_000);
-            // 官方 pricing 页写的是 MAXIMUM: 384K —— 这个字段的语义就是"上限"，
-            // 所以取最大值，而不是"我们希望它写多长"
+            // 字段语义是上限，取官方文档的最大输出值。
             assertThat(capabilities.maxOutputTokens()).as("%s 的输出上限", modelId).isEqualTo(384_000);
             assertThat(capabilities.supportsTools()).as("%s 支持工具", modelId).isTrue();
         }
@@ -43,13 +37,11 @@ class ModelCapabilitiesResolverTest {
     void unknownModelsFallBackToTheConservativeDefaults() {
         ModelCapabilities capabilities = ModelCapabilitiesResolver.resolve("some-local-model");
 
-        // 窗口估大了会静默超限；输出上限估大了会被服务商直接拒。两个方向的代价都不对称，
-        // 所以都往小的取 —— 这就是"保守"在这里的具体含义
+        // 两个数都取小：估大分别导致静默超限或请求被拒。
         assertThat(capabilities.contextWindow()).isEqualTo(ModelCapabilities.DEFAULT_CONTEXT_WINDOW);
         assertThat(capabilities.maxOutputTokens())
                 .isEqualTo(ModelCapabilities.DEFAULT_MAX_OUTPUT_TOKENS);
-        // 但**假定支持工具**：不支持工具调用的模型在这个 agent 里根本没法用，
-        // "未知"该退化成"能用、但可能不灵"，而不是"拒绝一个也许完全正常的模型"
+        // 工具能力假定支持：未知模型应退化为可用，而不是被直接拒绝。
         assertThat(capabilities.supportsTools()).isTrue();
     }
 

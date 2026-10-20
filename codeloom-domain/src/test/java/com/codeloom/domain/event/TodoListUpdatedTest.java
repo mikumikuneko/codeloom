@@ -23,8 +23,7 @@ class TodoListUpdatedTest {
         TodoListUpdated event = new TodoListUpdated(mine);
         mine.add(item("偷偷加一条"));
 
-        // 不拷的话，一条"已经发生过的事实"能被事后改掉 —— 而事件流是 append-only 的，
-        // 那正是这套东西全部可信度的来源
+        // 不拷的话，一条已经发生过的事实能被事后改掉；append-only 是事件流可信度的来源。
         assertThat(event.items()).hasSize(1);
         assertThatThrownBy(() -> event.items().add(item("再加一条")))
                 .isInstanceOf(UnsupportedOperationException.class);

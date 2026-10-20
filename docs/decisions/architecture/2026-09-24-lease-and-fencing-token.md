@@ -8,7 +8,7 @@
 
 两件事分开做，都是 domain 里的端口加一个实现：
 
-- **租约**（`ExecutionLease` / `LeaseToken`）：Redis `SET NX PX`，key 是 `codeloom:workspace-lock:<workspaceId>`，续租在 TTL 的三分之一处，`renew` 用 Lua 比对 holderId —— 比不中就返回 0，意味着"你已经不是这个锁的主人了"。**每棵树一把**，不是每会话一把。
+- **租约**（`ExecutionLease` / `LeaseToken`）：Redis `SET NX PX`，key 是 `codeloom:workspace-lock:WORKSPACE_ID`，续租在 TTL 的三分之一处，`renew` 用 Lua 比对 holderId —— 比不中就返回 0，意味着"你已经不是这个锁的主人了"。**每棵树一把**，不是每会话一把。
 - **fencing**（`WorkspaceFence`）：MySQL 里的 `fencing_token` 列，每次拿到租约就往前推一格；所有写入在落库前 `assertValid` 一次，token 比库里的小就拒。建会话写第 0 条事件也要 token —— 没有"这条不用记账"的例外。
 
 失去租约之后**一个字都不写，也不释放锁**（那条路本来就是安全空操作，跳过它只是让"这一轮什么都没动"在代码里显式可见）。

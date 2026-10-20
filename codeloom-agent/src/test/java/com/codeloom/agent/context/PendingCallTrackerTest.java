@@ -16,11 +16,10 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link PendingCallTracker} 的回滚规则 —— **直接喂这个单元**。
+ * {@link PendingCallTracker} 的回滚规则，直接测试该单元。
  *
- * <p>为什么不走投影：这条规则只关于它自己那两张表（哪次调用有过结局、请求长什么样），
- * 而走投影还得连带造出能过消息折叠的事件流 —— 判据会被不相干的东西牵扯。
- * "同一个调用 id 跨两条时间线"那一版在 {@code ContextAssemblerTest} 里也有一条（端到端）。
+ * <p>不经过投影，避免消息折叠等无关约束干扰判据；同一调用 id 跨时间线的端到端行为
+ * 在 {@code ContextAssemblerTest} 另有用例。
  */
 class PendingCallTrackerTest {
 
@@ -53,8 +52,7 @@ class PendingCallTrackerTest {
         accept(new ToolCallRequested("call_1", "run_command", "{\"command\":\"pwd\"}"));
         accept(new ToolApprovalResolved("call_1", true, UserId.of("u-li"), null));
 
-        // 旧的那条收尾要是不作废，这次批准会被判成"已经结束了"，于是**补跑不会发生**：
-        // 用户点了批准，那条命令却再也不会跑（和漏广播是同一类症状 —— 操作了、没反应）
+        // 旧收尾若不作废，新批准会被判为已结束，补跑不会发生。
         assertThat(tracker.pendingApprovedCall()).hasValueSatisfying(call ->
                 assertThat(call.argumentsJson()).contains("pwd"));
     }

@@ -20,20 +20,11 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 「在项目锁的保护下动主干」的那几步。**拆成独立 bean 是为了事务边界。**
+ * 在项目行锁保护下动主干的那几步。
  *
- * <h2>为什么不放在 {@code MergeService} 里</h2>
- * 因为它必须是一个**独立、短**的事务：这里持着项目行的排它锁，而紧接着的
- * "合并之后跑一次构建"可能要几分钟。两者放进同一个事务的话，那把锁会被按住整场构建 ——
- * 期间任何人想合并、想改成员都得等。
- *
- * <p>而 {@code @Transactional} 只在**跨 bean 调用**时生效 —— 在同一个类里自己调自己
- * 是拿不到代理的。这和 {@code SessionWriter} 被拆出来是同一个原因：
- * 给事务边界一个明确的落点。
- *
- * <h2>为什么用 {@code @Transactional} 而不是别的锁</h2>
- * 事务在这里**不是为了回滚 git**（git 没有回滚，出事只能 abort，而 abort 是显式的一步）。
- * 它只是为了持住那把行锁。合并本身是一次几百毫秒的 git 调用。
+ * <p>拆成独立 bean 是为了事务边界：{@code @Transactional} 只在跨 bean 调用时生效。
+ * 事务必须短，因为这里持着项目行的排它锁，而合并后的构建可能要几分钟；同一个事务会把锁
+ * 按住整场构建。事务在这里只用于持锁，不用于回滚 git —— git 没有回滚，只能显式 abort。
  */
 @Component
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -54,33 +45,26 @@ public class ProjectMerger {
     /**
      * 把这条会话的产出合进主干。
      *
-     * <p>可能有三种收场：干净地合完、快进、或者**有冲突**。有冲突时 git 会在主干工作区里
-     * 留下一个未完成的合并 —— 从这里开始就进入"等裁决"的状态了。
+     * <p>四种收场：已是最新（{@code UP_TO_DATE}）、快进、干净合完、有冲突。有冲突时
+     * git 在主干工作区留下未完成的合并，从此刻进入等裁决状态。
      *
-     * @param sourceRef        合**到哪儿**。两种用法：
-     *                         <ul>
-     *                           <li>会话的分支名 —— 合掉这条会话的全部产出</li>
-     *                           <li>某个 checkpoint 的 sha —— **小步合并**：不攒完整个会话再合，
-     *                               做一段合一段。粒度和"每轮一个提交"天然对齐</li>
-     *                         </ul>
-     *                         sha 的合法性由调用方保证（见 {@code SessionCheckpoints}）——
-     *                         这一层只管合，不管"你有没有资格合它"
-     * @param requireUpToDate 要不要先确认"这条分支已经包含主干"。见下面的注释 ——
-     *                        **合到分支最新时为 true，合到某个旧 checkpoint 时为 false**
+     * @param sourceRef        合到哪儿：会话的分支名（全部产出），或某个 checkpoint 的 sha
+     *                         （小步合并，粒度与每轮一个提交对齐）。sha 的合法性由调用方保证
+     *                         （见 {@code SessionCheckpoints}），这一层只负责合
+     * @param requireUpToDate  是否先确认分支已包含主干；合到分支最新时为 true，
+     *                         合到旧 checkpoint 时为 false
+     * @return 合并结果；冲突时状态为 {@code CONFLICT} 并带冲突路径
+     * @throws ResponseStatusException 409，树的工作区或主干已有未收尾的合并
+     * @throws StaleBranchException    分支落后于主干（仅 {@code requireUpToDate} 时）
      */
     @Transactional
     public MergeResult mergeIntoMain(Session session, Project project, String sourceRef,
                                      boolean requireUpToDate) {
         projects.lock(project.id());
 
-        // **未收尾的合并会把下一次合并变成 500。**
-        //
-        // git 不会让同一块工作区里同时存在两个未完成的合并；第二次 `merge` 直接以
-        // 非零退出，而那在 GitClient 里是一个 GitCommandException —— 没有翻译的话，
-        // 客户端看到的就是一句"请求失败（HTTP 500）"。这里把它说成 409，并给出下一步。
-        //
-        // 两处都要看：冲突可能留在**这棵树的工作区**（同步那一步），也可能留在
-        // **主干**（合回那一步）。见 pendingMerge 的注释。
+        // 未收尾的合并会让下一次 git merge 以非零退出；不翻译就是 500。这里说成 409，
+        // 并给出下一步。冲突可能留在树的工作区（同步）或主干（合回），两处都查。
+        // 理由见 docs/decisions/bug-fix/2026-10-18-a-pending-merge-turns-sync-into-409.md
         Path sessionWorktree = workspaceOf(session).path();
         if (workspaces.mergeInProgress(sessionWorktree)
                 || workspaces.mergeInProgress(mainOf(project))) {
@@ -88,14 +72,9 @@ public class ProjectMerger {
                     "有一笔合并还没收尾：先在中间裁决冲突，或者放弃合并");
         }
 
-        // ★ 过期检查放在**锁里面**：锁到手了主干就不会动，此刻查才有意义。
-        //   放在锁外面查的话，查完到合之间还有一段窗口 —— 而那正是它要消灭的东西。
-        //
-        //   落后就不合：拒绝的代价是"再点一次"（第二次会先自动同步），
-        //   而照合的代价是"冲突撞在主干上、把主干占住"。见 StaleBranchException
-        //
-        //   合到**旧 checkpoint** 时不做这个检查：那个点是**故意旧**的，
-        //   要求它"已经包含主干"等于禁止小步合并
+        // 过期检查必须在锁内：锁到手后主干不会再动，此时查才有意义，否则查完到合之间还有窗口。
+        // 落后就不合：拒绝的代价是再点一次（第二次会先自动同步），照合则会把冲突撞在主干上。
+        // 合到旧 checkpoint 时不查：那个点故意是旧的，要求它包含主干等于禁止小步合并
         if (requireUpToDate) {
             int behind = workspaces.commitsBehind(
                     workspaceOf(session).path(), WorkspaceManager.MAIN_BRANCH);
@@ -108,9 +87,13 @@ public class ProjectMerger {
     }
 
     /**
-     * 当前等着裁决的冲突文件，连同两侧的内容 —— 界面上的并排 diff 用它。
+     * 当前等着裁决的冲突文件，连同两侧的内容；界面上的并排 diff 用它。
      *
-     * <p>没有待裁决的合并时返回**空信封**而不是报错：客户端会在进页面时探一下。
+     * <p>没有待裁决的合并时返回空信封而不是报错，客户端进入页面时会先探一下。
+     *
+     * @param session 发起合并的会话
+     * @param project 会话所属项目
+     * @return 冲突信封；没有待裁决的合并时为空
      */
     @Transactional
     public ConflictsView conflicts(Session session, Project project) {
@@ -118,33 +101,30 @@ public class ProjectMerger {
         return pendingMerge(session, project)
                 .map(pending -> new ConflictsView(pending.direction(),
                         workspaces.conflicts(pending.worktree()).stream()
-                                // **工作在项目外面**的那些不露给用户（工作区根上
-                                // 平台自己的文件，见 ProjectLayout.toProjectPath）——
-                                // 他既没建过它，也无从裁决
+                                // 项目外面的文件不露给用户：那是工作区根上平台自己的文件，
+                                // 用户既没建过也无从裁决
                                 .filter(path -> ProjectLayout.toProjectPath(path) != null)
-                                // 路径在 sidesOf 里翻（那里同时要把 git 路径留给 git 用）
+                                // 路径在 sidesOf 里翻，那里同时要把 git 路径留给 git 用
                                 .map(path -> sidesOf(pending, path))
                                 .toList()))
                 .orElseGet(ConflictsView::none);
     }
 
-    /** 一串 git 路径 → 项目路径，**丢掉项目外面的那些**（见 ProjectLayout.toProjectPath）。 */
+    /** 一串 git 路径转为项目路径，丢掉项目外面的那些（见 ProjectLayout.toProjectPath）。 */
     private static List<String> projectPaths(List<String> gitPaths) {
         return gitPaths.stream().map(ProjectLayout::toProjectPath).filter(Objects::nonNull).toList();
     }
 
     /**
-     * 一个冲突的两侧 —— **按"是哪一边"归类，不按 git 的 ours/theirs**。
+     * 一个冲突的两侧，按"会话侧 / 主干侧"归类，而不是 git 的 {@code ours}/{@code theirs}。
      *
-     * <p>git 的 {@code ours} 是"当前分支"，而当前分支是哪条取决于合并方向：
-     * 合回主干时它是主干，同步时它是这条会话。所以这里显式翻一次，把
-     * {@code ConflictView.sessionSide / mainSide} 填成**永远指同一份东西** ——
-     * 前端因此不需要知道方向，也不需要做任何翻转。
+     * <p>{@code ours} 指当前分支，而当前分支随合并方向变化：合回主干时是主干，同步时是
+     * 这条会话。这里显式翻一次，使 {@code ConflictView} 的两个字段永远指同一份东西，
+     * 前端因此不需要知道方向。见 {@link MergeDirection}。
      *
-     * <p>见 {@link MergeDirection}：git 的词汇只该活在适配层。
-     *
-     * @param path **git 的路径**（{@code untitled/a.txt}）。装进 {@link ConflictView}
-     *             之前翻成项目路径 —— 那个字段是给界面看的
+     * @param path git 路径（例如 {@code untitled/a.txt}）；装进 {@link ConflictView} 前
+     *             翻成项目路径
+     * @return 两侧内容，{@code sessionSide} 恒为会话侧、{@code mainSide} 恒为主干侧
      */
     private ConflictView sidesOf(PendingMerge pending, String path) {
         boolean oursIsTheSession = pending.direction() == MergeDirection.INTO_SESSION;
@@ -157,11 +137,16 @@ public class ProjectMerger {
     }
 
     /**
-     * 裁决一个文件的冲突；**所有的都裁决完之后把合并收尾**。
+     * 裁决一个文件的冲突；全部裁决完后自动收尾合并。
      *
-     * <p>为什么自动收尾而不是再来一个"完成"接口：人做完最后一个决定之后，
-     * 剩下的事情没有任何选择余地 —— 让客户端再发一次请求只是多一个能忘掉的步骤，
-     * 而忘了它的表现是"合并一直挂在那儿"，还得去查文档才知道要点哪个按钮。
+     * <p>自动收尾而不是另设"完成"接口：最后一个决定之后没有剩余选择，多一次请求只会
+     * 多一个能忘记的步骤，忘了就表现为合并一直挂着。
+     *
+     * @param path       项目路径（例如 {@code a.txt}）；必须当前在冲突清单里
+     * @param resolution 取一侧，或人给出的全文
+     * @return 尚未裁完时 {@code merged} 为 false 并带剩余文件；完成时带合并提交，
+     *         并标明收尾是否发生在树的工作区
+     * @throws ResponseStatusException 409，当前没有待裁决的合并，或该文件不在冲突清单里
      */
     @Transactional
     public Resolution resolve(Session session, Project project, String path,
@@ -170,30 +155,21 @@ public class ProjectMerger {
         PendingMerge pending = pendingMerge(session, project).orElseThrow(() ->
                 new ResponseStatusException(HttpStatus.CONFLICT, "现在没有待裁决的合并"));
         Path worktree = pending.worktree();
-        // 客户端给的是**项目路径**（{@code a.txt}），而下面每一步问的都是 git ——
-        // 它只认 {@code untitled/a.txt}。翻一次，就在这里
+        // 客户端给的是项目路径，git 只认仓库相对路径；只在这里翻
         String gitPath = ProjectLayout.toGitPath(path);
 
         if (!workspaces.conflicts(worktree).contains(gitPath)) {
-            // 明确拒绝而不是静默忽略：客户端可能拿着一份过期的列表在操作，
-            // 而"我以为裁决了、其实没有"会让下一步的合并结果莫名其妙。
-            //
-            // 顺带一提，这道检查也**是写入路径的边界**：下面按内容写文件时，
-            // 那个路径只能是 git 报出来的冲突文件之一，而 git 报的都是仓库内的相对路径
+            // 明确拒绝而不是静默忽略：客户端可能拿着过期的列表操作。
+            // 这道检查同时是写入路径的边界：按内容写文件时，路径只能是 git 报出的冲突文件之一
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "这个文件当前不在冲突清单里：" + path);
         }
 
-        // 穷尽 switch：新增一种裁决方式时这里编译不过，逼着人回来处理
+        // 穷尽 switch：新增裁决方式时编译不过
         switch (resolution) {
             case ConflictResolution.KeepSide keep -> {
-                // ★ 语义的"哪一侧" → git 的 ours，**整个项目只在这里翻一次**。
-                //
-                //   "会话是 ours" 当且仅当在往会话的工作区里合 —— 因为 ours 是"当前分支"，
-                //   而当前分支就是那块工作区所在的分支。合回主干时当前分支是主干，
-                //   于是 ours 是主干侧，两边正好调过来。
-                //
-                //   穷尽 switch：新增一个方向时这里编译不过
+                // 语义的"哪一侧"转为 git 的 ours；整个代码库只在这里翻一次。
+                // 会话是 ours 当且仅当合并方向是 INTO_SESSION（ours 即当前分支）
                 boolean ours = switch (keep.side()) {
                     case SESSION -> pending.direction() == MergeDirection.INTO_SESSION;
                     case MAIN -> pending.direction() == MergeDirection.INTO_MAIN;
@@ -208,16 +184,16 @@ public class ProjectMerger {
         if (!remaining.isEmpty()) {
             return new Resolution(false, null, projectPaths(remaining), false);
         }
-        // 最后一个冲突裁完了：索引里已经是裁决后的结果，直接提交
+        // 最后一个冲突裁完：索引里已是裁决结果，直接提交
         String sha = workspaces.finishMerge(worktree,
                 "merge: 合并 " + workspaceOf(session).branch() + "（冲突已裁决）",
                 identities.of(session.ownerId()));
-        // 把"这块工作区是不是树那侧"带出去：**裁决完成的合并会推进 HEAD**，
-        // 而推进的如果是**这棵树的** HEAD，工作区的 head_commit 那一列就必须跟着更新
-        //（由调用方落事件）。主干那侧不用 —— 那一列记的是树的分支位置，和主干无关
+        // 收尾的合并推进 HEAD；如果推进的是这棵树的 HEAD，调用方必须同步 head_commit 列。
+        // 主干那侧不用：那一列记的是树的分支位置
         return new Resolution(true, sha, List.of(), worktree.equals(workspaceOf(session).path()));
     }
 
+    /** 放弃当前未完成的合并，工作区恢复到合并前。 */
     @Transactional
     public void abort(Session session, Project project) {
         projects.lock(project.id());
@@ -228,22 +204,12 @@ public class ProjectMerger {
     }
 
     /**
-     * 当前挂着的那个合并：**在哪块工作区**，以及**是哪个方向**。
+     * 当前挂着的合并：在哪块工作区、哪个方向。
      *
-     * <h2>为什么要两处都查</h2>
-     * 两个方向的合并各自在自己的工作区里留下冲突：
-     * <ul>
-     *   <li><b>同步</b>（主干 → 会话）：冲突留在**会话的工作区**</li>
-     *   <li><b>合回</b>（会话 → 主干）：冲突留在**主干**</li>
-     * </ul>
-     *
-     * <p>而裁决那几个端点**不该关心它落在哪儿** —— 调用方要的是"把当前挂着的那个裁决掉"。
-     * 让它记着"我正在裁决的是哪一个"，正是这个接口最不该塞给客户端的包袱。
-     *
-     * <p>而且**方向必须跟着一起带出来**：它决定了 git 的 {@code ours} 指哪一边，
-     * 于是决定了裁决时怎么把"取会话侧"翻过去。少了它，那个翻转就得在别处再猜一次。
-     *
-     * <p>先查树的工作区：同步做上之后，绝大多数冲突都发生在那里。
+     * <p>两个方向在不同地方留下冲突：同步（主干到会话）留在会话的工作区，合回（会话到主干）
+     * 留在主干。裁决端点不关心它落在哪，调用方要的是"把当前挂着的那个裁决掉"。
+     * 方向必须一起带出，因为它决定 git 的 {@code ours} 指哪一边。先查树的工作区：
+     * 同步先做，绝大多数冲突发生在那里。
      */
     private Optional<PendingMerge> pendingMerge(Session session, Project project) {
         Path sessionWorktree = workspaceOf(session).path();
@@ -263,12 +229,11 @@ public class ProjectMerger {
     /**
      * 这条会话所在的那棵树的工作区。
      *
-     * <p>建会话时就已经建好了（见 {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}），
-     * 所以找不到意味着它被人从磁盘上删掉了 —— 那是服务端状态不对，不是客户端传错了。
+     * <p>建会话时已经建好（见 {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}），
+     * 因此找不到意味着目录被人从磁盘上删掉了，属于服务端状态错误。
      */
     private Workspace workspaceOf(Session session) {
-        // 问的是**磁盘上的那棵树**（WorkspaceManager），不是库里的行 ——
-        // 两者都叫 find，但一个看磁盘、一个查库
+        // 问磁盘（WorkspaceManager），不是库里的行；两者都叫 find
         return workspaces.find(session.workspaceId())
                 .orElseThrow(() -> new IllegalStateException(
                         "会话 " + session.id() + " 的工作区目录不在磁盘上"));
@@ -277,12 +242,12 @@ public class ProjectMerger {
     /**
      * 一次裁决的结果。
      *
-     * @param merged            所有冲突都裁完了、合并已经提交
+     * @param merged            所有冲突都裁完、合并已提交
      * @param mergeCommitSha    完成时的合并提交 sha；未完成时为 null
-     * @param inSessionWorktree 这次收尾的合并发生在**树的工作区**里（也就是一次同步的收尾），
-     *                          而不是主干上。调用方据此决定要不要更新工作区的 head_commit ——
-     *                          **推进了这棵树的 HEAD 就必须更新那一列**，否则回滚、checkpoint、
-     *                          下一次合并会全按一个错的位置去算，而且不会报错
+     * @param remaining         尚未裁决的项目路径
+     * @param inSessionWorktree 收尾的合并发生在树的工作区（一次同步的收尾），而不是主干。
+     *                          调用方据此更新工作区的 head_commit；推进了这棵树的 HEAD
+     *                          却不更新，回滚、checkpoint 和下一次合并都会按错位置计算且不报错
      */
     public record Resolution(boolean merged, String mergeCommitSha, List<String> remaining,
                              boolean inSessionWorktree) {

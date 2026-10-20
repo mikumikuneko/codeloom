@@ -32,24 +32,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 项目的用例：建、查、列、退。
+ * 项目的用例：建、查、列、退出。
  *
- * <h2>「退出」和「创建」在磁盘上方向相反，但规则是同一条</h2>
- * 两者在存储上都是两件事：磁盘上多（或少）一个 git 仓库，库里多（或少）一批行。
- * 两件事没法在一个事务里，所以两边各挑一个顺序：
- * <ul>
- *   <li><b>建：先落盘、后写库</b> —— 先写库的话，git 初始化失败会留下一行指向
- *       不存在仓库的项目，而那种行会在每一个操作里以"仓库不存在"的面目出现。</li>
- *   <li><b>退：先写库、后删盘</b> —— 先删盘的话，一次库侧失败就留下"行还在、
- *       仓库没了"的项目；先写库则最坏是地上多一个没人引用的目录。</li>
- * </ul>
+ * <p>建和退出都涉及磁盘与库两步，无法放进同一个事务，所以顺序相反：建先落盘后写库，
+ * 否则 git 初始化失败会留下指向不存在仓库的项目行；退出先写库后删盘，否则库侧失败会
+ * 留下行还在、仓库没了的项目。两者遵循同一条规则：库是权威，磁盘残留是可容忍的垃圾。
  *
- * <p>看起来是两条相反的规则，其实是同一条：<strong>库是权威，磁盘上的残留是可以
- * 容忍的垃圾</strong>。
- *
- * <h2>没有"删除项目"这个动作</h2>
- * 项目是人走空的副产品：成员各自退出、带走自己的东西，最后一个人退出时它才真的消失。
- * 所以两个人里任何一个都只能决定**自己**走不走，没有"我把对方脚下的地抽走"这条路。
+ * <p>没有"删除项目"这个动作：项目是人走空的副产品，成员各自退出、带走自己的东西，
+ * 最后一个人退出时项目才消失。任何人都只能决定自己走不走。
  */
 @Service
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -61,14 +51,8 @@ public class ProjectService {
     private static final int SESSION_PAGE = 50;
 
     /**
-     * 新项目自带的那个顶层目录的名字。
-     *
-     * <h2>为什么新项目不能是一个空仓库</h2>
-     * 空仓库在界面上就是<strong>左栏什么都没有</strong>。而"什么都没有"和"读不出来"
-     * 长得一模一样（{@code FileTree} 里那句"空目录要显示出来而不是藏掉"说的就是这件事），
-     * 于是刚建完项目的人第一眼看到的是一块可疑的空白。
-     *
-     * <p>名字本身与"为什么不用项目名"的理由，见 {@link ProjectLayout#DIRECTORY}。
+     * 新项目自带的顶层目录名。空仓库在界面上与"读不出来"无法区分，所以新项目必须有东西。
+     * 名字与种子内容见 {@link ProjectLayout#DIRECTORY}。
      */
     private static final String FIRST_DIRECTORY = ProjectLayout.DIRECTORY;
 
@@ -97,7 +81,7 @@ public class ProjectService {
         this.sessions = sessions;
         this.leases = leases;
         this.departure = departure;
-        // 空 = 自动推导（<项目根>/data/repos）。**不要在这里自己拼相对路径** ——
+        // 空 = 自动推导（项目根下的 data/repos）。不要在这里自己拼相对路径：
         // 那样"数据放哪儿"会取决于从哪个目录启动。见 DataPaths
         this.reposRoot = DataPaths.locate(reposRoot, "repos");
         this.provisioner = provisioner;
@@ -107,51 +91,49 @@ public class ProjectService {
     /**
      * 建一个项目 = 建一个 git 仓库 + 记一行。创建者自动成为第一个成员，也是房主。
      *
-     * <p>顺序是**先落盘、后写库**（理由与反过来的代价见类注释）。
+     * <p>顺序是先落盘、后写库，理由与反过来的代价见类注释。
+     *
+     * @param creator 创建者，同时成为第一个成员和房主
+     * @param name    项目名
+     * @return 已保存的项目；创建者的工作区已经建好
      */
     public Project create(User creator, String name) {
         ProjectId id = ProjectId.generate();
         Path repoPath = reposRoot.resolve(id.value());
 
-        // 署名用创建者：那个基点提交也是要留在历史里的，得看得出是谁开的这个项目。
-        // 目录名走端口传进去，而不是在这里自己写文件 —— "怎么让一个空目录在 git 里活下来"
-        // 是 git 那边的事，应用层不该知道（见 WorkspaceManager.initializeRepository）
+        // 署名用创建者：基点提交要留在历史里，看得出是谁开的项目。
+        // 目录名走端口传入，应用层不负责"怎么让空目录在 git 里活下来"
         workspaces.initializeRepository(repoPath, CommitIdentity.of(creator.username()), FIRST_DIRECTORY);
 
         Project project = new Project(id, creator.id(), name, repoPath.toString(),
                 java.util.Set.of(creator.id()));
         projects.save(project);
-        // 创建者的树现在就建好。**不是为了"他马上要干活"，而是因为"他拿到了这个项目的访问权"** ——
-        // 点进项目就是工作区，而工作区要读文件（见 WorkspaceProvisioner）
+        // 创建者的树现在就建好：他拿到项目访问权的那一刻，工作区就要能读文件
         provisioner.ensure(creator.id(), project);
         return project;
     }
 
     /**
-     * 退出项目 —— 任何成员都能做，房主也一样。
+     * 退出项目：任何成员都能做，房主也一样。
      *
-     * <h2>带走什么、不带走什么</h2>
-     * <ul>
-     *   <li><b>他名下的会话（连同事件流和幂等键）</b>：那些对话的主人不再是成员了，
-     *       留着就是一批**没有入口能打开**的行 —— 对方进不去（不是他的），
-     *       崩溃恢复却会把它们当成候选去续跑。</li>
-     *   <li><b>他那棵树</b>：库里的行 + 磁盘上的目录。</li>
-     *   <li><b>不带走</b>聊天记录和邀请：它们挂在项目上，项目还在就还归它。</li>
-     * </ul>
+     * <p>带走他名下的会话（连同事件流和幂等键）与他的那棵树（库里的行和磁盘目录）。
+     * 会话必须删：主人不再是成员，留着就没有入口能打开，而崩溃恢复启动时仍会扫描它们、
+     * 给执行到一半的调用补写 {@code ToolInterrupted} —— 一条没人能打开的会话不该继续
+     * 产生事实。
+     * 聊天记录和邀请不跟着走，它们挂在项目上。最后一个人退出时，项目行、聊天记录、
+     * 邀请和仓库目录一起清除（见 {@link ProjectDeparture#leave}）。
      *
-     * <h2>他是最后一个时，项目跟着消失</h2>
-     * 那一次还要清掉项目行、聊天记录、邀请，以及磁盘上的仓库目录
-     * （见 {@link ProjectDeparture#leave}）。
+     * <p>先确认他的会话没在跑：正在跑的那一轮收尾时会 upsert 会话行并写事件，
+     * 不管的话会在删除之后又写回来一条，和丢弃会话是同一条理由。
      *
-     * <h2>为什么先确认他的会话没在跑</h2>
-     * 和「丢弃会话」是同一条理由：正在跑的那一轮收尾时会 upsert 会话行、
-     * 往事件流里写 —— 而我们马上要把那些行删掉。不管的话，结果是删完之后又被写回来一条。
+     * @param project 项目
+     * @param leaver  退出的人，必须是成员
+     * @throws ResponseStatusException 409，他的会话正在执行中
      */
     public void leave(Project project, UserId leaver) {
         LeaseToken held = holdOwnTree(project.id(), leaver);
-        // 会话行会在 departure 里被成批删掉，之后就再也定位不到它们了 ——
-        // 所以排队留言的 id 要**在删之前**收集，**在事务成功之后**才丢
-        //（事务失败时留言还在，用户再点一次就行，和 discard 那条同一个理由）
+        // 会话行会在 departure 里被成批删掉，之后就定位不到；排队留言的 id 必须在删之前收集，
+        // 在事务成功之后才丢。事务失败时留言还在，用户再点一次即可
         List<SessionId> leaving = sessionIdsOf(project.id(), leaver);
         boolean projectIsGone;
         try {
@@ -163,26 +145,35 @@ public class ProjectService {
         }
         leaving.forEach(pending::forget);
 
-        // 磁盘放在事务**之后**：库里已经定了，这一步失败最多是地上多个目录，
-        // 而反过来（先删盘）一次库侧失败就会留下"行还在、仓库没了"的项目
+        // 磁盘操作放在事务之后：此时库已定，失败最多留下一个目录；
+        // 反过来先删盘，库侧失败会留下"行还在、仓库没了"的项目
         Path repoPath = Path.of(project.repoPath());
         eraseQuietly(() -> workspaces.removeWorkspace(WorkspaceId.of(leaver, project.id()), repoPath),
                 "工作区", WorkspaceId.of(leaver, project.id()).toString());
         if (projectIsGone) {
-            // 树先走、仓库后走：worktree 是主仓库的**兄弟目录**，删掉仓库带不走它们
+            // 树先走、仓库后走：worktree 是主仓库的兄弟目录，删仓库带不走它们
             eraseQuietly(() -> workspaces.removeRepository(repoPath), "仓库", project.repoPath());
         }
     }
 
-    /** 「我的项目」。**分页是仓储层的事** —— 见 {@code ProjectRepository.findByMember}。 */
+    /**
+     * @param userId 成员
+     * @param limit  这一页最多多少条
+     * @param offset 跳过多少条
+     * @return 「我的项目」；分页由仓储层完成，见 {@code ProjectRepository.findByMember}
+     */
     public List<ProjectView> listFor(UserId userId, int limit, int offset) {
         return projects.findByMember(userId, limit, offset).stream().map(this::view).toList();
     }
 
+    /**
+     * @param project 项目
+     * @return 对外的项目视图，包含成员和项目目录名
+     */
     public ProjectView view(Project project) {
         return new ProjectView(project.id().value(), project.name(), project.ownerId().value(),
                 project.members().stream().map(this::member).toList(),
-                // 项目目录的名字。界面左边那棵树的第一行是它 —— 先有项目，才有文件
+                // 项目目录名；界面左边那棵树的第一行是它
                 ProjectLayout.DIRECTORY);
     }
 
@@ -191,13 +182,12 @@ public class ProjectService {
     // ------------------------------------------------------------------
 
     /**
-     * 按住**退出者自己**那棵树的租约。他在那儿一个字都没说过时返回 null。
+     * 按住退出者自己那棵树的租约；他在那儿没有会话时返回 null。
      *
-     * <p>{@code null} 不是"拿不到"，而是"不需要拿"：一轮执行必须先有一条会话
-     * （见 {@code TurnExecutor}），没有会话的树上不可能有人在跑。
+     * <p>null 表示"不需要拿"而不是"拿不到"：一轮执行必须先有一条会话，没有会话的树上
+     * 不可能有人在跑。退出的只有他一个人，对方那棵树与这次操作无关。
      *
-     * <p>退出的只有他一个人，所以这里只需要按住一棵树 ——
-     * 对方那棵树上的事情与这次操作无关（他退他的，对方照常干活）。
+     * @throws ResponseStatusException 409，他的会话正在运行
      */
     private LeaseToken holdOwnTree(ProjectId projectId, UserId leaver) {
         Session representative = oneSessionPerTree(projectId).get(WorkspaceId.of(leaver, projectId));
@@ -209,20 +199,10 @@ public class ProjectService {
     }
 
     /**
-     * 这个项目里每棵树挑一条会话当代表。
-     *
-     * <h2>为什么要翻页翻到底</h2>
-     * 要的只是"每棵树一条"，看上去翻一页就够了 —— 但**一个人的会话可以多到把第一页占满**
-     * （两人协作里，每人各写各的），于是另一个人的树一条代表都选不出来。
-     * 而退出这件事恰恰只关心一棵树，选错树就等于那道"有没有在跑"的门形同虚设。
-     *
-     * <p>会话很多的仓库里这是几次查询，但只在退出时发生一次。
-     */
-    /**
-     * 这个人在这个项目里的**所有**会话 id（不是每棵树一条 —— 留言是按会话排的）。
+     * 这个人在这个项目里的所有会话 id（不是每棵树一条，排队留言是按会话排的）。
      *
      * <p>退出时用它在会话行被删之前记下要清哪些内存队列。翻页翻到底的理由和
-     * {@link #oneSessionPerTree} 一样：一个人的会话可以多到把第一页占满。
+     * {@link #oneSessionPerTree} 一样。
      */
     private List<SessionId> sessionIdsOf(ProjectId projectId, UserId owner) {
         List<SessionId> ids = new ArrayList<>();
@@ -237,6 +217,12 @@ public class ProjectService {
         }
     }
 
+    /**
+     * 这个项目里每棵树挑一条会话当代表。
+     *
+     * <p>必须翻页到底：一个人的会话可以多到占满第一页，只翻一页会让另一棵树选不出代表。
+     * 退出只关心一棵树，选错树会让"有没有在跑"的检查失效。只在退出时调用一次。
+     */
     private Map<WorkspaceId, Session> oneSessionPerTree(ProjectId projectId) {
         Map<WorkspaceId, Session> perTree = new LinkedHashMap<>();
         for (int offset = 0; ; offset += SESSION_PAGE) {
@@ -249,11 +235,10 @@ public class ProjectService {
     }
 
     /**
-     * 磁盘这边失败**不往上抛**，只记一条日志。
+     * 磁盘清理失败不往上抛，只记日志。
      *
-     * <p>因为走到这里时库里已经定了：这时候回一个错误，用户看到的是"退出失败"，
-     * 而它事实上成了 —— 他会再点一次，然后发现项目已经不在自己的列表里了。
-     * 地上多留一个目录是可以容忍的垃圾；一个和事实相反的回答不是。
+     * <p>走到这里时库里已经定下结果：回一个错误会让用户以为退出失败，再点一次才发现
+     * 项目已经不在列表里。地上多留一个目录可以容忍，一个与事实相反的回答不行。
      */
     private static void eraseQuietly(Runnable action, String what, String target) {
         try {

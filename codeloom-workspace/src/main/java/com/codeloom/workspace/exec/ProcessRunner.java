@@ -31,61 +31,37 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
- * 跑一个子进程并把它管住：读输出、限时、杀树。
+ * 执行子进程并接管它的生命周期：读输出、限时、超时杀整棵进程树。
  *
- * <p>抽出来是因为**有两处都要跑进程**：{@code GitClient}（参数由我们构造，可信）
- * 和 {@code LocalCommandExecutor}（参数来自模型，不可信）。两者的管控逻辑一样，
- * 只是权限策略不同 —— 那部分由调用方负责，这里只管"把进程跑干净"。
+ * <p>{@code GitClient} 与 {@link LocalCommandExecutor} 共用这一层；权限策略由调用方
+ * 负责。子进程的环境是重建的：名字匹配 {@link #SENSITIVE_ENV_NAME} 的变量和整片
+ * {@code CODELOOM_} 命名空间都不传递，之后再合并调用方显式给出的
+ * {@code extraEnvironment}。理由见
+ * {@code docs/decisions/bug-fix/2026-10-10-subprocess-environment-is-scrubbed.md}。
  *
- * <h2>子进程的环境是**重建**出来的，不是原样继承下去的</h2>
- * 凭据形状的名字（见 {@link #SENSITIVE_ENV_NAME}）和整片 {@code CODELOOM_} 命名空间都不递给子进程，
- * 其余照旧（{@code PATH}、{@code HOME}、locale、代理变量都在）。因为 {@code run_command}
- * 的参数来自模型，而这台机器上的 JVM 环境里有 {@code CODELOOM_SECRET_KEY} ——
- * 那是解开库里用户 API Key 的主密钥，一条 {@code echo} 就能读走。
- *
- * <p>清完之后**才**合并调用方显式给的 {@code extraEnvironment}，所以"这个程序确实需要某个变量"
- * 另有路可走；默认那条路是干净的。反过来把顺序写反，显式给的变量会被清掉，
- * 表现是 git 忽然读不到自己那份配置。
- *
- * <h2>四个容易写错的地方</h2>
- * <ol>
- *   <li><b>必须在等进程结束之前就开始读输出</b>。管道缓冲区只有几十 KB，
- *       写满之后子进程会阻塞在写操作上，而父进程正阻塞在 waitFor —— 双方死锁。
- *       所以两个流各起一个虚拟线程去读。</li>
- *   <li><b>超时要杀整棵进程树</b>，不是只杀父进程。{@code mvn} 会拉起子 JVM，
- *       只杀父进程的话子 JVM 会变成孤儿继续跑、继续占着文件锁，
- *       下一个 turn 的构建就会莫名其妙地失败。</li>
- *   <li><b>输出要截断</b>。一次构建可能刷出几万行，不截断的话会同时打爆
- *       上下文窗口和数据库。</li>
- *   <li><b>要关掉子进程的标准输入</b>。它默认是一条开着的管道：任何去读输入的命令
- *       都会一直等下去 —— 一条不带参数的 {@code cat} 就能把线程挂到超时为止。
- *       见 {@link #run} 里那句 {@code close()}。</li>
- * </ol>
+ * <p>四个实现约束：必须在等待进程结束前开始读两路输出（否则管道写满会死锁）；
+ * 超时必须杀整棵进程树；输出必须限长；启动后立即关闭子进程的 stdin。
  */
 public final class ProcessRunner {
 
-    /** 等待进程时每段睡多久。决定超时判定和取消响应的粒度。 */
+    /** 等待进程时每段睡眠的毫秒数，决定超时判定和取消响应的粒度。 */
     private static final long POLL_MILLIS = 100;
 
-    /** 杀完之后最多等它多久才去读退出码。见 {@link #exitCodeOf}。 */
+    /** 强杀后等待进程退出的上限，见 {@link #exitCodeOf}。 */
     private static final long KILL_SETTLE_MILLIS = 2_000;
 
     /**
-     * 等不到退出码时报的那个数。
+     * 等不到退出码时返回的占位值。
      *
-     * <p>它只是个"不是 0"的占位，**不代表这条命令的结论** —— 结论在
-     * {@link ProcessOutcome#termination()} 里。选 1 是因为它是"进程没成功"最常见的码。
+     * <p>它只表示"不是 0"，不是命令结论；结论在 {@link ProcessOutcome#termination()}。
      */
     private static final int FALLBACK_EXIT_CODE = 1;
 
     /**
-     * 子进程环境里**不许带过去**的名字。
+     * 子进程环境里不许带过去的名字，按形状匹配。
      *
-     * <p>凭据的名字就那么几种形状，按形状匹配比维护一张名单可靠：名单会漏，而且每加一个新变量
-     * 都得记得回来补；模式匹配自动盖住它。deepseek-harness 用同一套规则清它的每一个子进程。
-     *
-     * <p>代价是误伤：{@code TOKENIZERS_PARALLELISM} 这种带 TOKEN 字样的普通变量也进不去。
-     * 那比漏掉一把真密钥轻得多。
+     * <p>按形状匹配能自动覆盖新增变量；维护名单会漏。代价是误伤，例如
+     * {@code TOKENIZERS_PARALLELISM} 这类普通变量也进不去，但比漏掉真密钥轻。
      */
     private static final Pattern SENSITIVE_ENV_NAME =
             Pattern.compile("KEY|PASSWORD|SECRET|TOKEN", Pattern.CASE_INSENSITIVE);
@@ -93,11 +69,8 @@ public final class ProcessRunner {
     /**
      * 我们自己的配置命名空间，整片丢掉。
      *
-     * <p>它里面除了口令，还有 {@code CODELOOM_COMMAND_WHITELIST} 这类**不该让模型看见的调参** ——
-     * 让 agent 读到自己的审批白名单，等于把"哪条命令不会被人看见"告诉它。
-     *
-     * <p>比对上要 {@code toUpperCase}：Windows 的环境名不区分大小写，父进程里一个
-     * {@code codeloom_*} 不这样做就会原样漏过去。
+     * <p>其中除口令外还有 {@code CODELOOM_COMMAND_WHITELIST} 这类调参，不能让模型知道
+     * 自己的审批白名单。比较前转大写：Windows 的环境名不区分大小写。
      */
     private static final String OWN_ENV_PREFIX = "CODELOOM_";
 
@@ -105,18 +78,17 @@ public final class ProcessRunner {
     }
 
     /**
-     * 同步执行，直到进程结束、超时、或被中断。
+     * 同步执行，直到进程结束、超时或被中断。
      *
+     * @param command 要执行的 argv，不能为空
      * @param workingDirectory 工作目录，null 表示继承当前目录
-     * @param extraEnvironment 显式给子进程的环境变量。**在清洗之后合并**，所以调用方给的
-     *                         一定到得了（见类注释），同名项以这里为准
-     * @param timeout          时限；到点强杀整棵进程树
-     * @param maxOutputChars   单个流（stdout / stderr 各自）的字符上限
-     * @param charset          **兜底**字符集：解出来不是合法 UTF-8 时用它，
-     *                         见 {@link #decode(byte[], Charset)}。不是"就用它解"
-     * @param cancellation     取消信号；{@link CancellationToken#none()} 表示不取消
-     * @throws ProcessException 启动失败 / 等待时被中断。**超时和取消不在这里** ——
-     *                         它们是有结果的返回值，见 {@link CommandTermination}
+     * @param extraEnvironment 显式给子进程的环境变量；在清洗之后合并，同名项以这里为准
+     * @param timeout 时限；到点强杀整棵进程树
+     * @param maxOutputChars 单个流（stdout、stderr 各自）的字符上限
+     * @param charset 兜底字符集，UTF-8 解码失败时使用，见 {@link #decode(byte[], Charset)}
+     * @param cancellation 取消信号；{@link CancellationToken#none()} 表示不取消
+     * @return 进程结果；超时和取消通过 {@link CommandTermination} 报告
+     * @throws ProcessException 启动失败或等待时线程被中断
      */
     public static ProcessOutcome run(List<String> command,
                                      Path workingDirectory,
@@ -133,8 +105,8 @@ public final class ProcessRunner {
             throw new IllegalArgumentException("命令不能为空");
         }
 
-        // 提前把最常见的一种启动失败查出来。不查的话，ProcessBuilder 只会抛一句
-        // "Cannot run program ... CreateProcess error=267"，很难定位到是工作目录压根不存在。
+        // 提前查最常见的一种启动失败：否则 ProcessBuilder 只报 CreateProcess error=267，
+        // 很难看出是工作目录不存在
         if (workingDirectory != null && !Files.isDirectory(workingDirectory)) {
             throw new ProcessException("工作目录不存在或不是目录: " + workingDirectory);
         }
@@ -143,8 +115,7 @@ public final class ProcessRunner {
         if (workingDirectory != null) {
             builder.directory(workingDirectory.toFile());
         }
-        // 顺序就是契约，见类注释：先清掉 ProcessBuilder 默认继承的那一份，再放"清过的父环境"，
-        // 最后才合并调用方显式给的
+        // 顺序是契约：先清掉默认继承的环境，再放清洗后的父环境，最后合并显式变量
         builder.environment().clear();
         builder.environment().putAll(childEnvironment());
         builder.environment().putAll(extraEnvironment);
@@ -157,17 +128,15 @@ public final class ProcessRunner {
             throw new ProcessException("无法启动进程: " + String.join(" ", command), e);
         }
 
-        // **立刻关掉子进程的标准输入。** 不关的话那条管道会一直开着，谁去读它谁就挂在那儿
-        // 等一个永远不来的字节 —— 一条 `cat` 能把线程挂到超时为止，而用户看到的是
-        // "命令卡住了"，查不出原因。关掉写端等于递过去一个 EOF："没有输入，往下走"。
-        // （Claude Code 和 deepseek-harness 都默认这么做：它们的子进程都是 stdin: 'ignore'。）
+        // 立刻关闭子进程的标准输入：不关的话，读输入的命令会一直等一个不会来的字节，
+        // 例如不带参数的 cat 会把线程挂到超时。关闭写端等于递过去 EOF。
         try {
             process.getOutputStream().close();
         } catch (IOException e) {
             // 关不上不该让这条命令失败：进程已经起来了，输出照样收得到
         }
 
-        // 虚拟线程在这里是白送的：读两个流本来就是阻塞 IO，不需要真线程
+        // 读两个流是阻塞 IO，虚拟线程足够
         try (ExecutorService readers = Executors.newVirtualThreadPerTaskExecutor()) {
             Future<Captured> outFuture = readers.submit(() -> capture(process.getInputStream(), maxOutputChars, charset));
             Future<Captured> errFuture = readers.submit(() -> capture(process.getErrorStream(), maxOutputChars, charset));
@@ -189,10 +158,13 @@ public final class ProcessRunner {
     }
 
     /**
-     * 清洗规则本身，**纯函数**。
+     * 清洗规则本身，纯函数。
      *
-     * <p>抽出来是为了能拿一份**构造好的**环境去断言它 —— 本进程的环境里有没有可清的东西
-     * 取决于这台机器，靠它验不出规则对不对。
+     * <p>抽出来是为了能拿一份构造好的环境断言规则；本机环境里有没有可清的东西取决于
+     * 这台机器。
+     *
+     * @param parentEnvironment 父进程环境
+     * @return 保留下来的变量，按原顺序
      */
     static Map<String, String> scrubbed(Map<String, String> parentEnvironment) {
         Map<String, String> kept = new LinkedHashMap<>();
@@ -207,18 +179,14 @@ public final class ProcessRunner {
     }
 
     /**
-     * 分段等待，以便在等待期间兼顾两件事：超时，和**用户的取消信号**。
+     * 分段等待进程结束，同时检查超时和用户的取消信号。
      *
-     * <p>不能直接 {@code waitFor(timeout)} 一觉睡到底 —— 那样用户按 Esc 也没人理，
-     * 只能等命令自己跑完。所以按 {@value #POLL_MILLIS} 毫秒一段地等，
-     * 每段醒来先看取消信号。取消的响应粒度就是这 100 毫秒，
-     * 对"按下按钮立刻停下"来说完全够用。
+     * <p>不能直接 {@code waitFor(timeout)}：那样用户按 Esc 也无人处理。按
+     * {@value #POLL_MILLIS} 毫秒一段等待，每段醒来先看取消信号。被杀掉是结果而不是
+     * 失败，抛异常会把已产生的输出一起扔掉。
      *
-     * <h2>它返回"怎么结束的"，而不是"抛不抛异常"</h2>
-     * 被杀掉的那两种**是结果，不是失败**：进程确实结束了（而且往往已经打过不少输出），
-     * 只是不是它自己结束的。抛异常会把那些输出一起扔掉 —— 而它们正是要看的东西。
-     *
-     * @return 进程是怎么结束的。只有"等的时候线程被中断"才抛，因为那时整个 JVM 正在往下走
+     * @return 进程是怎么结束的
+     * @throws ProcessException 等待时线程被中断，已终止进程树
      */
     private static CommandTermination awaitCompletion(Process process, List<String> command,
                                                       Duration timeout,
@@ -245,8 +213,7 @@ public final class ProcessRunner {
                 return CommandTermination.COMPLETED;
             }
             if (cancellation.isCancelled()) {
-                // 注意这里是【先杀树再返回】：光发信号不管用，
-                // 必须等进程真的死掉，否则会留下僵尸进程和半成品文件
+                // 先杀树再返回：必须等进程真的死亡，否则会留下僵尸进程和半成品文件
                 killTree(process);
                 return CommandTermination.CANCELLED;
             }
@@ -254,15 +221,14 @@ public final class ProcessRunner {
     }
 
     /**
-     * 读退出码，**杀掉的那条路要等它真的死掉**。
+     * 读退出码；被杀掉的路径要先等进程真的退出。
      *
-     * <p>{@link #killTree} 是异步的（{@code destroyForcibly} 只是发信号），
-     * 立刻问 {@code exitValue()} 会撞上 {@code IllegalThreadStateException}。
-     * 正常路径上其实不用等 —— 两个读流的线程已经读到 EOF 了 —— 但那是巧合，
-     * 不是保证，所以这里显式地等一小会儿。
+     * <p>{@link #killTree} 是异步的，立刻问 {@code exitValue()} 会抛
+     * {@code IllegalThreadStateException}。等不到就返回 {@link #FALLBACK_EXIT_CODE}，
+     * 它不代表成功与否，结论在 {@link ProcessOutcome#termination()}。
      *
-     * <p>等不到就报 1：那只是个"不是 0"的占位。**这条命令到底算不算成功，
-     * 判据在 {@link ProcessOutcome#termination()} 里，不在这个数字里。**
+     * @param process 已启动的进程
+     * @return 退出码，或占位值
      */
     private static int exitCodeOf(Process process) {
         try {
@@ -276,11 +242,13 @@ public final class ProcessRunner {
     }
 
     /**
-     * 强杀整棵进程树。
+     * 强杀整棵进程树：先杀子孙，再杀自己。
      *
-     * <p>用 {@link ProcessHandle#descendants()} 而不是 {@code taskkill /T}：
-     * 前者跨平台、不用再起一个进程，语义上也是同一件事 —— 先杀子孙再杀自己，
-     * 反过来会出现"父进程死了、子进程被系统重新挂到 init 下"从而逃出遍历范围的窗口。
+     * <p>用 {@link ProcessHandle#descendants()} 而不是 {@code taskkill /T}：跨平台且
+     * 不需要再起进程。顺序反了的话，父进程死亡后子进程可能被重新挂到 init，
+     * 从而逃出遍历范围。
+     *
+     * @param process 要终止的进程
      */
     public static void killTree(Process process) {
         ProcessHandle handle = process.toHandle();
@@ -300,37 +268,35 @@ public final class ProcessRunner {
     }
 
     /**
-     * 把流读到结尾，只留**最后** {@code limit} 个字符。
+     * 把流读到结尾，只留最后 {@code limit} 个字符。
      *
-     * <p><strong>先收字节、读完再解码</strong>，而不是一边读一边按固定字符集解。
-     * 理由是解码字符集事先不知道：同一台机器上，{@code node} 吐 UTF-8 而裸 JVM 吐 GBK，
-     * 只有拿到（一段）字节之后才判断得了。判断规则见 {@link #decode(byte[], Charset)}。
+     * <p>先收字节、读完再解码：输出编码事先不知道，只有拿到字节后才能判断，见
+     * {@link #decode(byte[], Charset)}。保留尾部而不是开头，因为命令的结论（报错、
+     * 堆栈、构建失败）在结尾；开头被丢弃由 {@link ProcessOutcome#truncated()} 报告。
+     * 进程被杀时流异常关闭是预期路径。
      *
-     * <p><strong>保尾，不保头。</strong> 这是一条命令的输出，而命令的结论在结尾 ——
-     * 报错、堆栈、构建失败那一行。同仓的 {@code VerificationRunner} 出于同一个理由也保尾，
-     * {@code run_command} 给模型看的工具描述里写的也是这条。开头被丢掉这件事本身由
-     * {@link ProcessOutcome#truncated()} 报出去，由调用方说给模型听。
+     * <p>包级可见是为了让测试能拿构造好的字节流断言它。
      *
-     * <p>注意进程被杀时流会异常关闭，那是**预期路径**，不当错误处理。
-     *
-     * <p>{@code static} 且包级可见是为了能拿一段**构造好的**字节流去断言它，
-     * 见 {@code ProcessRunnerTest} —— 同 {@link #decode(byte[], Charset)}。
+     * @param in 输入流
+     * @param limit 保留的字符上限；非正数时只读完流并返回空串
+     * @param fallback UTF-8 解码失败时的兜底字符集
+     * @return 保留的文本及是否丢弃了开头
      */
     static Captured capture(InputStream in, int limit, Charset fallback) {
         if (limit <= 0) {
-            // 上限是 0 意味着什么都不要。但流**照样要读到结尾** ——
-            // 不读完的话子进程会阻塞在写满的管道上，而父进程正等着它退出
+            // 上限为 0 表示不要内容，但流仍必须读到结尾，
+            // 否则子进程会阻塞在写满的管道上
             drain(in);
             return new Captured("", true);
         }
         int byteCap = byteCapFor(limit);
-        // 环：第 p 个字节住在 ring[p % byteCap]，于是最后 byteCap 个字节总是齐的
+        // 环形缓冲：第 p 个字节住在 ring[p % byteCap]，最后 byteCap 个字节总是齐的
         byte[] ring = new byte[byteCap];
         long total = 0;
         byte[] buffer = new byte[8192];
         try {
             int read;
-            // 一直读到结尾：不读完的话子进程会阻塞在写满的管道上，而父进程正等着它退出
+            // 一直读到结尾：不读完的话子进程会阻塞在写满的管道上
             while ((read = in.read(buffer)) != -1) {
                 // 单次读也可能比整个环还长 —— 那就只留它自己的尾巴
                 for (int i = Math.max(0, read - byteCap); i < read; i++) {
@@ -353,7 +319,7 @@ public final class ProcessRunner {
         return new Captured(text, truncated);
     }
 
-    /** 读到结尾再丢掉 —— 上限为 0 时用，流仍然必须被读完。 */
+    /** 读到结尾后丢弃；上限为 0 时用，流仍然必须被读完。 */
     private static void drain(InputStream in) {
         byte[] buffer = new byte[8192];
         try {
@@ -378,13 +344,13 @@ public final class ProcessRunner {
     }
 
     /**
-     * 头被切掉之后，第一个字节可能只是某个多字节字符的中间一截 —— 挪到字符边界上。
+     * 头被切掉后，第一个字节可能只是某个多字节字符的中间一截；挪到字符边界上。
      *
-     * <p>不挪就直接解，严格解码会**当场失败**，于是整段退回去按兜底字符集解：
-     * 一段本来完全正确的 UTF-8 中文会整段变成乱码，而原因只是开头少了那两个字节。
-     * （这和"结尾那半截不该触发兜底"是同一件事的两头，见 {@link #decodeOrNull}。）
+     * <p>否则严格解码会失败，整段退回兜底字符集，本来正确的 UTF-8 中文会变成乱码。
+     * UTF-8 续字节形如 {@code 10xxxxxx}，最多前进 3 个字节。
      *
-     * <p>UTF-8 的续字节长这样：{@code 10xxxxxx}，所以最多往前挪 3 个。
+     * @param bytes 保留下来的字节
+     * @return 第一个完整字符的起始下标
      */
     private static int utf8Boundary(byte[] bytes) {
         int at = 0;
@@ -397,8 +363,12 @@ public final class ProcessRunner {
     /**
      * 留最后 {@code limit} 个字符。
      *
-     * <p>切点落在**低代理**上时要再往后一个：那说明它的高代理被切掉了，
-     * 剩下半对谁也不认识，只会在消息里变成一个孤立的 {@code \ud83d}。
+     * <p>切点落在低代理上时再前进一个：高代理已被切掉，剩下半对只会变成孤立的
+     * {@code \ud83d}。
+     *
+     * @param text 完整文本
+     * @param limit 保留的字符数
+     * @return 尾部文本
      */
     private static String tailChars(String text, int limit) {
         int from = text.length() - limit;
@@ -409,10 +379,12 @@ public final class ProcessRunner {
     }
 
     /**
-     * 字节上限 = 字符上限 × 单字符最多占的字节数。
+     * 字节上限 = 字符上限 × 单字符最多占的字节数（UTF-8 为 4）。
      *
-     * <p>留满余量（UTF-8 一个字符最多 4 字节），免得"字节先到顶"把本来留得下的字符切掉。
-     * 上限仍然是有界的：一次构建刷出几百兆也不会把内存撑爆。
+     * <p>留满余量，免得字节先到顶、把本来留得下的字符切掉；上限仍然有界。
+     *
+     * @param charLimit 字符上限
+     * @return 对应的字节上限
      */
     private static int byteCapFor(int charLimit) {
         return charLimit > Integer.MAX_VALUE / MAX_BYTES_PER_CHAR
@@ -424,12 +396,12 @@ public final class ProcessRunner {
     private static final int MAX_BYTES_PER_CHAR = 4;
 
     /**
-     * 子进程默认使用的编码 —— 也就是 {@code native.encoding} 那个系统属性。
+     * 本机子进程默认使用的编码，即 {@code native.encoding} 系统属性。
      *
-     * <p>为什么不用 {@code Charset.defaultCharset()}：从 JDK 18 起它恒为 UTF-8（JEP 400），
-     * 和"本机子进程实际吐什么"已经没关系了。中文 Windows 上子进程（裸 JVM、python）
-     * 跟随控制台代码页，这里是 <strong>GBK</strong>，而 {@code defaultCharset()} 会说 UTF-8 ——
-     * 用它当兜底就等于没兜。
+     * <p>不能用 {@link Charset#defaultCharset()}：从 JDK 18 起它恒为 UTF-8（JEP 400），
+     * 与子进程实际输出无关。中文 Windows 上裸 JVM 等子进程跟随控制台代码页（GBK）。
+     *
+     * @return 本机编码；属性缺失、空白或不受支持时退回 JVM 默认字符集
      */
     public static Charset nativeCharset() {
         String name = System.getProperty("native.encoding");
@@ -440,42 +412,32 @@ public final class ProcessRunner {
     }
 
     /**
-     * 字节 → 文本：<strong>先按 UTF-8 解，解不出来再按兜底字符集解</strong>。
+     * 字节转文本：先严格按 UTF-8 解，失败后按 {@code fallback} 解。
      *
-     * <h2>为什么不能固定一个字符集</h2>
-     * 同一台机器上不同工具吐的编码不一样，实测（Windows 11 + JDK 21）：
+     * <p>同一台机器上不同工具的输出编码不同（实测 Windows 11 + JDK 21：node 与 mvn 是
+     * UTF-8，ProcessBuilder 直接拉起的裸 JVM 是 GBK），固定任一种都会让另一类乱码。
      *
-     * <pre>
-     *   node                                  → UTF-8
-     *   mvn（含它 fork 出的测试 JVM）           → UTF-8
-     *   ProcessBuilder 直接拉起的裸 JVM        → GBK（跟随 native.encoding）
-     * </pre>
+     * <p>已知局限：一段 GBK 字节若整体恰好是合法 UTF-8，会被判成 UTF-8 而解错；短输出
+     * 理论上可能撞上。
      *
-     * 固定 UTF-8 会让后一类乱码（得到一串 U+FFFD），固定 GBK 又会让前两类乱码。
-     * 而"是不是合法 UTF-8"是个**能算出来**的判据，比猜工具名可靠。
-     *
-     * <h2>已知的局限（说清楚，别以为它万无一失）</h2>
-     * 如果一段 GBK 字节**恰好**整体构成合法 UTF-8，这里会判成 UTF-8 而解错。
-     * 对一整句中文来说这几乎不可能，但很短的输出理论上撞得上。
-     * 真要根治只能改子进程那边（注入 {@code JAVA_TOOL_OPTIONS} 之类强制它说 UTF-8），
-     * 但那会给每个 JVM 的 stderr 塞一行 "Picked up JAVA_TOOL_OPTIONS" 噪声，
-     * 而且只覆盖得了我们认得出来的那几种工具 —— 不如这条规则通用。
+     * @param bytes 原始字节
+     * @param fallback UTF-8 解码失败时使用的字符集
+     * @return 解码后的文本
      */
     static String decode(byte[] bytes, Charset fallback) {
         String utf8 = decodeOrNull(bytes, StandardCharsets.UTF_8);
         return utf8 != null ? utf8 : new String(bytes, fallback);
     }
 
-    /** 严格解码；一旦遇到非法字节序列就返回 null（而不是塞 U+FFFD 蒙混过去）。 */
+    /** 严格解码；遇到非法字节序列时返回 null，而不是塞入 U+FFFD。 */
     private static String decodeOrNull(byte[] bytes, Charset charset) {
         CharsetDecoder decoder = charset.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT);
         CharBuffer decoded = CharBuffer.allocate(Math.max(1, bytes.length));
         try {
-            // endOfInput=false：结尾那个**不完整**的多字节序列不算错误，只是留在缓冲区里
-            // 没人消费。这正是要的 —— 输出被字节上限切断时最后一个字常常只剩半截，
-            // 那不该让它整段退回去按兜底字符集解
+            // endOfInput=false：结尾不完整的多字节序列不算错误，留在缓冲区里即可 ——
+            // 输出被切断时最后一个字常常只剩半截，不应因此整段退回兜底字符集
             CoderResult result = decoder.decode(ByteBuffer.wrap(bytes), decoded, false);
             if (result.isError()) {
                 result.throwException();
@@ -489,8 +451,8 @@ public final class ProcessRunner {
     /**
      * 一个流收下来的那一段。
      *
-     * @param text      解码之后的文本，**保尾**（见 {@link #capture}）
-     * @param truncated 开头被丢掉了吗
+     * @param text 解码后的文本，保留尾部，见 {@link #capture}
+     * @param truncated 开头是否被丢弃
      */
     record Captured(String text, boolean truncated) {
     }

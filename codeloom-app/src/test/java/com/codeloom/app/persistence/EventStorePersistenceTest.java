@@ -35,14 +35,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 事件存储 + 执行租约的 fencing，真连 MySQL。
+ * 事件存储与执行租约 fencing 的真 MySQL 测试。
  *
- * <p>这个类是「水平扩展下不出问题」那句话的兑现处：**僵尸写入者被挡住**这件事，
- * 只有跑真库、并真的让两个 token 先后出现，才验证得了。
- *
- * <h2>为什么测试能造出"会话已经被接管"而不需要真的起两个实例</h2>
- * 因为接管在存储这一层等价于"发了一个更大的号"。所以
- * {@link #acquire} 调两次就是两个实例，不需要真的并发。
+ * <p>“僵尸写入者被挡住”只有跑真库、让两个 token 先后出现才验得了。接管在存储层
+ * 等价于“发了一个更大的号”，所以 {@link #acquire} 调两次就代表两个实例，
+ * 不需要真的并发。见 {@code docs/decisions/architecture/2026-09-24-lease-and-fencing-token.md}。
  */
 class EventStorePersistenceTest extends AbstractPersistenceTest {
 
@@ -79,18 +76,17 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
 
         assertThat(appended).hasSize(4);
         assertThat(appended).extracting(StoredEvent::seq).isSorted();
-        // 同一事务、同一条语句插进去的自增主键是连续的 —— 这是 event 表 seq「无洞」
-        // 那个前提的正面证据。跨会话才会出现空洞（别的会话的插入夹在中间）。
+        // 同一事务、同一条语句插进去的自增主键是连续的，这是 event 表 seq“无洞”的
+        // 正面证据；跨会话才会出现空洞。
         assertThat(appended.getLast().seq() - appended.getFirst().seq()).isEqualTo(3);
 
-        // append 交出来的信封，和落库之后再读回来的**完全相等** —— 包括时间。
-        // 这正是 append 该返回信封而不是只返回 seq 的理由：广播出去的那一条，
-        // 必须和后来断线重连拉回来的那一条是同一个东西，否则订阅者两次会看到"两条"。
+        // append 返回的信封与落库后读回来的完全相等，包括时间。广播出去的那条必须和
+        // 断线重连拉回来的那条是同一个东西，否则订阅者会看到“两条”。
         assertThat(events.readAll(session.id())).isEqualTo(appended);
     }
 
     @Test
-    @DisplayName("【便宜的闸】lastContextTokens 读的是最后一条收尾的读数；那条没有读数就问不出来")
+    @DisplayName("【便宜的闸】lastContextTokens 读的是最后一轮的读数；那一轮没读数就问不出来")
     void lastContextTokensReadsTheNewestSettledReading() {
         Session session = savedSession();
 
@@ -102,9 +98,12 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
                 acquire(session));
         assertThat(events.lastContextTokens(session.id())).hasValue(12_345);
 
-        // 这一轮被取消了，它落下的收尾**没有读数**，而"最后一条"正是它 —— 于是问不出来。
-        // 这是刻意的降级：调用方退回"读整条流、自己继续往前找"，代价是慢这一次，
-        // 而不是拿一个过期的数把判断糊弄过去
+        // 取消的轮次只会留下开轮消息，不会写用量事件；不能把上一轮的读数当成这一轮的。
+        // 这是刻意的降级：调用方退回读整条流自己往前找，而不是拿过期的数糊弄。
+        events.append(session.id(), new UserMessage("第二轮"), acquire(session));
+        assertThat(events.lastContextTokens(session.id())).isEmpty();
+
+        // 服务商没报用量的正常收尾同样问不出来
         events.append(session.id(), List.of(settledWithoutReading()), acquire(session));
         assertThat(events.lastContextTokens(session.id())).isEmpty();
     }
@@ -114,7 +113,7 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         return new TurnTokensUsed(100, 20, 0, 0, contextTokens, 64_000, "deepseek-flash");
     }
 
-    /** 一次收尾，**没有读数**：这一轮一次模型都没调成（被取消、或服务商没报用量）。 */
+    /** 一次没有读数的收尾：这一轮一次模型都没调成（被取消，或服务商没报用量）。 */
     private static TurnTokensUsed settledWithoutReading() {
         return new TurnTokensUsed(100, 20, 0, 0, null, null, "deepseek-flash");
     }
@@ -122,9 +121,8 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("经 MySQL 的 JSON 列走一圈，事件仍然相等（键序被规范化过也认）")
     void eventsSurviveTheJsonColumn() {
-        // MySQL 的 JSON 列会规范化对象键的顺序，所以这里验的不是"字节相同"而是
-        // "反序列化出来相等" —— 而那正是我们从一开始就依赖的性质，也是 schema.sql
-        // 里选择用 JSON 类型而不是 TEXT 时写下过的那个前提。
+        // MySQL 的 JSON 列会规范化对象键顺序，所以验的是“反序列化出来相等”，
+        // 而不是字节相同；这正是选 JSON 类型而非 TEXT 的前提。
         Session session = savedSession();
 
         events.append(session.id(), List.of(
@@ -184,15 +182,13 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         LeaseToken second = acquire(session);
         assertThat(second.fencingToken()).isGreaterThan(first.fencingToken());
 
-        // 僵尸写入者从 GC 停顿里醒来，它不知道自己已经失去执行权。
-        // 断言打在那句话上（它带着号码）——**这是它唯一的口子**：把一个号码单开一个
-        // 访问器出去，只为了让测试读得到，那是给测试开的生产 API
+        // 僵尸写入者从 GC 停顿里醒来，不知道已失去执行权。断言打在那条带号码的消息上，
+        // 不为测试单开号码访问器 —— 那是给测试开生产 API。
         assertThatThrownBy(() -> events.append(session.id(), new UserMessage("僵尸写的"), first))
                 .isInstanceOf(StaleLeaseException.class)
                 .hasMessageContaining(String.valueOf(first.fencingToken()));
 
-        // 关键不是"报错了"，而是"什么都没写进去"：半途失败留下半条历史，
-        // 比直接失败更难收拾
+        // 关键不是报错，而是什么都没写进去：半途失败留下半条历史更难收拾。
         assertThat(events.readAll(session.id()))
                 .extracting(stored -> ((UserMessage) stored.event()).text())
                 .containsExactly("第一条");
@@ -203,12 +199,27 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     }
 
     @Test
+    @DisplayName("【安全约束】没发过的“未来号”同样被拒 —— 合法不等于比当前号大")
+    void tokenThatWasNeverIssuedIsRejected() {
+        Session session = savedSession();
+        long current = acquire(session).fencingToken();
+
+        // 伪造一个比当前号更大的 token。只拒绝“旧号”的写法会让它通过，
+        // 而它和旧号一样从未被发出去过，不应该取得写入权
+        LeaseToken forged = new LeaseToken(session.id(), session.workspaceId(),
+                current + 1, "forged-instance");
+
+        assertThatThrownBy(() -> events.append(session.id(), new UserMessage("伪造的写入"), forged))
+                .isInstanceOf(StaleLeaseException.class)
+                .hasMessageContaining(String.valueOf(current + 1));
+        assertThat(events.readAll(session.id())).isEmpty();
+    }
+
+    @Test
     @DisplayName("【安全约束】拿 A 会话的合法 token 写 B 会话 —— 拦住")
     void tokenFromAnotherSessionIsRejected() {
-        // 最容易被绕过的一种用法：token 本身没毛病，而写下去的是另一条会话。
-        //
-        // 共享工作区之后这两条会话**共用一棵树**（同一个人的两段对话），fence 校验
-        // 必然通过 —— 于是这道会话比对成了唯一的拦网。
+        // token 本身合法，但写的是另一条会话。共享工作区后这两条会话共用一棵树，
+        // fence 校验必然通过，会话比对成了唯一的拦网。
         Session alice = savedSession();
         Session bob = sameTreeAs(alice);
 
@@ -236,9 +247,8 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("【安全约束】表里混进一行流式增量 → 读的时候炸，而不是让它流进回放")
     void ephemeralRowsAreRejectedOnRead() {
-        // codec 现在解得开 delta（它要跨实例推送），所以"不许落库"这条规则必须由
-        // 存储层来守 —— 只有它知道那一行是从 event 表里读出来的。
-        // 编译期拦不住别人手工 insert，这里是第二道。
+        // codec 解得开 delta（要跨实例推送），所以“不许落库”必须由存储层来守：
+        // 只有它知道那一行是从 event 表读出来的。编译期拦不住手工 insert，这是第二道。
         Session session = savedSession();
         jdbc.update("""
                 INSERT INTO `event` (session_id, `type`, payload, occurred_at)
@@ -253,13 +263,9 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("对不存在的工作区发号要报错，绝不能把连接上残留的号发出去")
     void issuingForUnknownWorkspaceFails() {
-        // 这条钉的是一个具体的坑：发号用的是 MySQL 的 LAST_INSERT_ID(expr)，
-        // 而它不是为这个用途设计的 —— UPDATE 一行都没命中时 expr 根本不会被求值，
-        // 紧接着 SELECT LAST_INSERT_ID() 读回来的是这条连接更早的残留值。
-        // 不问命中行数就把它当号发出去，会让一棵不相干的工作区莫名失去写入权。
-        //
-        // 号是**按树**发的（见 WorkspaceFence）：所以这里要造一个没落过库的树 id，
-        // 而不是一条没落过库的会话 —— 那是两件事，而这一步正是把键提到树上的后果。
+        // 发号用 MySQL 的 LAST_INSERT_ID(expr)：UPDATE 没命中任何行时 expr 不会被求值，
+        // 紧接着读回的是连接上更早的残留值。不问命中行数就发号，会让一棵无关的工作区
+        // 莫名失去写入权。号按树发（见 WorkspaceFence），所以这里造未落库的树 id。
         WorkspaceId unknown = WorkspaceId.of(
                 UserId.of("77777777-7777-7777-7777-777777777777"), PROJECT_ID);
 
@@ -273,11 +279,9 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     @DisplayName("【安全约束】没有事务时 assertValid 直接抛，而不是自己开一个、让那次加锁读白读")
     void assertValidRefusesToRunWithoutATransaction() {
-        // 显式关掉测试自带的事务，模拟"有人在事务外调用它"。
-        // 如果 assertValid 用的是 REQUIRED 而不是 MANDATORY，它会自己开一条事务、
-        // 读完立刻释放锁，然后调用方在毫无保护的情况下写入 —— 而且看起来一切正常。
-        //
-        // 本方法刻意不碰数据库，所以关掉事务也不会留下未回滚的数据。
+        // 显式关掉测试事务，模拟事务外调用。若 assertValid 用 REQUIRED 而不是 MANDATORY，
+        // 它会自开事务、读完立刻释放锁，调用方随后在无保护下写入，且看起来一切正常。
+        // 本方法不碰数据库，关掉事务不会留下未回滚的数据。
         LeaseToken token = new LeaseToken(SessionId.generate(),
                 WorkspaceId.of(UserId.of("77777777-7777-7777-7777-777777777777"), PROJECT_ID),
                 1L, "test-instance");
@@ -289,9 +293,8 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("【共享工作区】同一个人的两条会话共用一个号：发号在树那一层单调，不按会话各算各的")
     void sessionsSharingATreeShareTheFenceToo() {
-        // 两条会话共用一棵树之后，"按会话发号"和"按树发号"就分家了 —— 后果是：
-        // 会话 B 拿到树锁、发到的号如果比 A 那一行自己的计数还小，停顿后醒来的 A
-        // 就会**通过校验**，继续写一棵已经不属于它的树。
+        // 共用一棵树后，“按会话发号”与“按树发号”会分家：B 拿到的号若比 A 那一行自己的
+        // 计数小，醒来的 A 会通过校验，继续写一棵已不属于它的树。
         Session first = savedSession();
         Session second = sameTreeAs(first);
 
@@ -301,21 +304,21 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         long forSecond = fence.issue(second.workspaceId());
 
         assertThat(forSecond).isGreaterThan(forFirst);
-        // 号记在树上，所以两个会话看到的是**同一个**当前值
+        // 号记在树上，所以两个会话看到同一个当前值。
         assertThat(rawFencingToken(first)).isEqualTo(forSecond);
         assertThat(rawFencingToken(second)).isEqualTo(forSecond);
     }
 
     // ------------------------------------------------------------------
 
-    /** 造一条真会话**和它那棵树**。号是对树发的，所以两行都要落。 */
+    /** 造一条真会话和它那棵树。号是对树发的，所以两行都要落。 */
     private Session savedSession() {
         return TestSessions.persist(sessions, worktrees, SessionId.generate(), PROJECT_ID, OWNER,
                 "D:/ws/" + UUID.randomUUID(), "basecommit0");
     }
 
     /**
-     * 同一个人的另一条会话 —— 同一个项目、同一个 owner，所以**落在同一棵树上**。
+     * 同一个人的另一条会话：同一个项目、同一个 owner，所以落在同一棵树上。
      *
      * <p>这不是构造出来的边角：它就是"同一个人又开了一段新对话"。
      */

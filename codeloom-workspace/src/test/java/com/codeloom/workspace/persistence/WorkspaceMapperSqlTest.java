@@ -10,15 +10,12 @@ import java.lang.reflect.Method;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 把「写在 SQL 里的约定」也变成测试 —— 守的是那张表上最要紧的一列。
+ * 把写在 SQL 里的约定变成测试，重点是 {@code fencing_token}。
  *
- * <p>这些断言看着像在检查字符串，实际上它们守的是两个**改动起来毫无声响**的错误：
- * 前者会让 fencing token 被普通写入抹掉（僵尸写入者于是又能落数据），
- * 后者会在表加列时悄悄改变结果集。两种都不会编译报错、不会测试失败、不会在日志里留痕，
- * 所以只能靠这里挡住。
+ * <p>普通写入抹掉 fence 会让过期租约重新落数据；{@code SELECT *} 会在表加列时悄悄
+ * 改变结果集。两者都不会编译报错、测试失败或留下日志，只能在这里挡住。
  *
- * <p><strong>为什么这些断言在这张表上：</strong>锁本身锁的就是一棵树，
- * 号的键必须和锁的键是同一个。见 {@code WorkspaceFence} 的类注释里那个反例。
+ * <p>这些断言在这张表上：锁锁的是一棵树，号的键必须与锁的键相同。
  */
 class WorkspaceMapperSqlTest {
 
@@ -29,7 +26,7 @@ class WorkspaceMapperSqlTest {
 
         String sql = String.join("\n", save.getAnnotation(Insert.class).value());
 
-        // 写进去就会把它写回旧值 —— 那正是 fence 失效、僵尸写入者被放行的那个瞬间
+        // 写进去就会把号写回旧值，导致 fence 失效、过期写入者被放行
         assertThat(sql).doesNotContain("fencing_token");
     }
 

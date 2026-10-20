@@ -8,9 +8,7 @@ import java.time.Instant;
 /**
  * {@code user} 表的一行。
  *
- * <p>放在 {@code codeloom-app} 而不是 domain 或某个能力模块：{@code UserRepository}
- * 的注释已经写明「实现在 codeloom-app —— 认证是它的职责」。用户这张表和 agent、
- * 工作区、事件流都没有关系，跟着认证走。
+ * <p>放在 app 模块：认证是它的职责，用户表与 agent、工作区、事件流都无关。
  */
 public record UserRow(String id,
                       String username,

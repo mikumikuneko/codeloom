@@ -31,15 +31,12 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * 崩溃恢复的**扫描入口**（{@link CrashRecovery#recoverUnfinishedSessions()}）。
+ * 崩溃恢复的扫描入口（{@link CrashRecovery#recoverUnfinishedSessions()}）。
  *
- * <h2>为什么这一条是单测，而其余几条在真库上跑</h2>
- * 那个入口会遍历**整个库**。在连着共享开发库的测试里调它，等于让测试去动别人
- * 手工留下的会话 —— `CrashRecoveryTest` 的类注释里写明了这一点，所以它只调包级可见的
- * {@code recover(session)}。而"一条坏了不拖住其他"这条行为恰恰只能从入口看，
- * 于是把它放进一个不碰库的单测里。
- *
- * <p>顺带的好处：这个类不连 MySQL/Redis，在任何人机器上都跑。
+ * <p>为什么这条是单测，其余几条在真库上跑：入口会遍历整个库，连着共享开发库时调它会
+ * 动别人手工留下的会话；{@code CrashRecoveryTest} 只调包级可见的 {@code recover(session)}。
+ * 而“一条坏了不拖住其他”只能从入口看，所以放进不碰库的单测。这个类不连 MySQL/Redis，
+ * 在任何人机器上都跑。
  */
 @ExtendWith(MockitoExtension.class)
 class CrashRecoveryScanTest {
@@ -68,7 +65,7 @@ class CrashRecoveryScanTest {
         when(leases.tryAcquire(broken))
                 .thenThrow(new IllegalStateException("模拟恢复这一条时出错"));
         // 第二条：拿不到租约（有实例在管它），于是 recover 会提前返回 ——
-        // 我们要验的只是**它被访问到了**
+        // 我们要验的只是它被访问到了
         when(leases.tryAcquire(fine)).thenReturn(Optional.empty());
 
         new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
@@ -131,7 +128,7 @@ class CrashRecoveryScanTest {
         new CrashRecovery(sessions, events, leases, writer).recoverUnfinishedSessions();
 
         // 给它补一条 ToolInterrupted 等于说"它执行到一半被重启打断了" —— 而它从来没跑过。
-        // 判据落在**那个写入口**上：补写走的是 SessionWriter，不碰就是没补
+        // 判据落在那个写入口上：补写走的是 SessionWriter，不碰就是没补
         verifyNoInteractions(writer);
         verify(leases).release(token);
     }

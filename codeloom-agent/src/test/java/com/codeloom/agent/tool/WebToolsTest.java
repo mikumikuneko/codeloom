@@ -20,10 +20,8 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 两个联网工具：怎么把结果写给模型、失败怎么回、边界在哪。
- *
- * <p>联网那一层用假的 {@link WebAccess} —— 这些用例验的是**工具**（格式、合并、上限、提示），
- * 不是那一家服务商。真连一次验的是另一件事，见 {@code DeepSeekWebAccessTest}。
+ * 两个联网工具的格式化、失败回传和边界。联网层使用假的 {@link WebAccess}，
+ * 验证的是工具而非具体服务商；真实连接由 app 模块的测试覆盖。
  */
 class WebToolsTest {
 
@@ -58,7 +56,7 @@ class WebToolsTest {
                     .contains("Example News · 2026-06-01T00:00:00+00:00")
                     .contains("一句话短摘要")
                     .contains("2. 只有标题")
-                    // 常驻指令：没有它，答案里就会出现无法核对的"据某媒体报道"
+                    // 常驻指令要求引用 URL，避免无法核对的来源。
                     .contains("作为 markdown 链接写出来");
         }
 
@@ -74,7 +72,7 @@ class WebToolsTest {
                     {"queries":["一","二","三"]}"""));
 
             assertThat(web.queries).containsExactly("一", "二", "三");
-            // 每条查询的头名先各取一条，再取第二圈；重复的 a1 只出现一次
+            // 先取各查询头名，再取第二轮；重复的 a1 只保留一次。
             assertThat(urlsIn(outcome.output()))
                     .containsExactly("https://example.com/a1", "https://example.com/b1",
                             "https://example.com/a3", "https://example.com/a2",
@@ -156,7 +154,7 @@ class WebToolsTest {
 
             JsonNode presentation = mapper.readTree(outcome.presentation());
             assertThat(presentation.get("kind").asText()).isEqualTo("web_search");
-            // 砍掉多少条是写给模型的，不随结构化结果下发给界面
+            // 截断信息只给模型，不下发界面。
             assertThat(presentation.has("truncated")).isFalse();
             JsonNode source = presentation.get("sources").get(0);
             assertThat(source.get("url").asText()).isEqualTo("https://example.com/a");
@@ -260,7 +258,7 @@ class WebToolsTest {
         assertThat(search.surface().subjectKey()).isEqualTo("queries");
 
         assertThat(fetch.name()).isEqualTo("web_fetch");
-        // 网址**不是**工作区路径：用 READ 会让界面把它做成"点开这个文件"
+        // URL 不是工作区路径，不能使用 READ 形状。
         assertThat(fetch.surface().shape()).isEqualTo(ToolSurface.Shape.WEB);
         assertThat(fetch.surface().subjectIsPath()).isFalse();
         assertThat(fetch.surface().subjectKey()).isEqualTo("url");
@@ -279,7 +277,7 @@ class WebToolsTest {
         return mapper.readTree(json);
     }
 
-    /** 从输出里按顺序取出所有来源的 URL。 */
+    /** 按顺序取出输出中的来源 URL。 */
     private static List<String> urlsIn(String output) {
         return output.lines()
                 .map(String::strip)
@@ -292,7 +290,7 @@ class WebToolsTest {
                 "摘要 " + slug, "站点", "2026-10-01");
     }
 
-    /** 假的联网层：按查询顺序给出预置结果，记下收到的查询。 */
+    /** 假联网层：按查询顺序返回预置结果并记录查询。 */
     private static final class FakeWeb implements WebAccess {
 
         final List<List<Hit>> responses = new ArrayList<>();

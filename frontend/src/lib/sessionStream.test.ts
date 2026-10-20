@@ -19,14 +19,14 @@ import {
 } from './sessionStream'
 
 /**
- * 这一套钉的是 `sessionStream` 注释里**已经写明**的那些契约。
+ * 钉的是 `sessionStream` 注释里已经写明的契约。
  *
- * <p>为什么是它：出过真 bug 的**只有这批纯投影**（被拒绝的调用一直闪、回滚退错地方、
- * 批准挂起冒用量行、这一轮在不在跑判错），而它们的失效方式都是"折到某个分支上不对"——
- * 截图够不到那些分支（要构造"拒绝 / 中断 / 回滚 / 批准续跑"的状态）。
+ * 出错过的只有这批纯投影（被拒绝的调用一直闪、回滚退错地方、挂起时冒用量行、
+ * "这一轮在不在跑"判错），失效方式都是折到某个分支上不对。截图够不到那些分支：
+ * 要先构造拒绝 / 中断 / 回滚 / 批准续跑的状态。
  */
 
-/** 帧的序号由后端发，这里只要递增；**易失的增量没有 seq**。 */
+/** 帧的序号由后端发，这里只要递增；易失的增量没有 seq。 */
 let at = 0
 const event = (type: string, payload: Record<string, unknown> = {}): Frame => ({
   seq: ++at,
@@ -70,7 +70,7 @@ describe('toolIsRunning', () => {
   })
 
   it('**后半个不能省**：被取消/被中断的那次调用也没有结果', () => {
-    // 少了它，一轮早停了、最后一个工具还挂着，界面就一直以为它在跑（一直闪）
+    // 少了它，一轮早停了、最后一个工具还挂着，界面会一直以为它在跑（一直闪）。
     expect(toolIsRunning(null, 'cancelled')).toBe(false)
     expect(toolIsRunning(null, 'interrupted')).toBe(false)
     expect(toolIsRunning(null, 'rejected')).toBe(false)
@@ -91,7 +91,7 @@ describe('这一轮在不在跑：看状态，不看条目的形状', () => {
     expect(turnIsActive(stream([ask(), state('AWAITING_APPROVAL')]))).toBe(false)
     expect(turnIsActive(stream([state('WAITING_USER')]))).toBe(false)
     expect(turnIsActive(stream([state('FAILED')]))).toBe(false)
-    // 失败重试那两步之间那一瞬（FAILED → IDLE → THINKING）也不算
+    // 失败重试那两步之间那一瞬（FAILED → IDLE → THINKING）也不算。
     expect(turnIsActive(stream([state('IDLE')]))).toBe(false)
     expect(turnIsActive(stream([event('CHECKPOINT_CREATED', { commitSha: 'a', turnIndex: 0 })]))).toBe(
       false,
@@ -108,7 +108,7 @@ describe('这一轮在不在跑：看状态，不看条目的形状', () => {
 })
 
 describe('用量行只在真正跑完之后出现', () => {
-  /** 一次审批 + 挂起那一刻的用量；`after` 是批准之后续跑/收尾的那些帧 */
+  /** 一次审批 + 挂起那一刻的用量；`after` 是批准之后续跑 / 收尾的那些帧 */
   const approvedTurn = (after: Frame[] = []) =>
     stream([
       event('USER_MESSAGE', { text: '跑' }),
@@ -192,7 +192,7 @@ describe('流式缓冲什么时候清', () => {
   it('还在跑的那些状态**不清** —— 清了的话正吐着的那半句会消失', () => {
     expect(foldStreaming(grown, state('EXECUTING_TOOL')).text).toBe('半句')
     expect(foldStreaming(grown, state('THINKING')).text).toBe('半句')
-    // 失败重试那两步之间的 IDLE 也不清：那一轮还要接着跑
+    // 失败重试那两步之间的 IDLE 也不清：那一轮还要接着跑。
     expect(foldStreaming(grown, state('IDLE')).text).toBe('半句')
   })
 })
@@ -289,7 +289,7 @@ describe('回滚', () => {
 
 describe('这一轮改过工作区几次', () => {
   it('数的是后端报的那个事实（mutated），不是工具名', () => {
-    // run_command 跑一条什么都没动的命令 —— 不该让左边的树重拉一次
+    // run_command 跑一条什么都没动的命令，不该让左边的树重拉一次。
     expect(workspaceWrites(stream([ask('c1'), done('c1', false)]))).toBe(0)
     expect(workspaceWrites(stream([ask('c1'), done('c1', true)]))).toBe(1)
   })
@@ -322,8 +322,8 @@ describe('分块与这一轮改了什么', () => {
   })
 
   it('一轮开始前落下的状态条目**不该另起一块** —— 它渲染出来是空的', () => {
-    // 真实顺序就是这样：一轮先把状态推到 THINKING，**然后**才落用户那条消息
-    //（见后端 TurnExecutor.runOnce）。所以每条会话的开头都有一条状态条目
+    // 真实顺序：一轮先把状态推到 THINKING，然后才落用户那条消息（见后端
+    // TurnExecutor.runOnce），所以每条会话开头都有一条状态条目。
     const items = stream([
       event('CHECKPOINT_CREATED', { commitSha: 'a', turnIndex: 0 }),
       state('THINKING'),
@@ -350,11 +350,10 @@ describe('分块与这一轮改了什么', () => {
 })
 
 /**
- * 「这一轮改了什么」这条事件 —— 折叠那一行、点开看的 diff、回滚面板那两列都吃它。
+ * 「这一轮改了什么」这条事件：折叠那一行、点开看的 diff、回滚面板那两列都吃它。
  *
- * <p>那次这条链路上没写测试（前端当时还没有运行器），所以这里补上**能测的那一半**：
- * 从帧到这几个纯函数的推导。点一下屏幕才看得见的那些（折叠展开、点文件、三种关法）
- * 由真跑盯着。
+ * 这里只测能测的那一半：从帧到几个纯函数的推导。点一下屏幕才看得见的（折叠展开、
+ * 点文件、三种关法）由真跑盯着。
  */
 describe('这一轮改了什么', () => {
   const file = (path: string, added: number, deleted: number) => ({
@@ -403,14 +402,14 @@ describe('这一轮改了什么', () => {
 
     expect(missing[0]).toMatchObject({ turnIndex: null })
     expect(zero[0]).toMatchObject({ turnIndex: 0 })
-    // 0 号那条要进表；没有号的那条不进（进的话它会占住 0 号）
+    // 0 号那条要进表；没有号的那条不进（进的话它会占住 0 号）。
     expect(changesByTurnIndex(missing).size).toBe(0)
     expect(changesByTurnIndex(zero).has(0)).toBe(true)
   })
 
   it('同一个文件在一轮里出现两次 → **行数相加**，不是只留最后一条', () => {
-    // 一轮里可以落好几条改动记录（批准之后续跑，收尾时再落一条）。
-    // 只留最后一条会把前一次的改动从账上抹掉
+    // 一轮可以落好几条改动记录（批准后续跑、收尾再落一条），
+    // 只留最后一条会抹掉前一次。
     const items = stream([
       changesFrame([file('a.ts', 3, 1)], { turnIndex: 1 }),
       changesFrame([file('a.ts', 2, 4)], { turnIndex: 1 }),
@@ -433,7 +432,7 @@ describe('这一轮改了什么', () => {
   })
 
   it('一轮没改任何文件 → 不进"按轮次号"那张表，也不进会话流的分块结果', () => {
-    // 界面上那一行本来就该不出现（它是"这一轮改了什么"，没改就没什么可说）
+    // 界面上那一行本来就不该出现：它是"这一轮改了什么"，没改就没什么可说。
     const items = stream([event('USER_MESSAGE', { text: '问一句' }), state('WAITING_USER')])
 
     expect(changesByTurnIndex(items).size).toBe(0)
@@ -443,7 +442,7 @@ describe('这一轮改了什么', () => {
   it('会话流那份按**块号**挂，回滚面板那份按**后端的号**挂', () => {
     const items = stream([event('USER_MESSAGE', { text: '第一句' }), changesFrame([file('a.ts', 1, 0)], { turnIndex: 7 })])
 
-    // 块号是 0（第一块），后端号是 7 —— 两份各按各的，谁也不去猜另一套
+    // 块号是 0（第一块），后端号是 7：两份各按各的，谁也不猜另一套。
     expect(turnChanges(groupIntoTurns(items))[0]?.turn).toBe(0)
     expect([...changesByTurnIndex(items).keys()]).toEqual([7])
   })

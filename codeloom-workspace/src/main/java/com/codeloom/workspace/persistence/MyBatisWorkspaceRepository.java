@@ -12,13 +12,9 @@ import java.util.Optional;
 /**
  * {@link WorkspaceRepository} 的持久化实现。
  *
- * <h2>关于 {@code save} 没有 fencing token 参数</h2>
- * 和 {@code MyBatisSessionRepository} 是同一个问题、同一个答案：那一列**不在**
- * {@link WorkspaceMapper#save} 的语句里，所以这条路径根本碰不到它。
- * 推进号的是 {@code MyBatisWorkspaceFence#issue}；底下真正碰那一列的，是 {@code WorkspaceMapper} 里的那几个方法。
- *
- * <p>反过来说，**对一棵已存在的工作区，任何绕开 {@code WorkspaceFence} 单独推进那一列的
- * 路径都会开出一个洞** —— 这是设计约束，不是警告。
+ * <p>{@code save} 不碰 {@code fencing_token}：列清单里没有它，推号的唯一入口是
+ * {@link MyBatisWorkspaceFence#issue}。对一棵已存在的工作区，任何绕开 fence 推进该列的
+ * 路径都会让过期租约重新获得写权限。
  */
 @Repository
 public class MyBatisWorkspaceRepository implements WorkspaceRepository {
@@ -50,8 +46,8 @@ public class MyBatisWorkspaceRepository implements WorkspaceRepository {
 
     @Override
     public void delete(WorkspaceId workspaceId) {
-        // 只看库里那一行。磁盘上的 worktree 目录是另一件事（WorkspaceManager.removeWorkspace）——
-        // 这一层够不到文件系统，也不该够到
+        // 只删库里那一行；磁盘上的 worktree 由 WorkspaceManager.removeWorkspace 处理，
+        // 这一层不碰文件系统
         mapper.deleteById(workspaceId.ownerId().value(), workspaceId.projectId().value());
     }
 }

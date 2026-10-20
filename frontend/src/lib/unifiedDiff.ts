@@ -1,34 +1,31 @@
 import type { DiffRow } from '@/lib/textDiff'
 
 /**
- * 把一段**统一的 diff 正文**（`git diff` 那个形状）翻成渲染用的行。
+ * 把统一 diff 正文（`git diff` 的形状）翻成渲染用的行。
  *
- * <h2>为什么不是"看见 `+` 就当新增"</h2>
- * 那个格式**有歧义**：正文里本来就有以 `--` 开头的一行，它被删掉之后是 `--- …`，
- * 长文件和文件头 `--- a/x` 一模一样。所以这里跟**位置**走，不跟前缀走：
- * 只有 `@@` 之后的那些行才算正文，`@@` 之前的一律是文件头。
+ * 不能看见 `+` 就当新增：格式有歧义，正文里以 `--` 开头的一行被删掉后是 `--- …`，
+ * 与文件头 `--- a/x` 一模一样。所以跟位置走：只有 `@@` 之后的行才算正文，之前
+ * 一律是文件头。
  *
- * <h2>`@@` 同时给出两样东西</h2>
- * git 每个 hunk 只带几行上下文，两段之间隔着的东西它不写出来。那条 `@@ -a,b +c,d @@`
- * 里有两侧的起始行号：拿新文件那个算"跳过了几行"，再逐行往下走，给每一行标上
- * **旧号（删除行）或新号（其余）** —— 于是渲染那一层不用知道 diff 的格式。
+ * `@@ -a,b +c,d @@` 给出两侧起始行号：拿新文件那个算"跳过了几行"，再逐行往下走，
+ * 给每行标旧号（删除行）或新号（其余），渲染层不需要知道 diff 格式。
  */
 export function parseUnifiedDiff(text: string): DiffRow[] {
   const rows: DiffRow[] = []
-  /** 旧、新文件各自走到第几行了。新文件那个还算"跳过了几行" */
+  /** 旧、新文件各自走到第几行；新文件那个还用来算"跳过了几行" */
   let oldLine = 0
   let newLine = 0
-  /** 这一段 hunk 的起始行认不认得出来。**认不出来就不标号** —— 不画一个猜的号 */
+  /** 这一段 hunk 的起始行是否认得出来；认不出来就不标号，不画猜的号 */
   let numbered = false
-  /** `@@` 之后才算正文 —— 见类注释里那个歧义 */
+  /** `@@` 之后才算正文，见文件头注释里的歧义 */
   let inHunk = false
 
   for (const line of text.split('\n')) {
     if (line.startsWith('diff --git ')) {
       inHunk = false
       numbered = false
-      // 行号是**按文件**数的。一段 diff 里可以有几个文件（删一个、加一个），
-      // 不归零的话下一个文件会带着上一个文件的行号算，于是画出一条假的"跳过了几行"
+      // 行号按文件数。一段 diff 里可以有几个文件（删一个、加一个），不归零会让
+      // 下一个文件带着上一个的行号，画出假的"跳过了几行"。
       oldLine = 0
       newLine = 0
       continue
@@ -50,12 +47,12 @@ export function parseUnifiedDiff(text: string): DiffRow[] {
     }
 
     if (!inHunk) {
-      // 文件头那几行（`--- a/x`、`+++ b/x`、`index …`、`new file mode …`）不是正文
+      // 文件头几行（`--- a/x`、`+++ b/x`、`index …`、`new file mode …`）不是正文。
       continue
     }
 
     if (line.startsWith('+')) {
-      // 加上的行标**新**行号；删掉的行标**旧**行号（它在新文件里已经没有了）
+      // 加上的行标新行号；删掉的行标旧行号（它在新文件里已经没有了）。
       rows.push({ kind: 'added', text: line.slice(1), ...(numbered ? { line: newLine + 1 } : {}) })
       newLine++
     } else if (line.startsWith('-')) {
@@ -66,19 +63,18 @@ export function parseUnifiedDiff(text: string): DiffRow[] {
       oldLine++
       newLine++
     }
-    // 剩下的是 `\ No newline at end of file` 这种 git 的注记，以及结尾那个空串：
-    // 它们不是文件里的行，跟着正文一起算会让两侧的行号错位
+    // 剩下的是 git 注记（如 `\ No newline at end of file`）和结尾空串：它们不是
+    // 文件里的行，算进去会让两侧行号错位。
   }
 
   return rows
 }
 
 /**
- * 把 `@@ -10,2 +10,3 @@` 里的**两侧起始行**取出来。
+ * 取出 `@@ -10,2 +10,3 @@` 里的两侧起始行。
  *
- * <p>取不到就返回 null，代价只是**这一条跳过不画、这几行不标号**：
- * 行号算不出来，与其按猜的行号画，不如什么都不提。正文照常显示 ——
- * `@@` 开头只可能是 hunk 头（正文那一行总带着 ` `/`+`/`-` 前缀）。
+ * 取不到返回 null，代价只是跳过不画、这几行不标号：算不出来就不按猜的行号画。
+ * 正文照常显示：`@@` 开头只可能是 hunk 头（正文行总带空格、`+` 或 `-` 前缀）。
  */
 function hunkStarts(line: string): { oldStart: number; newStart: number } | null {
   const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)

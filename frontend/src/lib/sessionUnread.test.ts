@@ -13,7 +13,7 @@ describe('trackTheirSessions', () => {
     const first = trackTheirSessions(null, ['a'], false)
     const next = trackTheirSessions(first.seen, ['a', 'b'], false)
     expect(next.unread).toBe(true)
-    // 未读的 id **不**直接并进看过 —— 否则下一次刷新就把它忘了
+    // 未读的 id 不直接并进看过，否则下一次刷新就把它忘了。
     expect([...next.seen]).toEqual(['a'])
   })
 

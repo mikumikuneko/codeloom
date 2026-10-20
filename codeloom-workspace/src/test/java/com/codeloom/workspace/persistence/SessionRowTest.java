@@ -13,13 +13,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 行 ↔ 领域对象的转换。
+ * 行与领域对象的转换。
  *
- * <p>这类代码不跑数据库就能测，而且**该**在不跑数据库的情况下测：转换写错了是逻辑错误，
- * 和 SQL 对不对是两个独立的问题。把它们混在一起，一旦测试红了就得先分辨是哪种错。
- *
- * <p>注意这张表上**已经没有**分支、worktree 路径和 HEAD 了 —— 那三样跟着工作区走，
- * 它们的往返在 {@link WorkspaceRowTest} 里。
+ * <p>转换错误是逻辑问题，和 SQL 是否正确相互独立，因此不跑数据库就能测、也应该这样测。
+ * 分支、worktree 路径和 HEAD 属于工作区，其往返见 {@link WorkspaceRowTest}。
  */
 class SessionRowTest {
 
@@ -43,8 +40,8 @@ class SessionRowTest {
     @Test
     @DisplayName("可空字段真的可空：system_prompt 为空时也往返得了")
     void nullableFieldsSurviveTheRoundTrip() {
-        // systemPrompt 为 null 表示这个会话不加系统提示词。
-        // 这是真实会出现的状态，不是边界构造 —— 而它恰恰是最容易在映射里被写成空串的地方。
+        // systemPrompt 为 null 表示不加系统提示词，这是真实状态，
+        // 也最容易在映射里被误写成空串
         ModelConfig noSystemPrompt = new ModelConfig(
                 ProviderId.of("kimi"), "some-model", null);
         Session original = Session.create(SESSION_ID, PROJECT_ID, OWNER_ID, noSystemPrompt);

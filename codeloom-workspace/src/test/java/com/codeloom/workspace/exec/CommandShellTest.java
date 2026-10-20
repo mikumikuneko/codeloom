@@ -16,14 +16,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 包 shell：怎么把命令交给它。
+ * 把命令交给 shell 的方式。
  *
- * <p>现在是**落一份脚本文件，把文件路径交给 shell** —— 若直接把那一行交给
- * {@code bash -c}，引号、反斜杠、多字节字符都会在"JVM → MSYS"那一段路上被吃掉
- *（见 {@link CommandShell#argvFor}）。
- *
- * <p>测试**真的起一个 shell 跑一遍**：这一层的成败只有真执行才看得出来，
- * 光断言"拼出来的 argv 长什么样"验不出脚本文件这条路的价值。
+ * <p>命令写成脚本文件，argv 是 {@code [shell, 脚本路径]}；直接走 {@code bash -c}
+ * 会在 Windows 上丢失引号、反斜杠和多字节字符（见 {@link CommandShell#argvFor}）。
+ * 关键用例真的启动 shell，因为这条路径只有实际执行才验证得了。
  */
 class CommandShellTest {
 
@@ -57,11 +54,11 @@ class CommandShellTest {
     @DisplayName("真跑一遍：引号、反斜杠、多字节字符原样到达 —— 这才是走脚本文件的理由")
     void trickyLinesArriveIntactThroughARealShell() throws IOException, InterruptedException {
         CommandShell shell = CommandShell.detect(null);
-        // 没装 shell 的机器上跳过 —— 这不是"测试通过"，是"这台机器上没这件事可测"
+        // 没装 shell 的机器上跳过：这不是"测试通过"，而是"这台机器上没这件事可测"
         Assumptions.assumeTrue(shell.present(), "这台机器上找不到 shell，跳过一次真执行");
 
-        // 这三种写法在 `bash -c` 那条路上**都会坏**（实测）：双引号被吃掉、
-        // 单引号和反斜杠被吃掉、中文吃掉紧挨着它的引号（shell 报引号没配平）
+        // 这三种写法走 bash -c 都会坏（实测）：双引号被吃掉、单引号和反斜杠被吃掉、
+        // 中文吃掉紧挨着它的引号（shell 报引号未配平）
         String script = String.join("\n",
                 "node -e \"console.log(1+1)\"",
                 "printf '%s\\n' \"x y\"",
@@ -77,16 +74,16 @@ class CommandShellTest {
         CommandShell shell = CommandShell.detect(null);
         Assumptions.assumeTrue(shell.present(), "这台机器上找不到 shell");
 
-        // Git for Windows 可以装在任意盘符 —— 写死默认安装位置会失灵，
-        // 所以探测只能靠 PATH 和"文件真的在"这两条
+        // Git for Windows 可以装在任意盘符，写死默认安装位置会失灵；
+        // 探测依赖 PATH 与"文件真的在"
         assertThat(Files.isRegularFile(Path.of(shell.executablePath()))).isTrue();
     }
 
     @Test
     @DisplayName("配的路径不存在时**不采信**：跳过它继续找，而不是拿一个跑不起来的路径当真")
     void aConfiguredPathThatIsNotThereIsSkipped() {
-        // 采信它的症状是延后的：要等到某条命令跑起来才报"无法启动进程"，
-        // 那时已经看不出是配置里少了一个字母
+        // 采信它的症状会延后到某条命令跑起来时才报"无法启动进程"，
+        // 那时已看不出是配置里少了一个字母
         CommandShell shell = CommandShell.detect("/definitely/not/here/bash");
 
         assertThat(shell.executablePath()).isNotEqualTo("/definitely/not/here/bash");

@@ -11,17 +11,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link Project} 的不变量。
- *
- * <h2>三条最要紧的</h2>
- * <ol>
- *   <li><b>最多两个人。</b>它**只在这里守着** —— {@code InvitationService.accept} 里
- *       那句"满了就拒"是提前一步的友好提示，而真正拦住第三个成员的是这个紧凑构造器。</li>
- *   <li><b>房主必须是成员。</b>不然就会出现一个谁也接不了手的死结：房主不在里面，
- *       于是谁都不是"最后一个人"，项目永远走不到该消失的那一步，也没人接得了房主。</li>
- *   <li><b>退不到没人。</b>"最后一个人退出"不是"成员少一个"，而是项目结束了 ——
- *       那条路走真删除（见 {@link Project#isLastMember}），不经过 withMemberRemoved。</li>
- * </ol>
+ * {@link Project} 的不变量。最多两个人：真正拦住第三个成员的是紧凑构造器，
+ * {@code InvitationService.accept} 里的满员拒绝只是提前提示。房主必须是成员，否则没人
+ * 接得了手。退不到没人：最后一人退出走真删除（见 {@link Project#isLastMember}），
+ * 不经过 {@code withMemberRemoved}。见
+ * {@code docs/decisions/architecture/2026-09-29-project-departure-not-tombstones.md}。
  */
 class ProjectTest {
 
@@ -128,10 +122,6 @@ class ProjectTest {
                 .isEqualTo(new Project(id, ALICE, "codeloom", "D:/repos/demo", Set.of(BOB, ALICE)));
     }
 
-    // ------------------------------------------------------------------
-    // 退出
-    // ------------------------------------------------------------------
-
     @Test
     @DisplayName("非房主退出：成员少一个，房主不变")
     void anOrdinaryMemberLeavingChangesNothingElse() {
@@ -151,9 +141,8 @@ class ProjectTest {
 
         Project after = two.withMemberRemoved(ALICE);
 
-        // 房主走了，BOB 接手。不转的话会留下一个没有房主的项目：
-        // 后面谁退出都算"最后一个人"，而那条路会把整个项目连仓库一起删掉 ——
-        // 于是第一个人前脚刚走，第二个人后脚一退，项目莫名其妙就没了
+        // 不转的话会留下没有房主的项目：之后任何一次退出都算"最后一个人"，
+        // 那条路会连同仓库删掉整个项目
         assertThat(after.ownerId()).isEqualTo(BOB);
         assertThat(after.members()).containsExactly(BOB);
     }

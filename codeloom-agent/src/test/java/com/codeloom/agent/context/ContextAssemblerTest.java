@@ -42,7 +42,7 @@ class ContextAssemblerTest {
     private static final SessionId SESSION = SessionId.of("s1");
     private static final Instant AT = Instant.parse("2026-09-25T10:00:00Z");
 
-    /** 用户消息后面跟着的那行时钟。它取自事件落库时间，所以测试里是固定的。 */
+    /** 用户消息后的时钟；取自事件落库时间，因此测试中固定。 */
     private static String clockAt(Instant at) {
         ZoneId zone = ZoneId.systemDefault();
         return "[平台指令] 现在是 " + LocalDateTime.ofInstant(at, zone)
@@ -54,18 +54,12 @@ class ContextAssemblerTest {
         return text + "\n\n" + clockAt(AT);
     }
 
-    /**
-     * 装配器。**"按 id 查用户名"那个办法由这里给** —— 投影里只有一处用它：
-     * 别人捎来的留言要标明来源（见 {@code ContextAssembler}）。
-     *
-     * <p>名字是**读的时候查**的，事件里只有 id：用户名会变，所以它不能当身份
-     *（见 {@code AgentNoteDelivered}）。
-     */
+    /** 装配器；按 id 查询用户名，只用于给协作者留言标注来源。 */
     private final ContextAssembler assembler =
             new ContextAssembler(id -> id.equals(UserId.of("u-li")) ? "小李" : "某人");
     private final List<StoredEvent> events = new ArrayList<>();
 
-    /** 追加一条事件，**返回它的 seq** —— 回滚要靠序号指认"退到哪一条"，见 {@link SessionRewound}。 */
+    /** 追加事件并返回 seq；回滚按序号定位目标。 */
     private long append(Event event) {
         long seq = events.size() + 1L;
         events.add(new StoredEvent(SESSION, seq, AT, event));
@@ -77,24 +71,24 @@ class ContextAssemblerTest {
     }
 
     /**
-     * 投影**对外看得见**的全部东西。
+     * 投影对外可见的全部产出：消息与派生事实。只比较消息会漏掉推倒重来时未清理的事实。
      *
-     * <p>为什么不止消息：那几份派生事实也是投影的产出。只比消息的话，"推倒重来时漏清了一份"
-     * 这种错**不会红** —— 而它正是这套代码里最容易出、也最难发现的一种（漏掉不报错，
-     * 那份事实只是带着被退掉的那段时间的痕迹活下来）。
+     * @param messages           消息
+     * @param readPaths          读过的路径
+     * @param pendingApprovedCall 待补跑的调用
      */
     private record ProjectionView(List<LlmMessage> messages, Set<String> readPaths,
                                   Optional<ToolCall> pendingApprovedCall) {
     }
 
-    /** 一条投影现在对外是什么样。 */
+    /** 读取投影当前对外可见的产出。 */
     private static ProjectionView viewOf(ContextAssembler.Projection projection,
                                          List<LlmMessage> sink) {
         return new ProjectionView(List.copyOf(sink), projection.readPaths(),
                 projection.pendingApprovedCall());
     }
 
-    /** 「整条流一次喂完」那一份 —— 等价断言的对照。 */
+    /** 整条流一次喂完的结果，作为等价断言基准。 */
     private ProjectionView fedInOneGo() {
         ContextAssembler.Projection fresh = assembler.projection(SYSTEM);
         List<LlmMessage> sink = new ArrayList<>();
@@ -120,16 +114,15 @@ class ContextAssemblerTest {
     @DisplayName("【换模型】每条回复带着**自己那个**来源模型 —— 判断才做得了")
     void eachReplyCarriesItsOwnSourceModel() {
         append(new UserMessage("先看 A"));
-        // 这一轮是 flash 说的，它想了点什么
+        // 第一条回复由 flash 产出。
         append(new AssistantMessage("看完了", "deepseek-flash", "先读哪个文件"));
         append(new UserMessage("换个模型接着说"));
-        // 换到 pro 之后这一轮
+        // 第二条回复由 pro 产出。
         append(new AssistantMessage("接着说", "deepseek-pro", "这次换个路子"));
 
         List<LlmMessage> messages = assemble();
 
-        // 两份思考各自标着**谁产的**。少了这个，wire 那一层就没有判据 ——
-        // 它只能看到"有思考"，看不见"这不是这个模型的思考"，于是会原样发出去
+        // 每条思考必须带来源模型，否则适配器无法判断它是否属于目标模型。
         assertThat(messages.get(2).reasoning()).isEqualTo("先读哪个文件");
         assertThat(messages.get(2).model()).isEqualTo("deepseek-flash");
         assertThat(messages.get(4).reasoning()).isEqualTo("这次换个路子");
@@ -168,10 +161,9 @@ class ContextAssemblerTest {
     @Test
     @DisplayName("【思考回传】带工具调用的那条 assistant 消息必须带上它当时的思考")
     void reasoningRidesAlongWithTheToolCallMessage() {
-        // 模型只调工具、一个字不说，而它的思考是有的 —— 这是推理模型在思维链模式下的常态。
-        // 装配时若把思考丢了，而协议要求这条消息必须把它带回去，请求就是 400。
+        // 推理模型常只调工具、不说话但有思考；丢失思考会让下一次请求 400。
         append(new UserMessage("读一下 A"));
-        // 三参那个（text, model, reasoning）—— 两参的是 (text, model)，别写错
+        // 三参构造依次是 text、model、reasoning。
         append(new AssistantMessage("", "deepseek-reasoner", "我在想先看哪个文件"));
         append(new ToolCallRequested("call_1", "read_file", "{\"path\":\"A.java\"}"));
         append(new ToolResult("call_1", true, "class A {}", false, 0, 5));
@@ -184,23 +176,20 @@ class ContextAssemblerTest {
         assertThat(toolTurn.toolCalls()).hasSize(1);
         assertThat(toolTurn.reasoning()).isEqualTo("我在想先看哪个文件");
 
-        // 结论那条也带着 —— 它虽然不带工具调用，但下一轮同样要发出去
+        // 结论消息不带工具调用，但下一轮同样要发送。
         assertThat(messages.get(4).reasoning()).isEqualTo("没什么特别的");
     }
 
     @Test
     @DisplayName("【思考回传·分批发工具】一次回复被投影成两条 assistant 消息，两条都要带思考")
     void oneResponseSplitIntoTwoMessagesKeepsReasoningOnBoth() {
-        // 真实事故的形状（照着 event 表里的顺序写的）：
-        // 模型**一次回复**里发了两个工具调用，而执行时按批切开 ——
-        // 只读的 glob 一批、要执行的 run_command 一批。
-        // 于是两条 ToolCallRequested 在事件流里**不挨着**：
-        // 中间隔着 glob 的结果，而那一步会 flush 掉第一条 assistant 消息。
+        // 一次回复的两个调用按批执行：两条 ToolCallRequested 不相邻，
+        // 中间隔着前一批结果，导致第一条 assistant 消息已被 flush。
         append(new UserMessage("写个 helloworld"));
         append(new AssistantMessage("", "deepseek-reasoner", "先看看目录里有什么"));
         append(new ToolCallRequested("call_A", "glob", "{\"pattern\":\"**/*.class\"}"));
         append(new ToolResult("call_A", true, "没有匹配", false, 0, 1));
-        // ★ 同一回复的第二个批次。这一步落库时，上面那条已经 flush 过了
+        // 同一回复的第二批；此时第一条 assistant 消息已经 flush。
         append(new ToolCallRequested("call_B", "run_command", "{\"command\":\"java -version\"}"));
         append(new ToolApprovalRequested("call_B", "测试：这条命令要人批一下"));
         append(new ToolApprovalResolved("call_B", true, UserId.of("root"), null));
@@ -214,9 +203,7 @@ class ContextAssemblerTest {
         assertThat(messages.get(4).toolCalls()).singleElement()
                 .satisfies(c -> assertThat(c.id()).isEqualTo("call_B"));
 
-        // 两条都带同一个思考。第二条恰好是带 tool_calls 的那条 —— 它一旦缺了思考，
-        // 下一次请求就被 DeepSeek 打回 400：
-        // 「The `reasoning_content` in the thinking mode must be passed back to the API.」
+        // 两条都带同一份思考；带 tool_calls 的那条缺少它会让下一次请求返回 400。
         assertThat(messages.get(2).reasoning()).isEqualTo("先看看目录里有什么");
         assertThat(messages.get(4).reasoning()).isEqualTo("先看看目录里有什么");
     }
@@ -229,12 +216,12 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"javac -version\"}"));
         append(new ToolApprovalRequested("call_1", "测试：这条命令要人批一下"));
         append(new ToolApprovalResolved("call_1", true, UserId.of("root"), null));
-        // ★ 用户批准之后，那次调用真的被执行了，结果落下来
+        // 批准后调用真正执行，结果落库。
         append(new ToolResult("call_1", true, "javac 21.0.1", false, 0, 5));
 
         List<LlmMessage> messages = assemble();
 
-        // system, user, assistant([call_1]), tool(call_1) —— **只有一条 tool**
+        // 结构：system、user、assistant([call_1])、tool(call_1)，只有一条 tool。
         assertThat(messages).hasSize(4);
         LlmMessage answered = messages.get(3);
         assertThat(answered.role()).isEqualTo(LlmRole.TOOL);
@@ -242,8 +229,7 @@ class ContextAssemblerTest {
         assertThat(answered.content()).contains("javac 21.0.1");
         assertThat(answered.content()).doesNotContain("批准");
 
-        // 两条 tool 消息回答同一个 tool_call_id 的话，下一次请求会当场 400：
-        // 「Messages with role 'tool' must be a response to a preceding message with 'tool_calls'」
+        // 同一 tool_call_id 只能有一条 tool 消息。
         assertThat(answeredCalls(messages)).containsExactly("call_1");
     }
 
@@ -268,7 +254,7 @@ class ContextAssemblerTest {
         append(new UserMessage("跑一下"));
         append(new AssistantMessage("", "deepseek-reasoner", "试试"));
         append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"rm -rf /\"}"));
-        // 用户只点了"拒绝"，一个字都没留 —— 界面上本来也没有留字的地方
+        // 用户只点拒绝、未留言。
         append(new ToolApprovalResolved("call_1", false, UserId.of("root"), null));
 
         List<LlmMessage> messages = assemble();
@@ -277,8 +263,7 @@ class ContextAssemblerTest {
         assertThat(messages.get(3).content())
                 .contains("用户拒绝了这次调用")
                 .contains("停下");
-        // ★ reason 为 null 时不能把**字面量 null**拼进句子（"…：null。请换一种做法……"）。
-        //   其他用例都老老实实给了理由，只有应用里不给 —— 所以这条得盯住它
+        // reason 为 null 时不能把字面量 null 拼进句子。
         assertThat(messages.get(3).content()).doesNotContain("null");
     }
 
@@ -301,8 +286,10 @@ class ContextAssemblerTest {
     }
 
     /**
-     * 每个 {@code tool_call_id} 被回答了几次 —— 同一个 id 出现两次就是那份请求会 400 的形状。
-     * 只看 {@code role="tool"} 的消息：别的消息上这个字段是 null，混进来会得到一堆假重复。
+     * 每个 tool_call_id 被回答的次数；同一 id 出现两次会让请求 400。只统计 tool 消息。
+     *
+     * @param messages 消息
+     * @return 被回答的调用 id
      */
     private static List<String> answeredCalls(List<LlmMessage> messages) {
         return messages.stream()
@@ -339,8 +326,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // null 和空串在 wire 那层的下场完全不同：null → 不发那个字段；
-        // 空串 → 发出去，而服务商拒收空串
+        // null 表示不发送字段；空串会被发送，而服务商拒收空串。
         assertThat(messages.subList(1, messages.size()))
                 .allSatisfy(m -> assertThat(m.reasoning()).isNull());
     }
@@ -358,9 +344,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // system, user, assistant(c1), tool, assistant(c2), tool, assistant
-        // 合并不了：OpenAI 的格式要求 tool 结果必须紧跟带 tool_calls 的那条 assistant 消息，
-        // 中间隔着别人的结果就没法并成一条
+        // 无法合并：tool 结果必须紧跟带 tool_calls 的 assistant 消息，中间隔着其他结果。
         assertThat(messages).hasSize(7);
         assertThat(messages.get(4).role()).isEqualTo(LlmRole.ASSISTANT);
         assertThat(messages.get(4).content()).isEmpty();     // 第二次调用前模型没说话
@@ -401,9 +385,7 @@ class ContextAssemblerTest {
     void unmatchedToolCallGetsASyntheticResult() {
         append(new UserMessage("跑一下测试"));
         append(new ToolCallRequested("c1", "run_command", "{}"));
-        // 这个工具跑了很久，而这一轮在它执行期间就中断了（回调抛异常、进程被杀），
-        // 结果永远不会来。事件流里于是只剩「请求了」—— 直接投影出去，
-        // 就是一条没有配对 tool 消息的 assistant(tool_calls)，API 会拒
+        // 执行期间轮次中断，结果永远不会来，事件流里只剩请求。
 
         List<LlmMessage> messages = assemble();
 
@@ -425,7 +407,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("c1", "read_file", "{}"));
         append(new ToolResult("c1", true, "class A {}", false, 0, 5));
         append(new ToolCallRequested("c2", "run_command", "{}"));
-        // c2 执行到一半这一轮就断了，没有结果
+        // c2 执行期间轮次中断，没有结果。
 
         List<LlmMessage> messages = assemble();
 
@@ -446,8 +428,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 结构一个字没变：清的是正文，不是那条消息。变了的话配对就断了，
-        // 而配对断了 API 直接拒
+        // 只清正文，消息与配对结构保持完整。
         assertThat(messages).hasSize(4);
         LlmMessage tool = messages.get(3);
         assertThat(tool.role()).isEqualTo(LlmRole.TOOL);
@@ -467,9 +448,7 @@ class ContextAssemblerTest {
         List<LlmMessage> messages = assemble();
 
         assertThat(messages.get(2).content()).isEqualTo("等于 42");
-        // 它是**展示**用途。各家对"回不回传"的要求是相反的（OpenAI 兼容阵营说不要回传，
-        // Anthropic 的 thinking block 带签名、必须回传），所以"回不回传"由 provider
-        // 适配层决定，而这一层——投影——**统一不带**
+        // 思考只用于展示；是否回传由适配器决定，投影不把它写进正文。
         assertThat(messages).noneSatisfy(m -> assertThat(m.content()).contains("我先看看题目"));
     }
 
@@ -499,7 +478,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // system, user(摘要), user(第三句) —— 前三件事全被那条摘要代表了
+        // system、user(摘要)、user(第三句)；此前内容由摘要代表。
         assertThat(messages).hasSize(3);
         assertThat(messages.get(1).role()).isEqualTo(LlmRole.USER);
         assertThat(messages.get(1).content()).contains("摘要").contains("我答了一句");
@@ -519,13 +498,13 @@ class ContextAssemblerTest {
 
         assertThat(messages).hasSize(3);
         assertThat(messages.get(1).content()).contains("第二次的摘要");
-        // 用第一条水位线的话，中期那句话会漏出来 —— 而它早该被后一次压缩覆盖掉
+        // 使用第一条水位线会让已被覆盖的中期内容重新出现。
         assertThat(messages.get(1).content()).doesNotContain("第一次的摘要内容");
         assertThat(messages.get(2).content()).isEqualTo(said("最新的话"));
     }
 
     @Test
-    @DisplayName("【回滚】退到第 1 轮结束：第 0～1 轮**全部留住**，只丢第 2 轮之后")
+    @DisplayName("【回滚】退到第一次交互结束：第一轮留住，只丢第二轮之后")
     void rewindKeepsTheConversationUpToTheCheckpoint() {
         append(new CheckpointCreated("base", 0));           // 会话刚开始（第 0 轮之前）
         append(new UserMessage("第一轮"));
@@ -542,11 +521,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 系统 + 第一轮的两条。**第二、三轮没了**——它们的代码确实退回去了。
-        //
-        // 这一条是这个投影最要紧的性质：若整段清空，第 0 轮聊过什么模型也一并忘了，
-        // 而那一轮的代码还留在盘上 —— 模型面对自己刚写的东西却没有上下文。
-        // Claude Code 的 /rewind 就是把这些留住的
+        // 保留系统提示词与第一轮；第二、三轮被截掉。整段清空会让模型忘记仍留在磁盘上的改动。
         assertThat(messages).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM, said("第一轮"), "我改了 A.java");
     }
@@ -561,8 +536,7 @@ class ContextAssemblerTest {
         append(new UserMessage("第二轮"));
         append(new AssistantMessage("改了 B.java", null));
 
-        // base 那条记在第 0 条消息之前（那时 messages 里只有系统提示词），
-        // 所以它是"撤销全部改动"，退到那儿对话一条不剩
+        // base 记在第一条消息之前，因此退到它等于撤销全部对话。
         append(new SessionRewound("base", veryBeginning, UserId.of("u-li")));
 
         assertThat(assemble()).singleElement()
@@ -575,18 +549,16 @@ class ContextAssemblerTest {
         append(new CheckpointCreated("base", 0));                // 会话开始
         append(new UserMessage("第一轮"));
         append(new AssistantMessage("答一", null));
-        // 第一轮只说了话、一个字都没改文件 —— 于是 commit 返回的还是上一个 HEAD，
-        // 两条 checkpoint 的 sha 一模一样
+        // 第一轮未改文件，commit 返回上一个 HEAD，两条 checkpoint sha 相同。
         long afterFirst = append(new CheckpointCreated("base", 1));
         append(new UserMessage("第二轮"));
         append(new AssistantMessage("答二", null));
         append(new CheckpointCreated("changed", 2));
 
-        // 用户选的是"退到第二轮之前" = 第一轮结束那个点。它和会话开始那条同 sha
+        // 用户选择第一轮结束点，它与会话开始那条同 sha。
         append(new SessionRewound("base", afterFirst, UserId.of("u-li")));
 
-        // 按 sha 取**最早**那条匹配会退到"会话刚开始"，把用户选的第一轮之后的
-        // 东西**也一起清掉**。认序号才退得到他指的那一条：第一轮的两条都留着
+        // 按 sha 取最早匹配会退到会话开始；按 seq 才能退到用户选择的位置。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM, said("第一轮"), "答一");
     }
@@ -602,11 +574,10 @@ class ContextAssemblerTest {
         append(new AssistantMessage("答二", null));
         append(new CheckpointCreated("changed", 2));
 
-        // toCheckpointSeq = null
+        // toCheckpointSeq = null。
         append(new SessionRewound("base", null, UserId.of("u-li")));
 
-        // 拿 sha 去猜的话这里会退到"会话刚开始"那条 —— 而这个 sha 在这条会话里出现过两次，
-        // 猜哪条都是猜。既然事件自己没记下退到哪儿，就退到最保守的位置
+        // sha 在这条会话里出现过两次，无法定位；事件没记录目标时退到最保守位置。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .containsExactly(SYSTEM);
     }
@@ -618,16 +589,12 @@ class ContextAssemblerTest {
         append(new ContextCompacted(1, "早前聊过什么"));
         append(new UserMessage("后来"));
         append(new AssistantMessage("后来我改了 A.java", null));
-        // 这条 checkpoint 落在水位线之前 —— 它那条 CheckpointCreated 我们压根没遍历到，
-        // 所以查不出"该退到第几条消息"。真实路径：先压缩、再回滚到压缩之前的某个点。
-        // 这里用一个流里不存在的序号表示那种"查不到"（和 sha 在不在手上无关了）
+        // checkpoint 在水位线之前，未遍历到，无法定位消息下标；用流中不存在的 seq 表示。
         append(new SessionRewound("sha0", 999L, UserId.of("u-li")));
 
         List<LlmMessage> messages = assemble();
 
-        // 查不到边界就退到 conversationStart —— 连摘要一起清掉。
-        // 摘要描述的那些改动确实已经退回去了，留着它模型就会对着一个不存在的现状说话；
-        // 而"退得比该退的多"只是少记一段，不会让它说错话
+        // 查不到边界时退到 conversationStart，连摘要一起清掉；多退胜过保留已作废的摘要。
         assertThat(messages).singleElement()
                 .satisfies(m -> assertThat(m.role()).isEqualTo(LlmRole.SYSTEM));
     }
@@ -665,8 +632,7 @@ class ContextAssemblerTest {
 
         LlmMessage instruction = assemble().get(2);
 
-        // 角色上它确实占用户位（模型要按指令行动），但正文带来源标记 ——
-        // 而事件流里它是独立类型，审计时不会跟真实的用户发言混起来
+        // 模型需要按指令行动，因此占 user 角色；正文带来源标记，事件类型独立。
         assertThat(instruction.role()).isEqualTo(LlmRole.USER);
         assertThat(instruction.content())
                 .startsWith("[平台指令]")
@@ -685,10 +651,10 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 只剩系统提示词 + 回滚之后那一句
+        // 保留系统提示词与回滚后的消息。
         assertThat(messages).hasSize(2);
         assertThat(messages.getFirst().role()).isEqualTo(LlmRole.SYSTEM);
-        // **系统提示词要原样留着**：它不属于对话，一起清掉会让后续每一次调用都缓存未命中
+        // 系统提示词不属于对话，清掉会让后续调用失去缓存前缀。
         assertThat(messages.getFirst().content()).isEqualTo(SYSTEM);
         assertThat(messages.get(1).content()).isEqualTo(said("这次换个做法"));
         // 被回滚掉的那些轮次一个字都不该留下
@@ -718,8 +684,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 状态用**模型自己的词**（和工具参数里那三个字符串一模一样）：它写进去、它读回来，
-        // 中间不该经过一次翻译
+        // 状态沿用工具参数中的原词，写作与读回之间不翻译。
         assertThat(messages.getLast().role()).isEqualTo(LlmRole.USER);
         assertThat(messages.getLast().content())
                 .startsWith("[当前任务清单")
@@ -737,8 +702,7 @@ class ContextAssemblerTest {
 
         List<LlmMessage> messages = assemble();
 
-        // 旧的快照留在历史里，内容不再变化 —— 下一次请求的前缀因此是严格延伸的。
-        // 最新那一份在最后，模型以它为准。
+        // 旧快照保留且不再变化，新快照追加在最后。
         assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(2);
         assertThat(messages).filteredOn(m -> m.content().contains("当前任务清单"))
                 .extracting(LlmMessage::content)
@@ -751,21 +715,19 @@ class ContextAssemblerTest {
     void theTodoListSurvivesCompaction() {
         append(new UserMessage("把这几件事做了"));
         append(todo("跑测试"));
-        // 水位线落在这条上：它**之前**的一切（含上面那份清单）都不再投影给模型
+        // 水位线落在该事件上，此前内容不再投影。
         long cutoff = append(new AssistantMessage("好，我开始了", null));
         append(new ContextCompacted(cutoff, "前面聊过要做这几件事"));
         append(new UserMessage("继续"));
 
         List<LlmMessage> messages = assemble();
 
-        // 水位线之前的东西由摘要代表……
+        // 水位线之前的内容由摘要代表。
         assertThat(messages).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("前面聊过要做这几件事"));
         assertThat(messages).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("好，我开始了"));
-        // ……但清单**不在**被替换的那部分里：它的快照还在历史里（最新的那份）。
-        // 工具结果就做不到这一点（它会被 ToolResultsCleared 清掉），而计划丢了，
-        // 模型就会忘了自己做到第几步 —— 这是长任务里最贵的一种失忆
+        // 清单快照不被摘要替换；工具结果则可能被清理，丢失计划会让模型忘记进度。
         assertThat(messages).extracting(LlmMessage::content)
                 .anySatisfy(content -> assertThat(content)
                         .startsWith("[当前任务清单")
@@ -802,8 +764,7 @@ class ContextAssemblerTest {
 
         append(new SessionRewound("sha0", beforeAnything, UserId.of("u-li")));
 
-        // 退到"还没写清单"那一刻，模型不该看见一个**还没发生**的计划 ——
-        // 判据和对话那边一样：序号大于切点的那几份作废
+        // 退到写清单之前，清单快照必须一并作废；判据与对话截断相同。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("当前任务清单"));
     }
@@ -812,8 +773,7 @@ class ContextAssemblerTest {
     @DisplayName("【清单】空清单 = 追加一条「已经清空」，旧快照不会继续冒充当前")
     void anEmptyListAppendsAClearedSnapshot() {
         append(todo("第一步"));
-        // 模型把整件事做完了，于是把清单清空（全做完时写一份空清单，
-        // 而不是留着一份全打勾的）
+        // 全部完成后写入空清单，而不是保留一份全完成项。
         append(new TodoListUpdated(List.of()));
 
         List<LlmMessage> messages = assemble();
@@ -827,7 +787,7 @@ class ContextAssemblerTest {
     // 可推进的投影
     // ------------------------------------------------------------------
 
-    /** 分几次喂给**同一条**投影；最后一次的结果必须和"一次喂完"逐字符相同。 */
+    /** 分多次喂给同一条投影；最终结果必须与一次喂完逐字符相同。 */
     private List<LlmMessage> inSteps(int... cuts) {
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
         List<LlmMessage> sink = new ArrayList<>();
@@ -847,11 +807,9 @@ class ContextAssemblerTest {
         append(new AssistantMessage("改完了", null));
         append(new UserMessage("再改一处"));
 
-        // 切在"请求已落库、结果还没回来"的中间：那一步的投影会**自己合成**一条
-        // "这次调用没有留下结果"，而真结果到了之后要**原地换掉**它 ——
-        // 增量投影最容易在这里走样（合成的那条落在哪、换的是哪一条）
+        // 切在请求已落库、结果未回的位置：投影会先合成结果，之后由真实结果原地替换。
         assertThat(inSteps(2, 4, 6)).isEqualTo(assemble());
-        // 而且合成的那条最后**不在了**：真结果把它换掉了
+        // 最终不应残留合成结果。
         assertThat(inSteps(2, 4, 6)).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("没有留下结果"));
     }
@@ -881,14 +839,37 @@ class ContextAssemblerTest {
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
         List<LlmMessage> sink = new ArrayList<>();
-        // 前两条先推进一遍（这时还没有压缩）
+        // 先推进前两条，此时尚无压缩。
         projection.advance(events.subList(0, 2), sink);
-        // 压缩是**后来**才到的：它把前面一整段换成摘要 —— 已经投出去的前缀整段作废，
-        // 增量折不出来，只能从头再来
+        // 压缩随后到达，替换整段前缀，必须从头重建。
         append(new ContextCompacted(cutoff, "前面聊过这些"));
         projection.advance(events, sink);
 
         assertThat(viewOf(projection, sink)).isEqualTo(fedInOneGo());
+        assertThat(sink).extracting(LlmMessage::content)
+                .anyMatch(content -> content.contains("前面聊过这些"));
+    }
+
+    @Test
+    @DisplayName("【分页重建】重建时 begin 拿到整条流 —— 前一页的压缩摘要不会丢")
+    void rebuildingFromAPageStillSeesEarlierCompaction() {
+        append(new UserMessage("第一句"));
+        append(new AssistantMessage("答一", null));
+        long cutoff = append(new AssistantMessage("答二", null));
+        append(new ContextCompacted(cutoff, "前面聊过这些"));
+        append(new UserMessage("第二句"));
+
+        // 生产里的 supplier 每次返回最新整条流；这里模拟分页递进来的第二片
+        ContextAssembler.Projection projection = assembler.projection(SYSTEM, () -> events);
+        List<LlmMessage> sink = new ArrayList<>();
+        projection.advance(events.subList(0, 4), sink);
+        assertThat(sink).extracting(LlmMessage::content)
+                .anyMatch(content -> content.contains("前面聊过这些"));
+
+        append(new ToolResultsCleared(List.of("c9")));
+        projection.advance(events.subList(4, 6), sink);
+
+        // 压缩摘要在第一页，重建时只拿第二页会把它丢掉；必须重新扫整条流
         assertThat(sink).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("前面聊过这些"));
     }
@@ -943,7 +924,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("c2", "read_file", "{\"path\":\"B.java\"}"));
         append(new ToolResult("c2", true, "class B {}", false, 0, 5));
 
-        // 热路径：先推进到回滚**之前**（两次读都进去了），回滚是后来才到的
+        // 先推进到回滚之前，两次读取都已进入投影。
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
         List<LlmMessage> sink = new ArrayList<>();
         projection.advance(events.subList(0, 8), sink);
@@ -952,9 +933,7 @@ class ContextAssemblerTest {
         append(new SessionRewound("sha0", cut, UserId.of("u-li")));
         projection.advance(events, sink);
 
-        // 回滚把**代码**也退回去了（同一棵树）：切点之前读到的那份内容今天依然成立，
-        // 切点之后看到的那份代码已经不存在了 —— 该作废的正是那一段。
-        // 留下来的话，"读过才许覆盖"那道门会让模型覆盖一个它这条时间线上没读过的文件
+        // 回滚同时退回代码：切点前的读取仍成立，切点后的内容已不存在，必须作废。
         assertThat(projection.readPaths()).contains("A.java").doesNotContain("B.java");
     }
 
@@ -968,7 +947,7 @@ class ContextAssemblerTest {
 
         ContextAssembler.Projection projection = assembler.projection(SYSTEM);
         List<LlmMessage> sink = new ArrayList<>();
-        // 先推进到回滚之前 —— 清单这时候已经投出去一次了
+        // 先推进到回滚之前，清单已经投出一次。
         projection.advance(events, sink);
         assertThat(sink).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("跑测试"));
@@ -976,9 +955,7 @@ class ContextAssemblerTest {
         append(new SessionRewound("sha0", base, UserId.of("u-li")));
         projection.advance(events, sink);
 
-        // 为什么这一条要单独有（上面那条"回滚退到写清单之前"是一次喂完的）：
-        // 生产上跑的是**推进**这条（见 SessionProjections），而回滚进来时这条投影
-        // 已经把前面那些事件折过一遍了 —— 于是它走的是"清了重建"那条路，而不是从头折
+        // 生产使用推进路径；回滚时投影已折过此前事件，会走清空重建。
         assertThat(sink).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("当前任务清单"));
     }
@@ -992,9 +969,7 @@ class ContextAssemblerTest {
         append(new ToolApprovalRequested("c1", "这条要问你"));
         append(new SessionRewound("sha0", base, UserId.of("u-li")));
 
-        // 那条调用请求了、一直没有结局，收尾时本来会给它补一条"没有结果"。可它的请求
-        // 已经被这次回滚砍掉了 —— 补出来就是一条**前面没有 tool_calls 的 tool 消息**，
-        // 下一次发给模型直接 400（"必须是对前面那条 tool_calls 的回应"）
+        // 请求已被回滚砍掉，不能再补结果；否则会出现没有 tool_calls 前置的 tool 消息。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .noneMatch(content -> content.contains("没有留下结果"));
     }
@@ -1012,8 +987,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("call_1", "run_command", "{\"command\":\"pwd\"}"));
         append(new ToolResult("call_1", true, "C:/x", false, 0, 5));
 
-        // 记着的位置要是不作废，这一次答复会原地替换到一条**已经不在对话里**的消息上：
-        // 越界就抛出去，下标还在范围内就是**静默覆盖别人的内容**
+        // 记录的位置若不作废，答复会覆盖已不在对话里的消息或无关内容。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .anyMatch(content -> content.contains("C:/x"))
                 .noneMatch(content -> content.contains("a.java"));
@@ -1026,8 +1000,7 @@ class ContextAssemblerTest {
         append(new ToolCallRequested("c1", "run_command", "{\"command\":\"rm -rf build\"}"));
         append(new ToolApprovalRequested("c1", "这条要问你"));
 
-        // 那条 tool_calls 必须配一条 tool 消息（配对是 API 的硬要求），所以兜底**不能省**；
-        // 但说的得是真话：它没执行过，所以"不要直接重试、先确认文件现状"那句是反的
+        // 配对要求的兜底不能省，但必须说明它尚未执行，不能套用中断文案。
         assertThat(assemble()).extracting(LlmMessage::content)
                 .anyMatch(text -> text != null && text.contains("还在等你批准"))
                 .noneMatch(text -> text != null && text.contains("中断了"));
@@ -1046,7 +1019,7 @@ class ContextAssemblerTest {
         assertThat(seen).extracting(LlmMessage::content)
                 .anyMatch(text -> text != null && text.contains("删掉了"))
                 .noneMatch(text -> text != null && text.contains("等你批准"));
-        // 一个 tool_call_id 只能配一条 tool 消息，两条就是下一次请求 400
+        // 一个 tool_call_id 只能有一条 tool 消息。
         assertThat(seen).filteredOn(message -> message.role() == LlmRole.TOOL).hasSize(1);
     }
 
@@ -1063,8 +1036,7 @@ class ContextAssemblerTest {
         projection.advance(events.subList(0, 1), sink);
         projection.advance(events, sink);
 
-        // 第一次推进写下一份快照；第二次推进只在清单变化时追加新的。
-        // 旧的那份原样留在前缀里 —— 这正是缓存能命中的原因。
+        // 旧快照留在前缀中，新变化追加一份。
         assertThat(sink).filteredOn(m -> m.content().contains("当前任务清单")).hasSize(2);
         assertThat(sink.getLast().content())
                 .contains("当前任务清单")
@@ -1092,8 +1064,7 @@ class ContextAssemblerTest {
         append(new AssistantMessage("好的", null));
         List<LlmMessage> after = assemble();
 
-        // 这是 prompt 缓存能命中的前提：模型服务商按前缀匹配，
-        // 前缀一旦被改动，整个前缀都要按未命中价重算
+        // 前缀缓存按前缀匹配；前缀改动会导致整段重新计费。
         assertThat(after.subList(0, before.size())).isEqualTo(before);
         assertThat(after).hasSize(before.size() + 2);
     }

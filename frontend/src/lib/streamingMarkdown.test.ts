@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest'
 import { splitPartialLine, splitStreamingBlocks } from './streamingMarkdown'
 
 /**
- * 这里钉的是两个**"看不出来"的细节**（都写在 `splitPartialLine` 的注释里）：
- * react-markdown 给块级代码补过一个收尾换行；而"最后一行有没有写完"从交出来的
- * 那个字符串上**看不出来** —— 只能回到原始正文上判断。
+ * 钉的是两个不显然的细节（都写在 `splitPartialLine` 的注释里）：react-markdown
+ * 给块级代码补过一个收尾换行；"最后一行有没有写完"从交出来的字符串上看不出来，
+ * 只能回到原始正文判断。
  */
 
 describe('splitStreamingBlocks', () => {
@@ -53,7 +53,7 @@ describe('splitPartialLine', () => {
   })
 
   it('**第一道细节**：解析器补的那个收尾换行要裁掉，否则 partial 永远是空的', () => {
-    // 源码是 "int a;"（还在写），解析器交出来的是 "int a;\n"
+    // 源码是 "int a;"（还在写），解析器交出来是 "int a;\n"。
     const parts = splitPartialLine('int a;\n', '```java\nint a;')
 
     expect(parts.partial).toBe('int a;')
@@ -62,7 +62,7 @@ describe('splitPartialLine', () => {
   })
 
   it('**第二道细节**：这一行刚敲完回车（正文末尾有换行）就不算在写', () => {
-    // 交出来的字符串和上面那个一模一样 —— 区别只在原始正文上
+    // 交出来的字符串和上面一模一样，区别只在原始正文上。
     const parts = splitPartialLine('int a;\n', '```java\nint a;\n')
 
     expect(parts.partial).toBe('')
@@ -70,7 +70,7 @@ describe('splitPartialLine', () => {
   })
 
   it('尾巴里**前面那些已收尾的代码块**不能被摘掉最后一行', () => {
-    // 这一段顶在正文末尾，但正文末尾那个代码块已经写完了 —— 它前面那一块更不该被裁
+    // 这一段顶在正文末尾，但末尾那个代码块已经写完了，它前面那一块更不该被裁。
     const source = '```java\nint a;\n```\n\n中间一段话\n\n```java\nint b;'
     const parts = splitPartialLine('int b;\n', source)
 

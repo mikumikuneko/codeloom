@@ -11,11 +11,10 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 保守切词：**看得懂就给词，看不懂就说看不懂。**
+ * 保守切词：看得懂就给词，看不懂就返回空。
  *
- * <p>这些用例盯的不是"能不能切对每一个 shell 语法"，而是那条安全性质：
- * **凡是解释起来会变样的写法，一律走"看不懂"**。多一次"看不懂"的代价是让人
- * 多点一次批准；漏一次"看不懂"的代价是一条我们没看懂的路径被免审批放行。
+ * <p>用例守的不是完整 shell 语法，而是：凡是解释起来会变样的写法，一律走"看不懂"。
+ * 漏判的代价是一条未被理解的命令被免审批放行。
  */
 class CommandLineTest {
 
@@ -40,17 +39,17 @@ class CommandLineTest {
     void quotedSpacesStayInsideTheWord() {
         assertThat(words("grep \"a b\" src")).contains(List.of("grep", "a b", "src"));
         assertThat(words("grep 'a b' src")).contains(List.of("grep", "a b", "src"));
-        // 引号本身不进词里 —— shell 会把它们吃掉，我们照 shell 的样子给词
+        // 引号本身不进词里：shell 会去掉它们，切词结果与 shell 看到的一致
         assertThat(words("echo 'hi'")).contains(List.of("echo", "hi"));
-        // 空串是一个**词**，不是"没有这个词"
+        // 空串是一个词，不是"没有这个词"
         assertThat(words("echo ''")).contains(List.of("echo", ""));
     }
 
     @Test
     @DisplayName("引号里的元字符是**字面量** —— shell 不解释它们，我们也不该为它们点批准")
     void metacharactersInsideQuotesAreLiteral() {
-        // 这两种引法都把 ; | & ( ) { } 变成普通字符。一条正常命令里出现它们不算"看不懂"，
-        // 否则 node -e "…"、grep 'a|b' 这种天天要用的写法每次都得问人
+        // 两种引法都把 ; | & ( ) { } 变成普通字符；否则 node -e "…"、grep 'a|b'
+        // 这类常见写法每次都要问人
         assertThat(words("node -e \"setTimeout(()=>{},1200)\""))
                 .contains(List.of("node", "-e", "setTimeout(()=>{},1200)"));
         assertThat(words("grep -n 'a|b' f.txt")).contains(List.of("grep", "-n", "a|b", "f.txt"));
@@ -60,7 +59,7 @@ class CommandLineTest {
     @Test
     @DisplayName("两种引号挡的东西不一样：单引号里 $ 是字面量，双引号里它不是")
     void singleAndDoubleQuotesDifferOnDollar() {
-        // 单引号是唯一一个不做任何解释的引法 —— '$HOME' 就是那五个字符
+        // 单引号不做任何解释：'$HOME' 就是那五个字符
         assertThat(words("grep '$HOME' f.txt")).contains(List.of("grep", "$HOME", "f.txt"));
         // 双引号挡不住变量展开，所以那条路还是看不懂
         assertThat(words("grep \"$HOME\" f.txt")).isEmpty();

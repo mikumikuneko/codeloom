@@ -65,10 +65,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 整个 agent 循环跑在**假的模型客户端**上，但工具、文件系统都是真的。
- *
- * <p>这就是"循环不碰存储"换来的：不需要数据库、不需要 Redis、不需要 API Key，
- * 就能把最容易长 bug 的那部分代码完整测出来。
+ * agent 循环使用假模型客户端，工具和文件系统使用真实实现。循环不碰存储，
+ * 因此测试不需要数据库、Redis 或 API Key。
  */
 class AgentTurnTest {
 
@@ -128,8 +126,7 @@ class AgentTurnTest {
 
         List<LlmMessage> first = client.requests().getFirst().messages();
         List<LlmMessage> second = client.requests().get(1).messages();
-        // 第二次请求必须以上一次为**逐条相同**的前缀；否则服务商的前缀缓存
-        // 在时钟那一行就断了
+        // 第二次请求必须逐条以上一次为前缀，否则前缀缓存失效。
         assertThat(second.subList(0, first.size())).isEqualTo(first);
     }
 
@@ -144,8 +141,7 @@ class AgentTurnTest {
         TurnOutcome outcome = turn.run(input(client));
 
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.COMPLETED);
-        // 第一轮模型没说话只调工具，所以【不产出】AssistantMessage：
-        // ToolCallRequested + ToolResult + AssistantMessage = 3 条
+        // 第一轮只调工具、不产出 AssistantMessage：请求、结果、最终回答共 3 条。
         assertThat(outcome.newEvents()).hasSize(3);
         assertThat(outcome.newEvents().get(0)).isInstanceOf(ToolCallRequested.class);
 
@@ -177,9 +173,7 @@ class AgentTurnTest {
 
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.COMPLETED);
 
-        // ★ 这一轮模型一个字都没说，**但它的思考要落库**：带 tool_calls 的那条 assistant
-        //   消息若缺了思考，下一次请求发出去就是 400：
-        //   「The `reasoning_content` in the thinking mode must be passed back to the API.」
+        // 只调工具的一轮没有正文，但思考必须落库；带 tool_calls 的消息缺思考会导致 400。
         AssistantMessage spoken = outcome.newEvents().stream()
                 .filter(AssistantMessage.class::isInstance)
                 .map(AssistantMessage.class::cast)
@@ -188,9 +182,7 @@ class AgentTurnTest {
         assertThat(spoken.text()).isEmpty();
         assertThat(spoken.reasoning()).isEqualTo("先看看这个文件里有什么");
 
-        // ★ 而且它必须**真的走到发出去的请求里**。
-        //   只测"落库了"是不够的 —— 事件落库和请求组装是两段代码，
-        //   而这次出问题的恰恰是后一段（装配时把思考丢了）。
+        // 还必须真正进入下一次请求；落库与请求组装是两段代码，后者才可能丢失思考。
         List<LlmMessage> secondRequest = client.requests().get(1).messages();
         assertThat(secondRequest).anySatisfy(m -> {
             assertThat(m.role()).isEqualTo(LlmRole.ASSISTANT);
@@ -209,8 +201,7 @@ class AgentTurnTest {
 
         turn.run(input(client));
 
-        // 不产思考的模型（非推理模型、或者思维链关着）这一项必须一直是 null ——
-        // wire 那层靠它决定发不发 reasoning_content，发一个空串会被拒
+        // 不产思考的模型该项必须为 null；适配器据此决定不发送 reasoning_content。
         List<LlmMessage> secondRequest = client.requests().get(1).messages();
         assertThat(secondRequest)
                 .filteredOn(m -> m.role() == LlmRole.ASSISTANT)
@@ -232,18 +223,15 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 两条请求**先**一起落库，然后才是两个结果 —— 而不是"请求-结果-请求-结果"。
-        // 这个形状有两个后果：崩溃恢复要的"跑之前请求已经在库里"照样成立；
-        // 投影时相邻的请求会被合并成一条带两个 tool_calls 的 assistant 消息。
-        // 最后那一条是模型看完结果给的结论：2 请求 + 2 结果 + 1 结论 = 5
+        // 两条请求先落库、再落两个结果，最后是结论：2 + 2 + 1 = 5。
+        // 该顺序既满足崩溃恢复，也让投影把相邻请求合并为一条 assistant 消息。
         assertThat(outcome.newEvents()).hasSize(5);
         assertThat(outcome.newEvents().get(0)).isInstanceOf(ToolCallRequested.class);
         assertThat(outcome.newEvents().get(1)).isInstanceOf(ToolCallRequested.class);
         assertThat(((ToolCallRequested) outcome.newEvents().get(0)).callId()).isEqualTo("c1");
         assertThat(((ToolCallRequested) outcome.newEvents().get(1)).callId()).isEqualTo("c2");
 
-        // 结果是并发跑出来的，但**回灌顺序必须等于请求顺序** —— 这是并发化唯一
-        // 真正危险的地方：拿错了结果，模型就会以为 A.java 里是 B 的内容
+        // 结果并发执行，但回灌顺序必须等于请求顺序，否则结果会配错调用。
         ToolResult first = (ToolResult) outcome.newEvents().get(2);
         ToolResult second = (ToolResult) outcome.newEvents().get(3);
         assertThat(first.callId()).isEqualTo("c1");
@@ -263,9 +251,7 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 工具自己**不写**事件流 —— 它只回报事实，落库和广播是这一层的事。
-        // 位置在工具结果**之后**：读事件流的人先看到"这次调用跑完了"，
-        // 再看到"它把清单改成了什么样"
+        // 工具只回报事实，事件由循环在工具结果之后落库。
         assertThat(outcome.newEvents()).satisfiesExactly(
                 e -> assertThat(e).isInstanceOf(ToolCallRequested.class),
                 e -> assertThat(e).isInstanceOf(ToolResult.class),
@@ -287,8 +273,7 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 只有请求和结果，没有 TodoListUpdated：模型看到那句报错之后会自己改对再写一次，
-        // 而"写坏的那一次"不该在流里留下任何痕迹
+        // 无效参数只产生请求和失败结果，不落残缺的 TodoListUpdated。
         assertThat(outcome.newEvents()).satisfiesExactly(
                 e -> assertThat(e).isInstanceOf(ToolCallRequested.class),
                 e -> assertThat(e).isInstanceOf(ToolResult.class),
@@ -309,8 +294,7 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 三个批、每批一个：写调用既不会被并进前面的读批，也不会把后面的读拉进来。
-        // 3 请求 + 3 结果 + 模型最后的结论 = 7
+        // 读、写、读各成一批：3 请求 + 3 结果 + 1 结论 = 7。
         assertThat(outcome.newEvents()).hasSize(7);
         assertThat(outcome.newEvents().subList(0, 6)).satisfiesExactly(
                 e -> assertThat(e).isInstanceOf(ToolCallRequested.class),
@@ -333,9 +317,8 @@ class AgentTurnTest {
                         ScriptedLlm.call("c3", "run_command", "{\"command\":\"build\"}")),
                 ScriptedLlm.answer("跑完了"));
 
-        // 每次调用都回一大段 —— 要触及的正是"一轮总量"这个上限。
-        // 这里不能用 read_file：它自己会截断超长行，压根吐不出这么大的输出。
-        // **两头长得不一样**（HEAD…TAIL），不然"头尾各留一半"这件事验不出来
+        // 每次调用返回大段输出以触及每轮总量上限；两头内容不同，便于验证头尾各留一半。
+        // 不能用 read_file，它会截断超长行。
         CommandExecutor chatty = (ws, cmd, timeout, limit, cancel) ->
                 new CommandResult(0, "HEAD-" + "y".repeat(80_000) + "-TAIL", false, 5);
 
@@ -349,14 +332,14 @@ class AgentTurnTest {
                 .map(ToolResult.class::cast)
                 .toList();
 
-        // 前两个各 8 万字符，加起来还没到 20 万；第三个一进来就超了
+        // 前两个各 8 万字符，第三个进入时越过 20 万上限。
         assertThat(results).hasSize(3);
         assertThat(results.get(0).output()).hasSizeGreaterThan(50_000);
         assertThat(results.get(1).output()).hasSizeGreaterThan(50_000);
 
         ToolResult capped = results.get(2);
         assertThat(capped.output()).hasSizeLessThan(10_000);
-        // 回灌的是"头尾两段 + 省略了多少 + 去哪找全文"，而不是一句干巴巴的"已截断"
+        // 回灌头尾两段、省略量、落盘路径，而不是只写“已截断”。
         assertThat(capped.output())
                 .contains("已达上限")
                 .contains("HEAD-")                       // 开头这一半在
@@ -365,14 +348,12 @@ class AgentTurnTest {
                 .contains(Workspace.TOOL_OUTPUT_DIR + "/c3.txt");
         assertThat(capped.truncated()).isTrue();
 
-        // **落盘的那份是完整的** —— 这才是它比"直接截断"强的地方：
-        // 模型读一行 read_file 就能把丢掉的那部分拿回来
+        // 落盘文件是完整输出，模型可用 read_file 取回。
         String persisted = Files.readString(
                 worktree.resolve(Workspace.TOOL_OUTPUT_DIR).resolve("c3.txt"),
                 StandardCharsets.UTF_8);
         assertThat(persisted).hasSizeGreaterThan(50_000);
-        // 完整的意思是**两头都在**（不是只能读到开头）。注意它前面还有工具自己加的
-        // "退出码…耗时…"那行 —— 落盘存的是工具结果的全文，不是命令的原始输出
+        // 完整意味着头尾都在；落盘的是工具结果全文，包含“退出码…耗时…”行。
         assertThat(persisted).contains("HEAD-").endsWith("-TAIL");
     }
 
@@ -388,7 +369,7 @@ class AgentTurnTest {
                                 "{\"todos\":[{\"content\":\"改代码\",\"state\":\"in_progress\"}]}")),
                 ScriptedLlm.answer("好了"));
 
-        // 前三次把这一轮的输出预算顶开；第四次（清单）的结果会被改写
+        // 前三次越过本轮输出预算，第四次（清单）的结果会被改写。
         CommandExecutor chatty = (ws, cmd, timeout, limit, cancel) ->
                 new CommandResult(0, "y".repeat(80_000), false, 5);
 
@@ -397,8 +378,7 @@ class AgentTurnTest {
                 ToolRegistry.standard(), chatty, TokenBudget.DEFAULT,
                 VerificationPlan.NONE, CancellationToken.none()));
 
-        // 改写的是**给模型看的那段文本**，不该顺手把工具报上来的事实一起抹掉 ——
-        // 从前的 7 参重建就把 todoUpdate 置成了 null，症状是"清单明明写了，流里没有"
+        // 改写只替换给模型的文本，不能丢掉 todoUpdate 等领域事实。
         assertThat(outcome.newEvents()).anyMatch(TodoListUpdated.class::isInstance);
         TodoListUpdated todos = (TodoListUpdated) outcome.newEvents().stream()
                 .filter(TodoListUpdated.class::isInstance)
@@ -409,10 +389,9 @@ class AgentTurnTest {
     }
 
     @Test
-    @DisplayName("【总预算】读文件那类**自己有界**的工具不进总量闸 —— 落盘提示对它是循环指令")
+    @DisplayName("【总预算】读文件那类**自己有界**的工具不做落盘改写 —— 落盘提示对它是循环指令")
     void selfBoundedToolsSkipTheSpillGate() throws IOException {
-        // 一个够大的文件：单看它自己完全正常（没到 read_file 的任何一条上限），
-        // 但加上前面那两段 8 万字符就会顶开这一轮的总量上限
+        // 文件本身未触及 read_file 上限，但加上前两段输出会越过本轮总量上限。
         Files.writeString(worktree.resolve("big.txt"),
                 "FILE-CONTENT-" + "z".repeat(50_000), StandardCharsets.UTF_8);
 
@@ -437,13 +416,10 @@ class AgentTurnTest {
                 .filter(result -> result.callId().equals("c3"))
                 .findFirst().orElseThrow();
 
-        // 内容**整份进来**，没有被换成"已存到某处，去读回来"。
-        // 代价是它整份占着上下文 —— 那份累积量归压缩管（read_file 在可清名单里），
-        // 而这一层唯一能做的事（落盘 + 叫它读回来）对它恰恰是个死循环
+        // 内容整份进入上下文，未被替换为落盘提示；累积占用由压缩处理。
         assertThat(read.output()).contains("FILE-CONTENT-");
         assertThat(read.output()).doesNotContain("已达上限");
-        // 也没有多出一份落盘文件 —— 被落盘的正是这条 read 的结果，
-        // 读回来照样超、照样落盘、照样叫它读
+        // 不生成落盘文件；落盘提示对读文件会形成循环。
         assertThat(worktree.resolve(Workspace.TOOL_OUTPUT_DIR).resolve("c3.txt")).doesNotExist();
     }
 
@@ -451,7 +427,7 @@ class AgentTurnTest {
     @DisplayName("【重试可见】限流 → 等一下再试，而且**那几秒落进事件流**")
     void transientFailureIsRetriedVisibly() {
         AtomicInteger calls = new AtomicInteger();
-        // 第一次限流，重试就成功。服务商说了"等到 0 毫秒"—— 测试别真睡 500 毫秒
+        // 第一次限流、重试成功；Retry-After 为 0，避免测试真实等待。
         LlmClient flaky = (request, listener, cancellation) -> {
             if (calls.incrementAndGet() == 1) {
                 throw new LlmCallException(LlmCallException.Kind.RATE_LIMITED,
@@ -471,7 +447,7 @@ class AgentTurnTest {
                 .satisfies(retry -> {
                     assertThat(retry.attempt()).isEqualTo(1);
                     assertThat(retry.maxAttempts()).isEqualTo(3);
-                    // 稳定的分类，不是服务商那句英文原文 —— 界面拿它做标签
+                    // 使用稳定分类而非服务商原文，供界面标签使用。
                     assertThat(retry.reason()).isEqualTo("限流");
                 });
     }
@@ -495,7 +471,7 @@ class AgentTurnTest {
     @DisplayName("【服务端说等太久】不提前重试 —— 违反它刚给的指示只会再撞一次")
     void aLongRetryAfterIsNotRetried() {
         AtomicInteger calls = new AtomicInteger();
-        // 它让我们等 10 分钟，而我们最多愿意等 8 秒
+        // 服务商要求等待 10 分钟，超过 8 秒上限。
         LlmClient toldToWaitTenMinutes = (request, listener, cancellation) -> {
             calls.incrementAndGet();
             throw new LlmCallException(LlmCallException.Kind.RATE_LIMITED,
@@ -513,7 +489,7 @@ class AgentTurnTest {
     void contextOverflowIsRepairedAndRetried() {
         AtomicInteger modelCalls = new AtomicInteger();
         AtomicInteger repairs = new AtomicInteger();
-        // 第一次装不下，修完之后就装得下了
+        // 第一次装不下，修复后成功。
         LlmClient overflowing = (request, listener, cancellation) -> {
             if (modelCalls.incrementAndGet() == 1) {
                 throw new LlmCallException(LlmCallException.Kind.CONTEXT_EXCEEDED,
@@ -526,7 +502,7 @@ class AgentTurnTest {
         TurnOutcome outcome = new AgentTurn(event -> {
         }, () -> {
             repairs.incrementAndGet();
-            return true;      // 修动了：真落了一条压过的记录
+            return true;      // 已修动：确实落了压缩记录
         }).run(input(overflowing));
 
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.COMPLETED);
@@ -546,7 +522,7 @@ class AgentTurnTest {
         assertThatThrownBy(() -> new AgentTurn(event -> {
         }, () -> {
             repairs.incrementAndGet();
-            return false;     // 没修动（没东西可压、或者压了但模型可见的状态没变）
+            return false;     // 未修动：无可压缩内容，或模型可见状态未变
         }).run(input(overflowing)))
                 .isInstanceOf(LlmCallException.class)
                 .hasMessageContaining("maximum context length");
@@ -609,8 +585,7 @@ class AgentTurnTest {
                 .map(ToolApprovalRequested.class::cast)
                 .findFirst().orElseThrow();
 
-        // 这条事件若只有一个 callId，人被问的时候就看不到为什么问 —— 而"人为什么拒绝"
-        // 我们是记着的（ToolApprovalResolved.reason），半个决定不能只记一半
+        // 审批事件必须包含提问理由，与记录拒绝理由同等重要。
         assertThat(asked.reason()).contains("curl").contains("不在免审批");
     }
 
@@ -634,10 +609,9 @@ class AgentTurnTest {
                 client, MODEL, ModelCapabilities.UNKNOWN, registry, unused, TokenBudget.DEFAULT,
                 VerificationPlan.NONE, CancellationToken.none()));
 
-        // 确实是并发的 —— 不然上限这件事根本不需要有
+        // 确实发生并发，否则上限没有意义。
         assertThat(probe.peak()).isGreaterThan(1);
-        // 但不会 20 个一起冲：上限由平台定，模型在一条消息里塞多少都不能突破它。
-        // 这个数就是 {@link AgentTurn#MAX_PARALLEL_TOOLS}，改了它这条跟着改
+        // 并发数不超过平台上限；上限由 AgentTurn.MAX_PARALLEL_TOOLS 定义。
         assertThat(probe.peak()).isLessThanOrEqualTo(AgentTurn.MAX_PARALLEL_TOOLS);
     }
 
@@ -676,7 +650,7 @@ class AgentTurnTest {
         public ToolOutcome execute(ToolContext context, JsonNode arguments) {
             peak.accumulateAndGet(live.incrementAndGet(), Math::max);
             try {
-                // 睡一下，好让重叠真的发生 —— 不睡的话每个都瞬间跑完，量不到并发
+                // 等待以制造重叠；否则任务瞬间结束，无法测量并发。
                 Thread.sleep(60);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -687,9 +661,9 @@ class AgentTurnTest {
     }
 
     @Test
-    @DisplayName("【落盘目录】越过保留期的旧文件被扫掉，新的留着 —— 那个目录只进不出")
+    @DisplayName("【落盘目录】越过保留期的旧文件被扫掉，新的留着 —— 否则目录会无限增长")
     void oldSpillsAreSweptAway() throws IOException {
-        // 判据（30 天）和"怎么算过期"分开：真等 30 天才能验的话，这条用例永远不会被跑到
+        // 把截止时间作为参数传入，否则要等 30 天才能验证。
         Path dir = worktree.resolve(Workspace.TOOL_OUTPUT_DIR);
         Files.createDirectories(dir);
         Path ancient = dir.resolve("callancient.txt");
@@ -705,7 +679,7 @@ class AgentTurnTest {
 
         assertThat(removed).isEqualTo(1);
         assertThat(ancient).doesNotExist();
-        // 边界要留着：差一天的文件是"还会被引用"的那一类，不是垃圾
+        // 未过期文件仍可能被引用，必须保留。
         assertThat(recent).exists();
     }
 
@@ -725,13 +699,13 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 一次截断 + 一次重来，最后正常收场 —— 而不是整轮判死
+        // 截断后重来一次并正常结束，而非整轮失败。
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.COMPLETED);
         assertThat(outcome.newEvents()).anySatisfy(e -> {
             assertThat(e).isInstanceOf(PlatformInstruction.class);
             assertThat(((PlatformInstruction) e).text()).contains("拆成更小的几步");
         });
-        // 第二次调用模型时那句话必须已经在上下文里，否则等于白说
+        // 第二次请求必须已包含该指令。
         assertThat(client.requests().get(1).messages())
                 .anySatisfy(m -> assertThat(m.content()).contains("拆成更小的几步"));
     }
@@ -739,8 +713,7 @@ class AgentTurnTest {
     @Test
     @DisplayName("模型要改文件：改动真的落到工作区了（工具与循环是通的）")
     void editsActuallyLandOnDisk() {
-        // **先读再改** —— 那才是真实的流：edit_file 要求"改之前观测过"（见 ReadLedger）。
-        // 顺带也验了"读这一笔真的记进账本了"，以及紧接着的第二次写没被自己挡住
+        // 先读再改，符合 edit_file 的观测要求，同时验证读操作已记账。
         ScriptedLlm client = new ScriptedLlm(
                 ScriptedLlm.toolCall("c1", "read_file", "{\"path\":\"A.java\"}"),
                 ScriptedLlm.toolCall("c2", "edit_file",
@@ -799,7 +772,7 @@ class AgentTurnTest {
     @Test
     @DisplayName("输出一直截断：重试到次数用尽后当成半成品收场，不接着往下推理")
     void truncatedOutputStopsTheTurn() {
-        // 一直给截断的结果 —— 这条盯的是**最终的收场**，重试本身由另一条覆盖
+        // 持续返回截断结果，验证最终收场；重试行为由另一条用例覆盖。
         ScriptedLlm client = ScriptedLlm.always(
                 new LlmResult("deepseek-flash", "length", "我说到一半被砍了",
                         List.of(), new TokenUsage(10, 4096, 4106, 0, 0)));
@@ -807,12 +780,12 @@ class AgentTurnTest {
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.TRUNCATED);
-        // 初次 + 两次重试 = 3 次调用，到此为止，不会无限重来
+        // 初次加两次重试，共 3 次调用。
         assertThat(client.requests()).hasSize(3);
     }
 
     @Test
-    @DisplayName("取消信号在工具边界生效")
+    @DisplayName("【取消】开始前就取消 → 一轮直接结束，不调用模型也不落事件")
     void cancellationStopsAtToolBoundary() {
         CancellationToken cancelled = new CancellationToken();
         cancelled.cancel();
@@ -831,8 +804,7 @@ class AgentTurnTest {
     @Test
     @DisplayName("【上下文读数】记的是**最后一次**调用的输入，不是这一轮的和")
     void lastCallUsageIsTheContextSizeNotTheTurnTotal() {
-        // 两次调用、两个明显不同的输入量。**一次调用就完成的一轮里这两个数恰好相等** ——
-        // 那正是它们最容易被混为一谈的地方，所以这里必须造一条要来回两次的
+        // 两次调用的输入量不同；单次调用的一轮中两笔用量恰好相等，容易混淆。
         ScriptedLlm client = new ScriptedLlm(
                 new LlmResult("deepseek-flash", "tool_calls", "",
                         List.of(new ToolCall("c1", "read_file", "{\"path\":\"A.java\"}")),
@@ -842,9 +814,9 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 账单是两次的和
+        // 累计用量为两次之和。
         assertThat(outcome.usage().inputTokens()).isEqualTo(5_000);
-        // 而上下文读数是最后那一次单独的数 —— 收尾时送进去的上下文有多大
+        // 上下文读数是最后一次调用的输入量。
         assertThat(outcome.lastCallUsage().inputTokens()).isEqualTo(4_000);
     }
 
@@ -860,8 +832,7 @@ class AgentTurnTest {
                 (ws, cmd, timeout, limit, cancel) -> new CommandResult(0, "", false, 0),
                 TokenBudget.DEFAULT, VerificationPlan.NONE, cancelled));
 
-        // 0 —— 而落库那条事件据此判断"没有读数、别画上下文用量环"（见 TurnTokensUsed#hasContext）。
-        // 凑一个"就是系统提示词那么大"之类的数才是错的：那是编的
+        // 为 0，落库事件据此判断没有上下文读数；不能编造一个估算值。
         assertThat(outcome.lastCallUsage().inputTokens()).isZero();
         assertThat(outcome.lastCallUsage().isKnown()).isFalse();
     }
@@ -885,7 +856,7 @@ class AgentTurnTest {
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.COMPLETED);
         assertThat(outcome.newEvents().getLast()).isInstanceOf(AssistantMessage.class);
 
-        // 第二次请求里必须带着收尾指令 —— 是"叫它收尾"，不是"把它掐掉"
+        // 第二次请求必须包含收尾指令，而不是直接中断。
         String lastUserMessage = client.requests().get(1).messages().stream()
                 .filter(m -> m.role() == LlmRole.USER)
                 .map(LlmMessage::content)
@@ -899,7 +870,7 @@ class AgentTurnTest {
     void userCancellationIsRecordedAsToolCancelled() {
         CancellationToken token = new CancellationToken();
         CommandExecutor cancelling = (ws, cmd, timeout, limit, cancel) -> {
-            token.cancel();   // 模拟：命令跑到一半，用户按了 Esc
+            token.cancel();   // 模拟命令执行期间用户取消
             throw new IllegalStateException("进程被终止");
         };
         ScriptedLlm client = new ScriptedLlm(
@@ -911,8 +882,7 @@ class AgentTurnTest {
                 TokenBudget.DEFAULT, VerificationPlan.NONE,
                 token));
 
-        // 落的是【独立事件】。如果落成 ToolResult(success=false)，崩溃重放后模型会读成
-        // "工具失败了"，然后理直气壮地重试用户刚刚取消掉的操作。
+        // 取消必须落成独立事件；落成失败结果会让重放后的模型重试用户刚取消的操作。
         assertThat(outcome.newEvents())
                 .filteredOn(e -> e instanceof ToolCancelled)
                 .singleElement()
@@ -923,8 +893,7 @@ class AgentTurnTest {
     @Test
     @DisplayName("【能力门控】不支持工具调用的模型配上工具 → 开始前就失败，一次调用都不发")
     void modelWithoutToolSupportFailsFast() {
-        // 不门控的话，这类模型会在每一次工具往返上安静地失败或忽略工具，
-        // 最后表现成"agent 转了半天什么也没干"，排查起来毫无头绪。
+        // 不门控时，这类模型会静默忽略工具，最后表现为“跑很久但什么也没做”。
         ModelCapabilities noTools = new ModelCapabilities(false, ModelCapabilities.DEFAULT_CONTEXT_WINDOW,
                 ModelCapabilities.DEFAULT_MAX_OUTPUT_TOKENS);
         ScriptedLlm client = new ScriptedLlm(ScriptedLlm.answer("不该走到这里"));
@@ -936,18 +905,19 @@ class AgentTurnTest {
                 .isInstanceOf(LlmCallException.class)
                 .hasMessageContaining("不支持工具调用");
 
-        assertThat(client.requests()).isEmpty();   // 一个请求都没发出去
+        assertThat(client.requests()).isEmpty();   // 未发出任何请求
     }
 
     @Test
-    @DisplayName("模型换成了别的（服务端别名映射）：结果里记的是实际用的那个")
+    @DisplayName("【模型名】结果取自响应回报的模型，不是请求参数里写的那个")
     void recordsTheModelTheServerActuallyUsed() {
+        // 响应模型故意与请求里的 deepseek-flash 不同，否则断言分不出结果取自哪一边
         ScriptedLlm client = new ScriptedLlm(
-                new LlmResult("deepseek-flash", "stop", "好的", List.of(), TokenUsage.UNKNOWN));
+                new LlmResult("deepseek-chat", "stop", "好的", List.of(), TokenUsage.UNKNOWN));
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        assertThat(outcome.model()).isEqualTo("deepseek-flash");
+        assertThat(outcome.model()).isEqualTo("deepseek-chat");
     }
 
     // ------------------------------------------------------------------
@@ -955,9 +925,7 @@ class AgentTurnTest {
     @Test
     @DisplayName("【增量回调】工具开始执行之前，那条 ToolCallRequested 已经回调出去了")
     void toolCallIsReportedBeforeTheToolRuns() {
-        // 崩溃恢复整条链都压在这一个性质上：进程在工具中途被杀时，事件流里必须有那条调用，
-        // 才能补写成 ToolInterrupted 并阻止"重放一个可能已经改过文件的调用"。
-        // 攒到一轮结束才交出事件的话，那一步就永远补不上。
+        // 崩溃恢复依赖请求在工具执行前已落库，否则无法补写 ToolInterrupted。
         List<PersistentEvent> reported = new ArrayList<>();
         List<Integer> reportedCountWhenCommandRan = new ArrayList<>();
         CommandExecutor recording = (ws, cmd, timeout, limit, cancel) -> {
@@ -968,28 +936,25 @@ class AgentTurnTest {
                 ScriptedLlm.toolCall("c1", "run_command", "{\"command\":\"mvn test\"}"),
                 ScriptedLlm.answer("跑完了"));
 
-        // appender 要**还回真实 seq**（见 AgentTurn.Workbench.append）——
-        // 这里拿一个自增号充当存储层
+        // appender 必须返回真实 seq；这里用自增号充当存储层。
         AtomicLong nextSeq = new AtomicLong(history.size());
         TurnOutcome outcome = new AgentTurn().run(input(client, recording), event -> {
             reported.add(event);
             return nextSeq.incrementAndGet();
         });
 
-        // 命令跑的那一刻，ToolCallRequested 已经在回调过的事件里了
+        // 命令执行时，ToolCallRequested 已经回调。
         assertThat(reportedCountWhenCommandRan).singleElement()
                 .satisfies(count -> assertThat(count).isGreaterThanOrEqualTo(1));
         assertThat(reported.getFirst()).isInstanceOf(ToolCallRequested.class);
-        // 回调拿到的就是同一批事件：一个不多、一个不少、顺序相同
+        // 回调事件与最终产出一致，顺序相同。
         assertThat(reported).isEqualTo(outcome.newEvents());
     }
 
     @Test
     @DisplayName("【增量回调】回调抛异常（比如 fencing token 已失效）当场中止整轮")
     void callbackFailureAbortsTheTurn() {
-        // 回调里做的是"带 token 的落库"。token 失效意味着**这棵树**已经被别的执行者接管
-        //（可能是另一个实例，也可能是同一个人的另一条会话），那本轮剩下的产出已经不可信了 ——
-        // 必须当场停，而不是跑完再一起丢掉。
+        // 回调负责带租约写入；租约失效表示树已被接管，本轮剩余产出不可信，必须立即停止。
         ScriptedLlm client = ScriptedLlm.always(
                 ScriptedLlm.toolCall("c1", "read_file", "{\"path\":\"A.java\"}"));
         StaleLeaseException stale = new StaleLeaseException(
@@ -1015,22 +980,21 @@ class AgentTurnTest {
             return ran.getLast();
         };
 
-        // 一切都要批 —— 模拟"命令不在免审批清单里"
+        // 所有命令都需要审批，模拟不在免审批清单里的命令。
         TurnOutcome suspended = new AgentTurn().run(input(first, executor, command -> true));
 
         assertThat(suspended.status()).isEqualTo(TurnOutcome.Status.AWAITING_APPROVAL);
         assertThat(suspended.newEvents()).noneMatch(ToolResult.class::isInstance);
-        assertThat(ran).isEmpty();          // 挂起时它确实还没跑，这是对的
+        assertThat(ran).isEmpty();          // 挂起时尚未执行
 
-        // 用户点了批准。落到事件流里的就这么一条（外加状态迁移）
+        // 用户批准，事件落库。
         commit(suspended.newEvents());
         commit(List.of(new ToolApprovalResolved("call_1", true, UserId.of("root"), null)));
 
         ScriptedLlm second = new ScriptedLlm(ScriptedLlm.answer("跑完了"));
         TurnOutcome resumed = new AgentTurn().run(input(second, executor, command -> true));
 
-        // ★ 断言打在**执行器**上，不是"事件里出现了 ToolResult" ——
-        //   这次出问题的正是"事件都对、命令没跑"，只测事件是测不出来的
+        // 断言必须落在执行器上；只检查事件会漏掉“事件齐全但命令未执行”。
         assertThat(ran).hasSize(1);
         ToolResult result = resumed.newEvents().stream()
                 .filter(ToolResult.class::isInstance)
@@ -1041,7 +1005,7 @@ class AgentTurnTest {
         assertThat(result.success()).isTrue();
         assertThat(result.output()).contains("total 0");
 
-        // 而且模型看到的是**真的输出**，不是"（用户批准了这次调用，可以执行）"
+        // 模型看到真实输出，而不是批准占位文本。
         assertThat(second.requests().getFirst().messages())
                 .anySatisfy(m -> assertThat(m.content()).contains("total 0"));
     }
@@ -1061,9 +1025,7 @@ class AgentTurnTest {
         commit(suspended.newEvents());
         commit(List.of(new ToolApprovalResolved("call_1", true, UserId.of("root"), null)));
 
-        // ★ 关键：下面跟着的是**一条新用户消息**，不是 resume。
-        //   少了这个判据的话，往一个失败过/挂着过的会话里再发一句话，
-        //   就会把上面那条 rm -rf 重新执行一遍 —— 而那是一条不可逆的操作
+        // 批准之后到来的是新用户消息而非 resume；否则旧的 rm -rf 会被重新执行。
         commit(List.of(new UserMessage("算了，先别动")));
 
         TurnOutcome next = new AgentTurn().run(
@@ -1112,7 +1074,7 @@ class AgentTurnTest {
                 input(ScriptedLlm.always(ScriptedLlm.answer("好")), executor, command -> true));
         commit(resumed.newEvents());
 
-        // 再跑一次：尾部现在是结果和模型的回答，不再是那条答复
+        // 再跑一次；尾部已是结果和模型回答，不再是批准答复。
         new AgentTurn().run(input(ScriptedLlm.always(ScriptedLlm.answer("好")), executor, command -> true));
 
         assertThat(ran).hasSize(1);
@@ -1122,11 +1084,11 @@ class AgentTurnTest {
     // 辅助
     // ------------------------------------------------------------------
 
-    /** 把这一轮新产生的事件接进历史 —— 模拟又跑了一轮之后的样子。 */
+    /** 把本轮事件追加到历史，模拟下一轮开始前的状态。 */
     @Test
     @DisplayName("【读过才许覆盖】账是从**投影**传下来的：上一轮读过才改得动")
     void theReadLedgerComesFromTheProjection() {
-        // 上一轮读了 A.java —— 历史里那次调用就是账（本轮没有读它）
+        // 上一轮读取了 A.java；历史中的调用记录就是本轮的账。
         commit(List.of(new ToolCallRequested("c1", "read_file", "{\"path\":\"A.java\"}")));
         writeFile("B.java", "class B {}\n");
 
@@ -1139,9 +1101,9 @@ class AgentTurnTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client));
 
-        // 读过的那份改得动：账跨轮传下来了（它现在跟着投影走，见 TurnInput 的类注释）
+        // 读过的文件可覆盖；账随投影跨轮传递。
         assertThat(readFile("A.java")).contains("int x");
-        // 没读过的原样不动，而且回给模型的话说了"还没读过"
+        // 未读文件保持不变，并返回“还没读过”的失败说明。
         assertThat(readFile("B.java")).isEqualTo("class B {}\n");
         assertThat(outcome.newEvents()).filteredOn(ToolResult.class::isInstance)
                 .extracting(event -> ((ToolResult) event).output())
@@ -1155,10 +1117,7 @@ class AgentTurnTest {
         }
     }
 
-    /**
-     * 这条会话的投影：测试里就是从这份事件流建一条**活的**（生产里它跨轮活着，
-     * 见 {@code SessionProjections}）。
-     */
+    /** 从测试事件流建立一条投影；生产中投影跨轮存活。 */
     private ContextAssembler.Projection projection() {
         ContextAssembler.Projection projection =
                 new ContextAssembler(userId -> null).projection(MODEL.systemPrompt());
@@ -1179,18 +1138,20 @@ class AgentTurnTest {
 
     private TurnInput input(LlmClient client, CommandExecutor executor,
                             Predicate<String> asksApproval) {
-        // 判据现在回来的是**理由**（见 CommandApproval）。这里把它收成一句固定的，
-        // 免得十几个调用点都写一遍；要验"理由真的进了事件"的那条测试自己给判据
+        // 审批判据返回理由；这里统一收成固定文本，验证理由传递的用例自行提供判据。
         return inputAsking(client, executor, commandLine -> asksApproval.test(commandLine)
                 ? Optional.of("测试：这条命令要人批一下")
                 : Optional.empty());
     }
 
     /**
-     * 判据直接给理由的那种。
+     * 直接接收审批理由的输入构造。不能重载为 {@code input}：两个重载都接收 String 函数，
+     * 隐式类型 lambda 会产生歧义。
      *
-     * <p>名字不叫 {@code input} 是因为**它不能被重载**：两个重载都收"一个 String 的函数"，
-     * 而 {@code command -> true} 这种隐式类型的 lambda 在它们之间选不出来（编译器报"引用不明确"）。
+     * @param client   模型客户端
+     * @param executor 命令执行器
+     * @param approval 审批判据
+     * @return 本轮输入
      */
     private TurnInput inputAsking(LlmClient client, CommandExecutor executor,
                                   CommandApproval approval) {

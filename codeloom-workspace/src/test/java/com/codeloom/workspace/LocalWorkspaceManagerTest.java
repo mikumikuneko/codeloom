@@ -23,15 +23,10 @@ import java.nio.file.Path;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 端到端跑真实的两人协作流程。
+ * 端到端跑真实的两人协作流程，不 mock git 与文件系统。
  *
- * <p>不 mock git、不 mock 文件系统：这个模块的价值就在于它真的能操作 git，
- * 用假的测不出任何东西。
- *
- * <h2>为什么 fixture 用两个不同的人</h2>
- * 同一个人在一个项目里只有一棵树（换会话不换代码），两个人各有各的树、能同时干活互不干扰。
- * 所以下面凡是需要"两份互不相干的工作区"的地方，用的都是 alice 和 bob 两个不同的键，
- * 而不是同一个人的两个 id。
+ * <p>fixture 用 alice 和 bob 两个不同的人：同一个人在同一项目里只有一棵树，需要两份
+ * 互不相干的工作区时，不能只换会话 id。
  */
 class LocalWorkspaceManagerTest {
 
@@ -72,7 +67,7 @@ class LocalWorkspaceManagerTest {
         Workspace created = manager.create(ALICE_TREE, repo, null);
 
         assertThat(created.workspaceId()).isEqualTo(ALICE_TREE);
-        // 目录按「人 / 项目」分两层：拼成一个目录名的话，文本形式里的冒号在 Windows 上是保留字符
+        // 目录按"人 / 项目"分两层：拼成一个目录名时，文本形式里的冒号在 Windows 上是保留字符
         assertThat(created.path())
                 .isEqualTo(workspacesRoot.resolve(ALICE.value()).resolve(PROJECT.value()));
         assertThat(created.branch()).isEqualTo("workspace/" + ALICE.value());
@@ -95,9 +90,9 @@ class LocalWorkspaceManagerTest {
         Path fresh = tempDir.resolve("fresh-repo");
         manager.initializeRepository(fresh, alice, "untitled");
 
-        // 判据是两棵**人的树**里有没有，而不是主仓库磁盘上有没有 —— 后者成立不代表有用。
-        // 两棵树都从基点 checkout 出来，所以这一条同时验了"目录在"和"它在基点里"
-        //（git 存不了空目录，里面那个占位文件才是真正被记录的东西）
+        // 判据是两棵树里有没有，而不是主仓库磁盘上有没有：两棵树都从基点 checkout，
+        // 因此这一条同时验证了目录存在且已进入基点提交
+        //（git 不记录空目录，占位文件才是被记录的内容）
         assertThat(manager.create(ALICE_TREE, fresh, null).path().resolve("untitled/README.md")).exists();
         assertThat(manager.create(BOB_TREE, fresh, null).path().resolve("untitled/README.md")).exists();
         assertThat(git.countCommits(fresh, "main")).isEqualTo(1);   // 只有基点那一笔
@@ -110,8 +105,7 @@ class LocalWorkspaceManagerTest {
         write(first.path(), "OrderService.java", "class OrderService {}\n");
         manager.commit(first, "alice 的产出", alice);
 
-        // "这个人又开了一段新对话"：键没变，所以拿到的还是那棵树，上一轮的改动原样都在 ——
-        // 这正是把键从会话提到人的全部意义
+        // 同一个人再开一段对话时键不变，拿到的仍是那棵树，上一轮的改动原样都在
         Workspace again = manager.create(ALICE_TREE, repo, null);
 
         assertThat(again.path()).isEqualTo(first.path());
@@ -124,13 +118,13 @@ class LocalWorkspaceManagerTest {
     void toolOutputDirectoryIsIgnoredByGit() throws Exception {
         Workspace workspace = manager.create(ALICE_TREE, repo, null);
 
-        // 模拟一次落盘：往那个目录里写一份"完整工具输出"
-        Files.createDirectories(workspace.path().resolve(Workspace.TOOL_OUTPUT_DIR));
-        Files.writeString(workspace.path().resolve(Workspace.TOOL_OUTPUT_DIR).resolve("call_1.txt"), "完整输出",
+        // 模拟一次落盘：工具输出在项目根（worktree/untitled）下，不是 worktree 根下
+        Path projectRoot = workspace.path().resolve("untitled");
+        Files.createDirectories(projectRoot.resolve(Workspace.TOOL_OUTPUT_DIR));
+        Files.writeString(projectRoot.resolve(Workspace.TOOL_OUTPUT_DIR).resolve("call_1.txt"), "完整输出",
                 StandardCharsets.UTF_8);
 
-        // git 视角里它根本不存在 —— 工作区依然是干净的。用 .gitignore 的话它会进版本库，
-        // 而 agent 不该往用户的项目里塞任何东西
+        // git 视角里它不存在，工作区仍然干净：用 .gitignore 会让它进入用户项目的历史
         assertThat(TestGit.run(workspace.path(), "status", "--porcelain")).isEmpty();
     }
 
@@ -142,7 +136,7 @@ class LocalWorkspaceManagerTest {
 
         String exclude = Files.readString(repo.resolve(".git/info/exclude"), StandardCharsets.UTF_8);
         long occurrences = exclude.lines()
-                .filter(Workspace.TOOL_OUTPUT_DIR::equals)
+                .filter(line -> line.endsWith(Workspace.TOOL_OUTPUT_DIR))
                 .count();
 
         assertThat(occurrences).isEqualTo(1);
@@ -246,7 +240,7 @@ class LocalWorkspaceManagerTest {
 
         manager.resetTo(ws, checkpoint);
 
-        // reset --hard 不碰未跟踪文件，所以这一步是回滚能不能真的生效的关键
+        // reset --hard 不碰未跟踪文件，清掉它们才是回滚生效的关键
         assertThat(ws.path().resolve("just-written.txt")).doesNotExist();
     }
 

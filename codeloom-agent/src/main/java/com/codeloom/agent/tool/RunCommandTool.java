@@ -8,39 +8,19 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * 在工作区里执行一行 shell 命令（构建、跑测试、清理产物等）。
+ * 在工作区里执行一行 shell 命令（构建、测试、清理等）。
  *
- * <h2>收的是整行命令</h2>
- * 模型最自然的写法就是一行文本，所以这里就收一行：
- * {@code "mvn -q test"}、{@code "grep -rn foo src | head"}。它原样交给一层 shell
- * 解释（见 {@code CommandShell}），于是管道、重定向、{@code &&} 都能用 ——
- * 两家参考实现都是这个形态（Claude Code 的 Bash 工具、deepseek-harness 的命令执行接口）。
- * 完整的取舍写在 {@code CommandExecutor} 的类注释里。
+ * <p>接收整行字符串并交给 shell 解释，因此管道、重定向和 {@code &&} 可用；取舍见
+ * {@code docs/decisions/architecture/2026-09-24-commands-are-whole-lines-through-bash.md}。
  *
- * <p>收字符串数组那个形状下"我们不走 shell"，注入问题天然不存在，代价是模型写不了
- * 管道、重定向，而且在 Windows 上第一个词必须是 PATH 上真实存在的可执行文件 ——
- * {@code rm}、{@code mv}、{@code ls} 全不是，于是模型最自然的那些词一个都跑不起来。
- *
- * <h2>要审批 ≠ 被拒绝</h2>
- * 描述里必须说清这一点：写成"可执行文件必须在白名单里，否则会被拒绝"的话，模型会
- * **自我审查** —— 它不去试 {@code curl}、{@code javac}，因为它以为自己一用就会被拒。
- * 真话是"会挂起来问人一次"。
- *
- * <p>所以描述里说清两件事：**什么情况会先问一次**，以及**问不是拒**。
- *
- * <p>命令最终能不能跑由人决定（审批那一层把命令摆出来），判据本身不在这里、
- * 也不在 agent 模块里 —— 见 {@link ToolContext}。
+ * <p>需要审批不等于被拒绝：描述必须说清哪些情况会先询问，以及询问后仍会执行，
+ * 否则模型会自我审查。审批判据由 {@link ToolContext} 注入，不在本类或 agent 模块。
  */
 public final class RunCommandTool implements Tool {
 
     private static final int DEFAULT_TIMEOUT_SECONDS = 300;
 
-    /**
-     * 输出被截断时贴在**开头**的一句话。
-     *
-     * <p>贴开头、不贴结尾：跟在它后面那段正是"保留下来的最后一段"，得先说清它前面少了东西，
-     * 不然模型会把眼前这段当成输出的全部。
-     */
+    /** 截断提示贴在开头：保留的是最后一段，必须先说明前面有内容被丢弃。 */
     private static final String HEAD_DROPPED_NOTICE =
             "（这条命令的输出太长，**开头**已被丢掉，下面是保留下来的最后一段）\n";
 
@@ -65,8 +45,7 @@ public final class RunCommandTool implements Tool {
 
     @Override
     public String parametersJsonSchema() {
-        // 这段是【JSON 文本】，所以描述里不能再出现裸的双引号：文本块里的 \" 会先被
-        // Java 解析成 "，拼出来的就是非法 JSON。
+        // JSON 文本里的双引号必须转义，否则文本块生成非法 JSON。
         return """
                 {
                   "type": "object",
@@ -87,8 +66,7 @@ public final class RunCommandTool implements Tool {
 
     @Override
     public ToolSurface surface() {
-        // 主语是那行命令 —— 后端审批那条路也是靠这个声明取命令的，
-        // 不再由 AgentTurn 自己猜"只有 run_command 的参数里有 command"
+        // 主语是命令行；审批与补跑都依据这份声明取命令。
         return ToolSurface.of(ToolSurface.Shape.EXECUTE, "运行", "command");
     }
 
@@ -96,7 +74,7 @@ public final class RunCommandTool implements Tool {
     public ToolOutcome execute(ToolContext context, JsonNode arguments) {
         JsonNode commandNode = arguments.path("command");
         if (!commandNode.isTextual()) {
-            // 写成数组是这里最容易犯的错。说清楚，别让它去猜
+            // 数组形式是常见错误，明确说明正确形状。
             return ToolOutcome.failed("command 必须是【字符串】—— 一整行命令，"
                     + "例如 \"mvn -q test\"，不是数组也不是对象。");
         }
@@ -105,13 +83,8 @@ public final class RunCommandTool implements Tool {
             return ToolOutcome.failed("command 不能是空的。");
         }
 
-        // 需不需要人来批，由调用方注入的判据说了算 —— 判据住在 workspace 模块
-        // （名单 + 路径范围 + 这行命令看不看得懂），而 agent 刻意不依赖它，
-        // 所以判据只能从上面传进来。
-        //
-        // 判据回来的是**理由**，不是布尔：那句话会跟着 ToolApprovalRequested 落进事件流，
-        // 人要看着它点同意（见 CommandApproval 的类注释）。
-        // 注意这**不是**"被拒绝"：那条命令还没执行，整轮会就此挂起等人答复
+        // 审批判据由调用方注入并返回理由；理由会进入审批事件供用户确认。
+        // 挂起不是拒绝：命令尚未执行，整轮等待答复。
         Optional<String> whyAsk = context.requiresApproval().reasonToAsk(commandLine);
         if (whyAsk.isPresent()) {
             return ToolOutcome.approvalRequired(whyAsk.get());
@@ -122,16 +95,12 @@ public final class RunCommandTool implements Tool {
 
         CommandResult result;
         try {
-            // 只传工作目录就够了 —— 端口收 {@code Path}，不需要现场伪造一个 Workspace。
             result = context.commandExecutor()
                     .execute(context.worktree(), commandLine, timeout, ToolLimits.MAX_OUTPUT_CHARS,
                             context.cancellation());
         } catch (RuntimeException e) {
-            // 走到这里只剩"起不来"和"等待时被线程中断"—— 超时和取消现在是**返回值**了
-            //（它们有半截输出要带回来，见 CommandTermination）
-            //
-            // 取消仍然要排在前面：用户按了 Esc、同一个瞬间进程又起不来时，
-            // "用户要停"是他表达出来的意图，比"这条命令没跑起来"更该被记下来
+            // 到这里只剩“无法启动”或“等待时被中断”；超时与取消是返回值（见 CommandTermination）。
+            // 取消优先：用户在同一瞬间按下 Esc 时，应记录用户意图而非启动失败。
             if (context.cancellation().isCancelled()) {
                 return new ToolOutcome(false, "命令被用户取消，进程树已被终止", false, null, 0,
                         ToolOutcome.Failure.CANCELLED, true);
@@ -139,14 +108,14 @@ public final class RunCommandTool implements Tool {
             return ToolOutcome.failed("命令未能执行: " + e.getMessage());
         }
 
-        // **谁结束了它**，决定这次调用报什么失败 —— 三种情形对模型的含义完全不同
+        // 结束方式决定失败性质，三种情形对模型含义不同。
         ToolOutcome outcome = switch (result.termination()) {
             case COMPLETED -> completed(result);
             case TIMED_OUT -> timedOut(timeout, result);
             case CANCELLED -> cancelled(result);
         };
-        // 截断了就必须说清丢的是哪一头，否则模型会把剩下这段当成全部。
-        // 第一层保的是尾部（见 ProcessRunner.capture），所以丢的一律是开头
+        // 截断必须说明丢弃的是开头；命令输出保尾（见
+        // docs/decisions/architecture/2026-10-15-tool-output-keeps-the-tail.md）。
         return result.truncated()
                 ? outcome.withOutput(HEAD_DROPPED_NOTICE + outcome.output())
                 : outcome;
@@ -157,28 +126,19 @@ public final class RunCommandTool implements Tool {
         String body = "退出码 " + result.exitCode() + "，耗时 " + result.durationMs() + " ms\n"
                 + (result.output().isBlank() ? "(没有输出)" : result.output());
 
-        // mutated 恒为 true，**包括失败的情况**：退出码非零的命令完全可能已经改了文件
-        // （格式化器修完报错退出、编译中途产出部分产物）。如果按 success 判断，
-        // 这些改动就会逃过平台的强制验证 —— 那是最坏方向的错误。
+        // mutated 恒为 true，包括失败：非零退出码的命令也可能已改文件，按 success 判断会漏掉验证。
         return new ToolOutcome(result.success(), body, result.truncated(),
                 result.exitCode(), result.durationMs(),
                 result.success() ? ToolOutcome.Failure.NONE : ToolOutcome.Failure.INTERNAL, true);
     }
 
     /**
-     * 超时被杀。
+     * 超时被杀的结果。必须说明不是命令自身失败、超时多久、下一步可以调大
+     * {@code timeout_seconds} 或换跑法，并带回终止前的输出。见 {@link CommandTermination}。
      *
-     * <h2>三件事都得说</h2>
-     * <ol>
-     *   <li><b>不是它自己失败的</b> —— 不说的话，模型会以为命令写错了，
-     *       于是原样再跑一遍，再超时一次；</li>
-     *   <li><b>停了多久</b> —— 它参数里写的就是秒数，得让它对得上；</li>
-     *   <li><b>下次怎么办</b> —— 调大 {@code timeout_seconds}，或者换个跑法。</li>
-     * </ol>
-     *
-     * <p>而且**把被杀之前已经打出来的输出一并给它**：跑到哪一步卡住的，
-     * 全在那半截里（这条路从前抛异常，那段输出就跟着丢了 ——
-     * 见 {@link CommandTermination} 的类注释）。
+     * @param timeout 超时时长
+     * @param result  命令结果
+     * @return 超时结果
      */
     private static ToolOutcome timedOut(Duration timeout, CommandResult result) {
         String body = "命令超过 " + timeout.toSeconds() + " 秒还没结束，进程树已被终止"
@@ -188,12 +148,12 @@ public final class RunCommandTool implements Tool {
                         ? "(被终止前它没有输出)"
                         : "被终止前它已经输出的部分：\n" + result.output());
 
-        // mutated 同样是 true：被杀掉之前它已经跑了一会儿，完全可能已经改过文件
+        // 被杀前可能已经改过文件，mutated 仍为 true。
         return new ToolOutcome(false, body, result.truncated(), null, result.durationMs(),
                 ToolOutcome.Failure.TIMEOUT, true);
     }
 
-    /** 用户按了 Esc。落成 ToolCancelled 事件（见 {@code AgentTurn.recordOutcome}）。 */
+    /** 用户取消；循环会落成 ToolCancelled 事件。 */
     private static ToolOutcome cancelled(CommandResult result) {
         return new ToolOutcome(false, "命令被用户取消，进程树已被终止", false, null,
                 result.durationMs(), ToolOutcome.Failure.CANCELLED, true);

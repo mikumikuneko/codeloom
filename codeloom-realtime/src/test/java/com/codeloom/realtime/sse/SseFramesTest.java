@@ -17,12 +17,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * SSE 帧的格式。
  *
- * <p>这里的两条规则都**错了也不会报错**，只会让客户端在某个边角上表现不对：
- * {@code id:} 是断线重连的游标（给流式增量也安上一个，重连就会从错误的地方接着拉），
- * {@code data} 必须是**已经成形的 JSON**（再序列化一遍会得到一层引号和转义，
- * 客户端解析出来是个字符串而不是对象）。所以要能把帧单独拿出来看。
+ * <p>两条规则错了都不会报错，只会让客户端在边角上表现异常：{@code id:} 是断线重连的
+ * 游标，给流式增量也写就会从错误位置接着拉；{@code data} 必须是已经成形的 JSON，
+ * 再序列化一遍会多出引号和转义，客户端解析出字符串而不是对象。因此要能单独检查帧。
  *
- * <p>不需要中间件，也不需要架真连接 —— 见 {@link SseFrames} 的类注释。
+ * <p>不需要中间件，也不需要架真连接，见 {@link SseFrames} 的类注释。
  */
 class SseFramesTest {
 
@@ -50,7 +49,7 @@ class SseFramesTest {
         String wire = wire(SseFrames.of(delta, codec));
 
         assertThat(wire).doesNotContain("id:");
-        // 但它照样要发出去 —— 看的人正是靠它看到"模型在打字"
+        // 但照样要发出去：看的人靠它看到“模型在打字”。
         assertThat(wire).contains("data:").contains("正在打字");
     }
 
@@ -62,8 +61,8 @@ class SseFramesTest {
 
         String wire = wire(SseFrames.of(envelope, codec));
 
-        // 多一层序列化的表现是：内层引号被转义成 \"，而且外面会多一对引号。
-        // 断言"原样的 JSON 逐字出现在帧里"正好排掉这两种
+        // 多一层序列化的表现是内层引号被转义、外面多一对引号。断言原样 JSON 逐字
+        // 出现在帧里，正好排掉这两种情况。
         assertThat(wire).contains(codec.write(envelope));
     }
 

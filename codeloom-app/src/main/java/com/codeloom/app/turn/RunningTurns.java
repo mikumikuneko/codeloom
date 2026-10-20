@@ -14,29 +14,21 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 本实例上**正在跑的轮次**，以及把它们打断的手段。
+ * 本实例正在跑的轮次，以及打断它们的手段。
  *
- * <h2>为什么需要一张这样的表</h2>
- * {@code CancellationToken} 是执行器在跑一轮时自己造的，跑完就没了 —— 于是没有任何
- * 别的请求够得着它。"用户点了中断"这件事需要一个落点，这就是那个落点。
+ * <p>执行器自己创建的 {@code CancellationToken} 跑完即失，其他请求够不着；中断请求需要
+ * 一个落点，这张表就是。中断信号同时经 Redis 广播，因为轮次未必跑在收到请求的实例上。
+ * 发布者也会收到自己的消息，这里刻意不过滤：{@code cancel()} 幂等，重复取消无副作用，
+ * 而自行过滤会引入只在多实例下暴露的错误。
  *
- * <h2>跨实例：信号走 Redis，而且**不做自我过滤**</h2>
- * 一轮跑在哪台机器上，请求不一定落在同一台 —— 所以中断信号要广播出去。
- * 而发布者自己也会收到自己的那条（Pub/Sub 就是这样），这里**刻意不去过滤它**：
- * {@code cancel()} 是幂等的，重复取消没有任何副作用。
- * 加一套"是不是我自己发的"判断，换来的只是少执行一次无副作用的调用，
- * 却多出一整类只在多实例下才暴露的 bug —— 和 {@code RedisEventBus} 那边同一个取舍。
- *
- * <h2>它只能"发信号"，不能"保证停"</h2>
- * 取消的检查点在**工具边界**上（每一轮模型调用前、每一个工具调用前）。
- * 所以中断请求成功只意味着"信号发出去了"，至于这一轮什么时候停、停在哪一步，
- * 取决于它此刻在干什么。为什么不在这里立刻掐断、以及代价是什么，见
+ * <p>它只能发信号，不能保证停：取消检查点在模型调用前和工具调用前，何时停在哪个边界取决于
+ * 这一轮当时在做什么。理由见
  * {@code docs/decisions/architecture/2026-10-06-cancel-is-a-signal-timeout-is-a-result.md}。
  */
 @Component
 public class RunningTurns implements MessageListener {
 
-    /** 中断信号专用的频道。**不和事件流共用一个** —— 混进去会让订阅者收到一个不是事件的东西。 */
+    /** 中断信号专用频道，不与事件流共用：混在一起会让订阅者收到不是事件的东西。 */
     public static final String INTERRUPT_CHANNEL = "codeloom:interrupts";
 
     private final StringRedisTemplate redis;
@@ -50,7 +42,10 @@ public class RunningTurns implements MessageListener {
     }
 
     /**
-     * 登记一轮开始。返回的 token 要传给这一轮的执行流程（它会被检查）。
+     * 登记一轮开始。
+     *
+     * @param sessionId 会话
+     * @return 要传给这一轮执行流程的取消 token
      */
     public CancellationToken register(SessionId sessionId) {
         CancellationToken token = new CancellationToken();
@@ -59,19 +54,22 @@ public class RunningTurns implements MessageListener {
     }
 
     /**
-     * 一轮结束，撤掉登记。
+     * 撤掉登记；只有 token 与当前登记相符时才移除。带上 token 是为了防止错配：
+     * 这一轮刚结束、另一轮已登记时，不能把新轮次的登记撤掉，否则它再也无法被打断。
      *
-     * <p>带上 token 是防止一个罕见的错配：这一轮已经结束、而另一轮刚登记上来时，
-     * 不能把新那一轮的登记撤掉 —— 那样新的一轮就再也打断不了了。
+     * @param sessionId 会话
+     * @param token     该轮次的 token
      */
     public void unregister(SessionId sessionId, CancellationToken token) {
         running.remove(sessionId, token);
     }
 
     /**
-     * 发出中断信号：本地立刻取消，同时广播给别的实例。
+     * 发出中断信号：本地立即取消，并广播给其他实例。
      *
-     * <p>返回的是"信号发出去了"，**不是"已经停了"** —— 见类注释。
+     * <p>返回只表示信号已发出，不表示这一轮已经停下。
+     *
+     * @param sessionId 要中断的会话
      */
     public void interrupt(SessionId sessionId) {
         cancelLocally(sessionId);

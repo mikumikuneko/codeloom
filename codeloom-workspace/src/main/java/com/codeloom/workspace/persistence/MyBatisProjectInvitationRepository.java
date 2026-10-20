@@ -33,8 +33,8 @@ public class MyBatisProjectInvitationRepository implements ProjectInvitationRepo
     /**
      * {@inheritDoc}
      *
-     * <p>{@code MANDATORY} 是运行时强制：不在事务里调它，行锁会在语句结束时就没了，
-     * 而调用方会以为自己拿到了互斥。和 {@code MyBatisProjectRepository#lock} 同一个理由。
+     * <p>{@code MANDATORY}：不在事务里调用时，行锁会在语句结束时释放，而调用方会
+     * 误以为自己持有互斥。
      */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)

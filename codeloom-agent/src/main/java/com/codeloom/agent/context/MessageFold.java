@@ -45,113 +45,68 @@ import java.util.Set;
 import java.util.function.Function;
 
 /**
- * **一次**把事件折成消息 —— {@link ContextAssembler.Projection} 持有它。
+ * 把一批事件折成消息。{@link ContextAssembler.Projection} 持有它并负责跨轮推进与重建，
+ * 这里只处理交给它的这批事件，并记住折叠所需的几张表。
  *
- * <p>分工：那边管"跨轮往前推进、什么时候推倒重来"，这里只管**把交给它的这批事件变成消息**，
- * 顺带记住折的过程中要用的那几张表（checkpoint 落在哪、每个调用的答复在第几条）。
- *
- * <p>需要一点状态，是因为 OpenAI 的消息格式要求「一轮回复的正文和它的工具调用
- * 必须合并在同一条 assistant 消息里」。而我们是分开落库的
- * （一个 {@code AssistantMessage} + N 个 {@code ToolCallRequested}），
- * 所以投影时要把它们重新合成一条。
+ * <p>需要状态，是因为 OpenAI 兼容格式要求一轮回复的正文和它的工具调用合并在同一条
+ * assistant 消息里，而事件流把它们分开落库（一个 {@code AssistantMessage} 加 N 个
+ * {@code ToolCallRequested}）。
  */
 final class MessageFold {
 
-    /**
-     * 时钟的格式。**只到分钟**：秒对人没意义，而更细的粒度会让同一次交互里的每一条消息
-     * 都变成不同的前缀 —— 缓存恰好是按前缀算的。
-     */
+    /** 时钟格式只到分钟：更细的粒度会让同一次交互里的每条消息都变成不同的前缀。 */
     private static final DateTimeFormatter CLOCK_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
     private final List<LlmMessage> messages;
-    /** 正文已经被清掉的那些调用 id（由 {@link ContextAssembler.Projection} 在折之前扫出来）。 */
+    /** 正文已被清掉的调用 id，由 {@link ContextAssembler.Projection} 在折之前扫出。 */
     private final Set<String> clearedCallIds;
-    /** 见 {@link ContextAssembler} 的那个查名字的办法 —— 它只用在一处（别人捎来的留言）。 */
+    /** 按 id 查用户名，只用于别人捎来的留言。 */
     private final Function<UserId, String> displayNameOf;
-    /** 对话从第几条开始 —— 前面那条系统提示词不属于对话，回滚时不能一起清掉。 */
+    /** 对话起始下标：前面的系统提示词不属于对话，回滚时不能一起清掉。 */
     private final int conversationStart;
 
     /**
-     * 每个 checkpoint 落在消息列表的**哪个下标**上 —— 回滚靠它把对话截断到准确的位置。
+     * checkpoint → 它落在消息列表的下标，用于回滚截断。
      *
-     * <h2>为什么索引键是序号</h2>
-     * 因为另外两种键都会撞车。{@code turnIndex} 会：会话开始那条（"一次都还没跑完" = 0）
-     * 和第一轮**挂着等人批**时那条**都是 0** —— 后者属于第一轮，可它写下来的时候
-     * 那一轮还没跑完。sha 也会：一轮什么都没改时 {@code commit} 返回的还是上一个 HEAD。
-     * 撞车的后果不是"查不到"，而是"查到别的那条" —— 于是回滚会退过头，
-     * 而这种错**看起来是对的**（退回了某个真实存在的位置）。
+     * <p>键用事件 seq：{@code turnIndex} 会撞（会话开始与第一轮挂着等人批时都是 0），
+     * sha 也会撞（一轮没有改动时 {@code commit} 返回上一个 HEAD）；撞键会静默退到别的位置。
      *
-     * <p>序号（事件在流里的 seq）唯一，所以这里也用 {@code put} 就够了。
-     *
-     * <h2>查不到的时候怎么办</h2>
-     * 有一种真实情况：那条 checkpoint 被压缩挡在**水位线之前**了（见
-     * {@link ContextAssembler.Projection} 的 {@code watermark}），于是那一轮我们压根没遍历到。
-     * 那时候只能退到 {@code conversationStart}（连摘要一起清掉）——
-     * 因为我们无从知道边界在哪，而"退得比该退的多"总好过"留一段描述着已经作废的改动的摘要"。
+     * <p>查不到键时退到 {@code conversationStart}：checkpoint 可能被压缩挡在水位线之前，
+     * 此时无从知道边界；多退总好过留下一段描述已作废改动的摘要。
      */
     private final Map<Long, Integer> checkpointIndexes = new HashMap<>();
 
     private String pendingText;
 
     /**
-     * **当前这次模型回复**的思考过程。它在**下一条 {@code AssistantMessage} 到达时被覆盖**
-     *（那是新的一次回复开始的唯一标志），**不跟着 {@link #flush()} 清** —— 理由在下面。
+     * 当前模型回复的思考过程；下一条 {@code AssistantMessage} 到达时覆盖，不随 {@link #flush()} 清除。
      *
-     * <p>一次回复可能被投影成**多条** assistant 消息（模型一次发了两个工具调用、执行时按批切开，
-     * {@code ToolCallRequested} 是分批落库的），而带 {@code tool_calls} 的消息**必须**带上当时的
-     * {@code reasoning_content}（见 {@link com.codeloom.agent.llm.LlmMessage#assistant}）——
-     * 在第一条 flush 时清掉的话，第二条发出去就是 400：
-     * 「The `reasoning_content` in the thinking mode must be passed back to the API.」
-     *
-     * <p>残留一种：某次回复**既没有正文也没有思考**却调了工具，就没有新消息来覆盖它，
-     * 这段思考会跟着发出去（一次不准确的归因）。接受 —— 错的归因只让模型多想一点，
-     * 漏掉字段是整轮直接失败。
+     * <p>一次回复可能被拆成多条 assistant 消息（工具调用分批落库），而带 {@code tool_calls} 的消息
+     * 必须携带当时的 {@code reasoning_content}，否则下一次请求返回 400。若某次回复既没有正文也没有
+     * 思考，残留的思考会归因到下一次回复；接受这一点，因为漏字段会让整轮失败。
      */
     private String responseReasoning;
 
     /**
-     * 上面那段思考是**哪个模型**产的。
-     *
-     * <p>它跟着 {@code responseReasoning} 走：同一个"上一次回复"的属性，
-     * 覆盖的时机、保留的时机都完全一样（连"下一批还要用它"那条也一样）。
-     *
-     * <p>为什么要带着它 —— **思考只对产生它的模型成立**。换了模型之后那份思考
-     * 不该再发给新模型：它不是新模型产的，而 wire 上那个字段（{@code reasoning_content}）
-     * 在新模型那边意味着什么，没人能替它回答。判定在 adapter 那一层做
-     *（见 {@code OpenAiCompatibleClient#wireMessage}），这里只负责**把来源带过去**。
+     * 产出 {@link #responseReasoning} 的模型，覆盖与保留时机同它。
+     * 思考只对产生它的模型成立；是否回传由适配器决定（见 {@code OpenAiCompatibleClient#wireMessage}）。
      */
     private String responseModel;
     private final List<ToolCall> pendingCalls = new ArrayList<>();
     private boolean hasPending;
 
     /**
-     * 请求了、但整个流里都没有任何结束事实的调用 id（按请求顺序排）。
+     * 请求了、但流里还没有任何结束事实的调用 id，按请求顺序。
      *
-     * <p>为什么需要它：{@code ToolCallRequested} 落库之后、对应的
-     * {@code ToolResult} 落库之前，中间隔着**真正把这个工具跑完**的那段时间。
-     * 那段时间里这一轮如果被中断（回调抛异常、fencing token 失效、进程被杀），
-     * 事件流里就只留下「请求了」，永远等不到「结果」。
-     *
-     * <p>而 API 要求每个 tool_call 都配一条 tool 消息 —— 不配就是 400。所以这里是
-     * 发给模型之前的**最后一道兜底**，见 {@link #closeOpenCalls()}。
+     * <p>工具执行期间这一轮可能被中断（回调抛异常、租约失效、进程被杀），事件流里只留下请求；
+     * 而 API 要求每个 tool_call 都有配对的 tool 消息。{@link #closeOpenCalls()} 是发给模型前的兜底。
      */
     private final Set<String> openCallIds = new LinkedHashSet<>();
 
-    /**
-     * 已经问了、还没答复的那些调用。
-     *
-     * <p>兜底那条合成消息（见 {@link #closeOpenCalls()}）要**分开说**：
-     * "执行到一半中断了"是给真中断的调用说的，而**正在等人批**的那条压根没跑过 ——
-     * 对它说"不要直接重试，先确认相关文件的当前状态"，方向是反的。
-     */
+    /** 已请求审批、尚未答复的调用；兜底文案与真中断不同，因为它压根没有执行过。 */
     private final Set<String> awaitingApproval = new LinkedHashSet<>();
 
-    /**
-     * 每个 {@code tool_call_id} 的答复已经落在消息列表的哪个下标上，见 {@link #answerCall}。
-     *
-     * <p>存**下标**而不是消息本身，是因为要的是"原地换掉" —— 位置必须留在
-     * 那条带 {@code tool_calls} 的 assistant 消息后面。
-     */
+    /** {@code tool_call_id} → 它的 tool 消息下标；答复原地替换，位置紧跟带 {@code tool_calls} 的消息。 */
     private final Map<String, Integer> toolMessageAt = new HashMap<>();
 
     MessageFold(List<LlmMessage> messages, Set<String> clearedCallIds,
@@ -164,8 +119,7 @@ final class MessageFold {
 
     void accept(StoredEvent stored) {
         Event event = stored.event();
-        // 穷尽 switch，没有 default —— 新增事件类型时这里会编译不过，
-        // 逼着我们决定它该不该进上下文。这正是 sealed 的用处。
+        // 穷尽 switch，没有 default：新增事件类型时编译失败，迫使实现决定它是否进入上下文。
         switch (event) {
             case ToolCallRequested requested -> {
                 pendingCalls.add(new ToolCall(requested.callId(), requested.toolName(),
@@ -181,11 +135,9 @@ final class MessageFold {
                         : describe(result));
             }
             case ToolResultsCleared ignored -> {
-                // 正文的替换已经在投影上面那条 ToolResult 时做掉了
-                // （集合是遍历之前扫出来的），这条事件本身没有可投影的东西
+                // 正文替换已在投影对应的 ToolResult 时完成；此事件本身没有可投影内容。
             }
-            // 这两种是"工具没跑完"的事实。**注入它们而不是重新执行**，
-            // 是崩溃恢复与用户取消的正确做法 —— 让模型看着事实自己决定下一步。
+            // 两种“工具没跑完”的事实：注入它们而不是重新执行，让模型看着事实决定下一步。
             case ToolCancelled cancelled -> {
                 flush();
                 openCallIds.remove(cancelled.callId());
@@ -198,168 +150,116 @@ final class MessageFold {
                         "（上次执行到这一步时进程重启，该调用没有完成。"
                                 + "不要直接重试，先用 read_file 确认相关文件的当前状态。）");
             }
-            // 审批请求本身**不进上下文**："模型请求了这次调用"已经由上面的
-            // ToolCallRequested 表达了，再来一条只会让模型以为有两回事
+            // 审批请求本身不进上下文：ToolCallRequested 已经表达了“模型请求了这次调用”。
             case ToolApprovalRequested asked -> {
-                // 只是记下"这条在等人" —— 挂起那一刻它的兜底说法和真中断的不一样，
-                // 见 closeOpenCalls。这条事件本身**不进上下文**（理由见下面那段）
+                // 只记下“这条在等人”，供兜底文案区分；事件本身不进上下文。
                 awaitingApproval.add(asked.callId());
             }
             case ToolApprovalResolved resolved -> {
-                // 答复要进 —— 模型必须知道那个调用是被批了还是被拒了，
-                // 否则它会一直等下去。
-                //
-                // 但**它是临时的**：批准之后那次调用会真的跑，跑完的
-                // ToolResult 会把这一条**原地换掉**（见 answerCall）。
-                // 两条都留着的话，消息列表里就有两条 role="tool"
-                // 回答同一个 tool_call_id —— 下一次请求直接 400。
+                // 答复必须进上下文，否则模型会一直等下去；但它是临时的，批准后真实结果会原地替换它，
+                // 否则同一个 tool_call_id 会有两条 tool 消息（见 answerCall）。
                 flush();
                 openCallIds.remove(resolved.callId());
                 awaitingApproval.remove(resolved.callId());
                 answerCall(resolved.callId(), answerTo(resolved));
             }
-            // 拒绝的**收尾标记**。**不进上下文** —— 模型要听的那句话已经由上面那条答复
-            // 说了（"用户拒绝了这次调用…停下等指示"），这里再进一条，
-            // 同一件事就会在消息列表里出现两遍。
-            // 它是不是终局，由域层那一处说（见 ToolCallLifecycle）
+            // 拒绝的收尾标记不进上下文：给模型的话已由审批答复给出，再进一条会重复。
             case ToolRejected ignored -> {
             }
             case UserMessage user -> {
                 flush();
-                // 时钟**跟着这句话走**，而不是每次请求再追加一行：
-                // 下一轮请求里这一条仍然是前缀的一部分，缓存才接得上。
-                // 用的是**事件落库那一刻**，不是装配时的 now() —— 同一份事件流
-                // 必须投影出逐字符相同的结果（见 ContextAssembler 的类注释）。
+                // 时钟跟着用户消息走，并用事件落库时刻而非装配时的 now()，保证投影确定性。
                 messages.add(LlmMessage.user(user.text() + "\n\n" + clockAt(stored.occurredAt())));
             }
             case TodoListUpdated updated -> {
-                // **每次变化追加一份快照**，不重新注入当前那份：
-                // 旧快照留在历史里是不变的（缓存能命中），最新一份在最后。
-                // 每条快照带自己的时刻和"以最后一份为准"，长会话里旧的那几份不会
-                // 再冒充当前；空清单也追加一条"已经清空"。
+                // 每次变化追加一份快照，旧快照留在历史里不变；最新一份在最后，空清单也追加。
                 flush();
                 messages.add(LlmMessage.user(todoSnapshot(updated, stored.occurredAt())));
             }
             case AgentNoteDelivered note -> {
-                // **来源必须标出来**。消息格式里没有"第三方"这个角色，所以别人的留言
-                // 只能以 user 的身份出现 —— 而模型默认会把 user 的话当成"我的用户在说"。
-                // 不标的话，它会照着**别人的请求**去改自己这边的代码，
-                // 而那很可能违背它自己用户的意图
+                // 消息格式没有“第三方”角色，别人的留言只能以 user 身份出现；不标来源模型会当成自己用户的指示。
                 flush();
                 messages.add(LlmMessage.user(
                         "[来自 " + senderOf(displayNameOf, note.fromUserId()) + " 的 agent 的留言]\n"
                                 + note.text()));
             }
             case PlatformInstruction instruction -> {
-                // 平台注入的指令（自动验证失败之类）。**必须标明来源** ——
-                // 模型要能分清"用户说的"和"平台说的"，而且它在事件流里
-                // 也是独立类型，审计时不会跟用户发言混起来
+                // 平台注入的指令必须标明来源，模型才能区分用户发言与平台指令。
                 flush();
                 messages.add(LlmMessage.user("[平台指令] " + instruction.text()));
             }
             case AssistantMessage assistant -> {
                 flush();
                 pendingText = assistant.text();
-                // **新的一次回复从这里开始** —— 这是它唯一的标志。
-                // 注意这一行是"覆盖"而不是"追加"：它同时把上一次回复的思考换掉
+                // 新的一次回复从这里开始；覆盖上一次回复的思考与来源模型。
                 responseReasoning = assistant.reasoning();
-                // 来源模型和思考同生共死：它俩是同一个"上一次回复"的两个属性。
-                // 换模型之后，新回复带的思考记的就是新模型 —— 于是老的那几份
-                // 自然不会再被当成"新模型说的"发出去
                 responseModel = assistant.model();
                 hasPending = true;
             }
-            // 以下都不进上下文 —— 它们要么是派生的（验证结论来自工具结果），
-            // 要么只是给审计看的（checkpoint、状态变化）
+            // 以下事件不进上下文：要么是派生的（验证结论来自工具结果），要么只用于审计。
             case SessionStarted ignored -> {
             }
             case SessionStateChanged ignored -> {
             }
             case SessionRewound rewound -> {
-                // **先 flush 再截**：那条还没交出去的回复属于被退掉的那一轮，得让它一起被砍掉；
-                // 反过来先截再 flush，它会被留在切点之后 —— 一条来自已作废轮次的消息
+                // 先 flush 再截，否则未交出的回复会留在切点之后，带着已作废轮次的内容。
                 flush();
                 truncateTo(rewound.toCheckpointSeq());
             }
             case CheckpointCreated checkpoint -> {
-                // 先 flush：这一轮最后那条回复此刻还在 pending 里，不落进 messages 的话
-                // 记下的下标会少一条 —— 回滚**正好退到那条之前**，于是每次回滚都少留一段。
-                //
-                // **提前 flush 不会把该合并的消息拆开**，因为顺序：CheckpointCreated 永远是一轮的
-                // **最后**一条，它后面第一条进上下文的事件一定是下一轮的 UserMessage（那条本来就会先 flush）。
-                // 前缀因此逐字节不变（缓存的前提，见类注释）。
-                //
-                // 哪天有种事件插在这两者之间，这条推理就塌了 —— 那时得回来重想。
+                // 先 flush，把这一轮最后的回复落进 messages，记下的下标才包含它；
+                // checkpoint 之后同一轮还可能写 WorkspaceChanges / TurnTokensUsed / 状态变化，
+                // 它们都不进上下文，提前 flush 不会拆开待合并的消息。
                 flush();
-                // 用 put 就够：序号唯一，不会撞车
                 checkpointIndexes.put(stored.seq(), messages.size());
             }
             case ContextCompacted ignored -> {
-                // 摘要、以及"从哪个序号开始投影"，都在 ContextAssembler.Projection
-                // 开头那一下预先处理掉了 —— 这条事件本身没有可投影的东西
+                // 摘要和水位线由 ContextAssembler.Projection 在开始处预处理，此事件没有可投影内容。
             }
-            // 我们这边在重试，和模型无关 —— 它知道了只会以为自己该说点什么。
-            // 而且它每重试一次就多一条，进去还会让前缀缓存失效
+            // 我们这边的重试与模型无关，且每次重试都多一条，让前缀失效。
             case LlmRetryScheduled ignored -> {
             }
-            // 这一轮改了哪些文件**不进上下文**：模型自己做过什么它清楚，而这条每轮都有 ——
-            // 进去会让每一轮的消息前缀都不一样，prompt 缓存就此作废（见 WorkspaceChanges）
+            // 模型自己知道改了什么；这条事件只在造出新提交且算得出项目内改动时出现，
+            // 进入上下文只会让前缀无谓分叉。
             case WorkspaceChanges ignored -> {
             }
             case VerificationResult ignored -> {
             }
-            // 用量结算不进上下文：它改变不了模型该看到什么，而它**每一轮都会出现** ——
-            // 一旦进去，每轮的消息前缀都不一样，prompt 缓存就此作废
+            // 用量只在正常收尾时落（失败收尾没有），且不改变模型该看到什么；
+            // 进入上下文只会让前缀多出一段与决策无关的差异。
             case TurnTokensUsed ignored -> {
             }
-            // 换模型**不进上下文**。Claude Code 走的是另一条路：它的系统提示词里写着
-            // "你由模型 X 驱动"，而那段提示词**每次请求重写**，于是模型自己就知道换了；
-            // 另发的那条"换了模型"是给**用户**看的系统消息，不会进 API。
-            // 我们没有那个前提（系统提示词是用户自己配的、不含模型身份），所以什么都不用做：
-            // 模型需要的是"之前干了什么"，那在历史里，和"之前是谁干的"无关
+            // 换模型不进上下文：模型需要的是“之前干了什么”，那已经在历史里。
             case ModelChanged ignored -> {
             }
-            // 同步也不进上下文。模型需要知道的是「**代码变了**」——
-            // 而那件事它读文件就看得见。把"平台做了一次同步"塞进来，
-            // 只会让每轮的消息前缀多一段和它的判断无关的东西
+            // 同步不进上下文：代码变了模型读文件就能看见，平台同步这件事与它的判断无关。
             case SessionSynced ignored -> {
             }
-            // 易失事件不落库，正常不会出现在这里；真出现了也忽略，
-            // 因为完整正文已经由 AssistantMessage 覆盖了
+            // 易失事件不落库，正常不会到这里；真出现也忽略，完整正文已由 AssistantMessage 覆盖。
             case AssistantDelta ignored -> {
             }
-            // 思考过程和正文同理。而且它**本来就一个字都不进上下文** ——
-            // 那是展示用途，回不回传给模型由 provider 适配层决定（各家要求相反）
+            // 思考增量为展示用途，是否回传由 provider 适配层决定。
             case ReasoningDelta ignored -> {
             }
         }
     }
 
     /**
-     * 把对话截断到某条 checkpoint 之前 —— **回滚是唯一一处回头砍已经投出去的消息的地方**。
+     * 把对话截断到某条 checkpoint 之前。代码与对话必须对齐，否则模型会针对已经从磁盘消失的状态推理。
      *
-     * <p>代码和对话绑死在对齐的位置上（写在 {@code SessionRewound} 上的约定）：不截的话，
-     * 模型会对着一个**已经从磁盘上消失的现状**继续推理，那种错很难查。
+     * <p>按 seq 查边界；查不到就退到 {@code conversationStart}。截断后必须清理记录消息下标的表，
+     * 否则后续答复会覆盖无关消息，或给已不在对话里的调用补结果。
      *
-     * <p>截到哪儿按**序号**查；查不到就退到 {@code conversationStart}（连摘要一起清）——
-     * 为什么按序号而不按 sha、两种"查不到"为什么走同一个保守分支，都写在
-     * {@link #checkpointIndexes} 上，这里不重复。
-     *
-     * @param checkpointSeq 退到的那条 checkpoint 在流里的序号；{@code null} = 那条事件没记下退到哪儿
+     * @param checkpointSeq 目标 checkpoint 的 seq；null 表示事件没有记录目标
      */
     private void truncateTo(Long checkpointSeq) {
         Integer boundary = checkpointSeq == null ? null : checkpointIndexes.get(checkpointSeq);
         int from = boundary == null ? conversationStart : boundary;
         messages.subList(from, messages.size()).clear();
 
-        // 那三张表记的都是**消息里的位置**，而尾巴刚被砍掉了 —— 砍完不收拾，它们的下标
-        // 就指到别的东西身上去：
-        //
-        //   · toolMessageAt：同一个调用 id 再被答复时，原地替换会**覆盖一条无关的消息**，
-        //     下标要是越了界就直接抛出去
-        //   · checkpointIndexes：再回滚一次会按旧下标截，截错地方
-        //   · openCallIds：收尾时会给一个"请求都已经不在对话里"的调用补一条结果 ——
-        //     那条 tool 消息前面没有对应的 tool_calls，下一次请求直接 400
+        // toolMessageAt 与 checkpointIndexes 记录消息下标，按切点清理；openCallIds / awaitingApproval
+        // 记录调用 id，只保留请求仍在切点之前的。漏清会让后续答复覆盖无关消息、按旧下标再次截断，
+        // 或给已不在对话里的调用补一条没有 tool_calls 前置的 tool 消息。
         toolMessageAt.values().removeIf(at -> at >= from);
         checkpointIndexes.values().removeIf(at -> at >= from);
         openCallIds.removeIf(callId -> !requestedWithin(callId, from));
@@ -367,10 +267,11 @@ final class MessageFold {
     }
 
     /**
-     * 这次调用的**请求**还留在切点之前吗。
+     * 这次调用的请求是否还留在切点之前。
      *
-     * <p>问的是消息里还在不在，而不是另记一张表：一次调用的请求落在哪条 assistant 消息上，
-     * 已经从 {@code messages} 本身读得出来。
+     * @param callId 调用 id
+     * @param from   切点下标
+     * @return 请求仍在切点之前时为 true
      */
     private boolean requestedWithin(String callId, int from) {
         for (LlmMessage message : messages.subList(0, from)) {
@@ -384,35 +285,26 @@ final class MessageFold {
     }
 
     /**
-     * 把压缩摘要作为**一条普通 user 消息**注入。
+     * 把压缩摘要作为一条普通 user 消息注入。
      *
-     * <p>**位置是决定性的**：它必须落在 {@code conversationStart} 之后 ——
-     * {@link com.codeloom.domain.event.SessionRewound} 退到它前面时才能把它一起截掉
-     *（退到它之后时留着，那时它描述的对话还都在）。放进系统提示词那一侧就没有这个余地：
-     * 它永远躲过截断，回滚之后模型会揣着一段描述着**已经从磁盘上消失的改动**的摘要说话 ——
-     * 那正是这个类最想避免的失效模式。
+     * <p>位置必须落在 {@code conversationStart} 之后，回滚到它之前时才能一起截掉；
+     * 放进系统提示词会永远躲过截断，让模型面对描述已消失改动的摘要。
      *
-     * <p>附带的理由：摘要讲的是"之前聊过什么"，那本来就属于**对话**，不是"这次要遵守的设定"。
+     * @param summary 摘要正文
      */
     void acceptSummary(String summary) {
         messages.add(LlmMessage.user(SUMMARY_HEADER + summary));
     }
 
     /**
-     * 收尾：给「请求了、却没有任何结果」的调用补一条合成结果。
+     * 收尾：给请求了却没有结果的调用补一条合成结果，满足 API 的配对要求。
      *
-     * <p>它对应一条真实路径：工具执行途中这一轮被中断（回调抛异常、fencing token 失效、
-     * 进程被杀），{@code ToolCallRequested} 已落库而结果永远不来 —— 直接投影出去就违反了
-     * API 的配对要求。正常的事件流走不到这里（{@code openCallIds} 为空），
-     * 所以**对前缀缓存没有影响**。
-     *
-     * <p>补成「结果」而不是把这个调用删掉：删掉等于对模型说"你没请求过它"，
-     * 而它确实请求过、那个工具甚至可能已经改了文件。
+     * <p>正常事件流不会走到这里，因此不影响前缀缓存。补成结果而不是删掉调用：
+     * 模型确实请求过它，工具甚至可能已经改了文件。
      */
     void closeOpenCalls() {
         for (String callId : openCallIds) {
-            // **两种处境两句话**：等人批的那条**压根没跑过** —— 对它说"不要直接重试，
-            // 先确认相关文件的当前状态"是反的（那条命令还没执行）
+            // 等人批的调用没有执行过，不能套用“先确认文件状态”的中断文案。
             answerCall(callId, awaitingApproval.contains(callId)
                     ? "（这次调用还在等你批准，没有结果。）"
                     : "（这次调用没有留下结果 —— 那一轮在它执行期间中断了。"
@@ -423,15 +315,14 @@ final class MessageFold {
     }
 
     /**
-     * 回答一次工具调用 —— **一个 {@code tool_call_id} 只留一条 {@code role="tool"} 消息**。
+     * 回答一次工具调用：一个 {@code tool_call_id} 只保留一条 {@code role="tool"} 消息。
      *
-     * <p>一次调用的答复可能来两次（审批那条要先充当"你批了/你拒了"，否则模型一直等；
-     * 然后才是真正跑完的 {@code ToolResult}），两条都 append 就是**两条 tool 消息回答同一个
-     * tool_call_id**，而 OpenAI 兼容格式要求一对一 —— 下一次请求当场 400：
-     * 「Messages with role 'tool' must be a response to a preceding message with 'tool_calls'」。
+     * <p>审批答复与真实结果可能先后到达；后来的原地替换先前那条，位置紧跟带 {@code tool_calls}
+     * 的 assistant 消息。追加两条会让 OpenAi 兼容格式报 400。见
+     * {@code docs/decisions/bug-fix/2026-09-30-one-answer-per-tool-call.md}。
      *
-     * <p>所以后来的**原地替换**先前那条，位置不动 —— 它必须紧跟在那条带 {@code tool_calls}
-     * 的 assistant 消息后面，挪了反而配不上对。
+     * @param callId  被回答的调用 id
+     * @param content 给模型看的结果
      */
     private void answerCall(String callId, String content) {
         LlmMessage message = LlmMessage.toolResult(callId, content);
@@ -444,15 +335,13 @@ final class MessageFold {
         messages.set(at, message);
     }
 
-    /** 把攒着的 assistant 消息交出去。有工具调用时正文可以为空。 */
+    /** 把攒着的 assistant 消息交出去；有工具调用时正文可以为空。 */
     void flush() {
         if (!hasPending) {
             return;
         }
         String text = pendingText == null ? "" : pendingText;
-        // `responseReasoning` **不在这里清** —— 见它的字段注释：
-        // 同一回复的下一个批次还要用它，清了的话那一条就是一个 400。
-        // `responseModel` 同理：它和那份思考是一体的
+        // responseReasoning 与 responseModel 不在这里清：同一回复的下一个批次还要用（见字段注释）。
         messages.add(pendingCalls.isEmpty()
                 ? LlmMessage.assistant(text, responseModel, responseReasoning)
                 : LlmMessage.assistantWithToolCalls(text, List.copyOf(pendingCalls),
@@ -470,41 +359,25 @@ final class MessageFold {
         }
         out.append('\n').append(result.output());
         if (result.truncated()) {
-            // 截断了必须说出来，否则模型会以为输出就这么多
+            // 截断必须说明，否则模型会把这段当成全部输出。
             out.append("\n...（输出过长已截断，如需更多内容请缩小范围重试）");
         }
         return out.toString();
     }
 
-    /**
-     * 摘要消息的开头。模型得能一眼看出"这不是用户刚说的，而是此前对话的浓缩"——
-     * 不点明的话，它会把摘要当成一条新指令去执行。
-     */
+    /** 摘要消息开头；不点明的话模型会把摘要当成一条新指令执行。 */
     private static final String SUMMARY_HEADER = "[此前对话的摘要 —— 更早的消息已被它替换]\n";
 
-    /**
-     * 正文被清掉之后，那条结果留给模型看的东西。
-     *
-     * <p>**必须说清"它还在、只是内容不看了"**，而不是让它消失 —— 消失的话，
-     * 模型会看到一次"没有结果的调用"，然后理直气壮地把它重试一遍。
-     */
+    /** 正文被清掉后留给模型的占位；必须说明调用仍在、只是内容不看了，否则模型会重试。 */
     private static final String CLEARED_PLACEHOLDER =
             "（这次调用的输出已经为了省上下文被清理掉了。如果还需要它的内容，重新执行一次）";
 
     /**
-     * 一次审批答复，给模型看的那句话。
+     * 一次审批答复给模型看的话。拒绝分两种：用户留了指示就附上；没留就明确要求停下等待，
+     * 因为此时猜一个方向很可能正是用户刚叫停的那一个。
      *
-     * <h2>拒绝分两种，而且是**两句话**</h2>
-     * Claude Code 就是这么分的，两种各有一条固定的说法：用户留了话，就把话附上、
-     * 让他照着走；**没留话**，就明说"停下来等用户"。
-     *
-     * <p>为什么没留话时不能只说一句"换个做法"：那种情况下模型的处境是——用户把这件事
-     * 叫停了，而他还没说下一步怎么办。这时候自己猜一个做法往下跑，多半是白烧一轮；
-     * 而且他叫停的**往往正是这个方向**。Claude Code 在这一支上更狠：直接把整个回合中止掉。
-     *
-     * <p>（{@code reason} 为 null 时不能把 null 直接拼进去：模型会读到**字面量 null**。）
-     *
-     * @param resolved 那次答复。{@code reason} 为空 = 用户只说了"不行"，没说怎么办
+     * @param resolved 审批答复；{@code reason} 为空表示用户没说下一步怎么办
+     * @return 给模型的答复文本
      */
     private static String answerTo(ToolApprovalResolved resolved) {
         if (resolved.approved()) {
@@ -518,10 +391,11 @@ final class MessageFold {
     }
 
     /**
-     * 留言发起者叫什么。
+     * 留言发起者的称呼。查不到时用“协作者”泛指，不能编名字。
      *
-     * <p>查不到（或者没接这一层）时用一句**泛指**的话：那句话是要给模型看的，
-     * 它只需要知道"这不是我自己的用户在说话"；编一个名字出来，会让它照着错的人去理解。
+     * @param displayNameOf 查名函数
+     * @param id            发起者 id
+     * @return 显示名或兜底称呼
      */
     private static String senderOf(Function<UserId, String> displayNameOf, UserId id) {
         String name = displayNameOf.apply(id);
@@ -529,11 +403,10 @@ final class MessageFold {
     }
 
     /**
-     * 一条用户消息后面的时钟。
+     * 用户消息后面的时钟，取事件落库时刻而非装配时刻，保证重放结果逐字符相同。
      *
-     * <p>取的是**这条消息落库的时刻**，不是装配那一刻：同一份事件流在任何时候重放，
-     * 都必须投影出逐字符相同的消息（缓存的前提）。代价是它反映"用户发这句话的时候"，
-     * 而不是"模型正在跑的时候" —— 对"今天/最近"这类问题，前者才是用户关心的。
+     * @param at 用户消息的落库时间
+     * @return 平台指令行
      */
     private static String clockAt(Instant at) {
         ZoneId zone = ZoneId.systemDefault();
@@ -542,10 +415,11 @@ final class MessageFold {
     }
 
     /**
-     * 一份清单快照。
+     * 一份清单快照，带自身时刻和“以最后一份为准”，让模型在旧快照仍留在历史里时判断当前版本。
      *
-     * <p>带上**这份快照的时刻**和"以最后一份为准"：长会话里旧快照会留在历史里，
-     * 模型靠时间和这句话判断哪份是当前，而不是靠"它恰好在最后"。
+     * @param updated 清单事件
+     * @param at      事件落库时间
+     * @return 快照文本
      */
     private static String todoSnapshot(TodoListUpdated updated, Instant at) {
         ZoneId zone = ZoneId.systemDefault();
@@ -556,10 +430,10 @@ final class MessageFold {
     }
 
     /**
-     * 清单写成几行字。
+     * 把清单写成几行字，状态沿用工具参数里的 pending / in_progress / completed。
      *
-     * <p>状态用**模型自己的词**（pending / in_progress / completed，和工具参数里那三个
-     * 字符串一模一样）：它写进去、它再读回来，中间不该经过一次翻译。
+     * @param items 清单项
+     * @return 文本快照
      */
     private static String renderTodos(List<TodoListUpdated.Item> items) {
         StringBuilder text = new StringBuilder();

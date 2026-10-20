@@ -6,22 +6,15 @@ import com.codeloom.domain.user.UserId;
 import org.springframework.stereotype.Component;
 
 /**
- * 「这一笔提交该署谁的名」—— 全项目只有这一个地方回答它。
+ * 提交署名的唯一来源。
  *
- * <h2>为什么值得单独一个类</h2>
- * 因为**好几处必须给出同一个答案**，而它们问的是同一件事：这笔提交是谁干的。
- * 打 checkpoint、同步、合并、裁决收尾，四处都要署名；这些提交之后会被混在**同一条分支**
- * 上（同步会把主干的提交原样带进来），所以 git log 里只有署名能分辨"这是谁做的" ——
- * 而那是审计唯一的落点。
+ * <p>checkpoint、同步、合并、裁决收尾四处都要署名，而这些提交会混在同一条分支上
+ * （同步会把主干的提交原样带进来），git log 里只有署名能分辨提交归属，那是审计的唯一落点。
+ * 各处若各算各的（例如一处用账号、一处用用户 id），同一批提交会署出两种名字，且不会报错。
  *
- * <p>要是各算各的（比如一处用账号、一处用用户 id），同一批提交就会署出两种名，
- * 而那种错**不会报错**，只会让 git log 里的归属变得不可信。
- *
- * <h2>它为什么**不**挂 {@code @ConditionalOnWebApplication}</h2>
- * 它住在 {@code app.session} 这个包里，但用它的主要是不启 Web 容器的执行器 ——
- * 而"每轮开始前打 checkpoint"是执行器的职责，跟 HTTP 毫无关系。
- * 那条"只服务 HTTP 的 bean 才挂条件"的规则，判据是**谁需要它**，不是它在哪个包
- * （挂了条件之后，所有非 Web 的测试都会因为找不到这个 bean 起不来）。
+ * <p>不挂 {@code @ConditionalOnWebApplication}：主要使用方是不启 Web 容器的执行器，
+ * 它在每轮结束时提交（checkpoint），与 HTTP 无关；挂了条件后非 Web 测试会因找不到该
+ * bean 而无法启动。
  */
 @Component
 public class CommitIdentities {
@@ -32,6 +25,11 @@ public class CommitIdentities {
         this.users = users;
     }
 
+    /**
+     * @param userId 提交的归属者
+     * @return 以该用户账号为名的提交署名
+     * @throws IllegalStateException 用户不存在
+     */
     public CommitIdentity of(UserId userId) {
         return users.findById(userId)
                 .map(owner -> CommitIdentity.of(owner.username()))

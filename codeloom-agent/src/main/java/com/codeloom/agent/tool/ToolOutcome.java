@@ -3,29 +3,18 @@ package com.codeloom.agent.tool;
 import com.codeloom.domain.event.TodoListUpdated;
 
 /**
- * 一次工具执行的结果。
+ * 一次工具执行的结果，是执行层返回值，不是要落库的领域事件
+ * （后者是 {@code com.codeloom.domain.event.ToolResult}）。
  *
- * <p>名字刻意不叫 {@code ToolResult} —— 那个名字已经被领域事件
- * {@code com.codeloom.domain.event.ToolResult} 占了。这两个是不同的东西：
- * 这个是**执行层的返回**，那个是**要落库的事实**。
- *
- * @param output    给模型看的文本。失败时也要有内容 —— 模型靠它自修
- * @param truncated 是否发生了截断。截断了却不说，模型会以为输出就这么多
- * @param exitCode  命令类工具有退出码；纯内存工具为 null
- * @param failure   失败的性质。**不是所有失败都一样** —— 被用户取消和执行出错
- *                  在事件流里要落成不同的事件，否则模型会去重试用户刚取消掉的操作
- * @param mutated   这一次调用**实际**改动工作区了吗
- * @param todoUpdate 这一次调用**产出的领域事实**：它把任务清单改成什么样了。
- *                   为 null = 这次调用没改清单（哪些工具会改，权威在 {@code ToolRegistry}）。
- *
- *                   <p>它和 {@code mutated} 是同一类东西：**执行层回报事实，由调用方
- *                   决定落哪条事件**。这里带的是**事件本身**而不是原始数据，因为"清单被
- *                   更新了"已经是领域语言 —— 再翻译一次只会多一个会走样的形状。
- *                   工具自己**不写**事件流：那是知道会话是谁的那一层的事（见
- *                   {@code AgentTurn.recordOutcome}）。
- * @param presentation **只给界面看**的结构化结果（JSON 文本），可以为 null。
- *                     给模型看的文本是有损的（来源压进一行自由文本），界面要画卡片
- *                     就得有一份能还原结构的副本。它不进模型上下文，也不是领域事实
+ * @param output       给模型看的文本；失败时也必须有内容
+ * @param truncated    是否发生截断；截断未说明会让模型误以为输出完整
+ * @param exitCode     命令类工具的退出码；纯内存工具为 null
+ * @param durationMs   执行耗时（毫秒）
+ * @param failure      失败性质；取消与执行错误会落成不同事件
+ * @param mutated      这次调用是否可能改动过工作区（保守判断，失败或被杀的 run_command 也算）；
+ *                     调用方据此决定是否运行强制验证
+ * @param todoUpdate   这次调用产出的领域事实（任务清单），没有则为 null；由调用方决定落哪条事件
+ * @param presentation 只给界面看的结构化 JSON，可为 null；不进入模型上下文
  */
 public record ToolOutcome(boolean success,
                           String output,
@@ -38,44 +27,22 @@ public record ToolOutcome(boolean success,
                           String presentation) {
 
     /**
-     * 失败的性质。
-     *
-     * <p>为什么不能让调用方从 message 字符串里猜：消息是人写的、会改，
-     * 而且"用户取消"和"要人来批"在 UI 上该有完全不同的呈现。
-     *
-     * <h2>一个值只有真的被生产才留</h2>
-     * 一个**没有任何地方生产**的枚举值会误导读代码的人：看到 {@code TIMEOUT} 会以为
-     * "超时是被单独处理的"，然后基于那个前提做决定。所以 {@link #TIMEOUT} 是有了生产者
-     *（{@code RunCommandTool}）才留下的 —— {@link com.codeloom.domain.port.CommandTermination}
-     * 把"进程是怎么结束的"变成了 domain 里的事实，超时于是不再丢掉那半截输出
-     *（从前是抛异常，跑到一半的构建日志跟着一起扔了）。{@code POLICY_DENIED} 没有回来：
-     * 它的位置被 {@link #APPROVAL_REQUIRED} 占着。
+     * 失败性质。调用方必须据此决定后续行为，不能从消息文本猜测；
+     * 只保留确实有生产者、且行为不同的值。
      */
     public enum Failure {
         /** 没有失败。 */
         NONE,
-        /** 用户取消。**要落成 ToolCancelled 事件，不是 ToolResult(success=false)**。 */
+        /** 用户取消；必须落成 ToolCancelled 事件，而不是失败结果。 */
         CANCELLED,
-        /**
-         * 需要人来批，**还没有执行**。
-         *
-         * <p>它和真正的失败要分开：那个是"不行"，这个是"等一下"。
-         * 上层对两者的处理完全相反 —— 一个让模型换个做法，另一个把整轮挂起等人点头。
-         */
+        /** 需要人工批准，尚未执行；与失败不同，会挂起整轮。 */
         APPROVAL_REQUIRED,
         /**
-         * 超过时限，进程树已被我们强杀。
-         *
-         * <p>它必须和 {@link #INTERNAL} 分开。合在一起的后果很具体：模型拿到一句
-         * "命令未能执行"，会以为是自己命令写错了，于是**把同一条命令原样再跑一遍**，
-         * 再超时一次。而真相是这条命令本来就需要更久 —— 它该做的是把
-         * {@code timeout_seconds} 调大，或者换个跑法。
-         *
-         * <p>它**不是**"用户取消"那种收尾：被杀掉之前它已经跑了一会儿、改过文件、
-         * 打过输出。所以它落成一条 {@code ToolResult}，和 {@link #CANCELLED} 不同。
+         * 超过时限、进程树已被终止。必须与 {@link #INTERNAL} 分开：
+         * 它已经产生过输出并可能改过文件，应落成 ToolResult，且要让模型知道需要调整超时或跑法。
          */
         TIMEOUT,
-        /** 其它内部错误（参数不是 JSON、路径越界、工具本身出错……）。 */
+        /** 其他内部错误（参数非法、路径越界、工具异常等）。 */
         INTERNAL
     }
 
@@ -84,12 +51,7 @@ public record ToolOutcome(boolean success,
         failure = failure == null ? Failure.NONE : failure;
     }
 
-    /**
-     * 没带领域事实的那一种 —— 大多数工具都是它。
-     *
-     * <p>这不是"给个方便"的重载：{@code todoUpdate == null} 是**大多数工具的常态**，
-     * 而不是某种残缺的形状。每个调用点都补一个 {@code null} 只会让人以为那里漏了什么。
-     */
+    /** 不带领域事实的构造；大多数工具都是这种形态。 */
     public ToolOutcome(boolean success,
                        String output,
                        boolean truncated,
@@ -100,76 +62,106 @@ public record ToolOutcome(boolean success,
         this(success, output, truncated, exitCode, durationMs, failure, mutated, null, null);
     }
 
+    /**
+     * @param output 给模型看的文本
+     * @return 成功结果
+     */
     public static ToolOutcome ok(String output) {
         return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, null, null);
     }
 
-    /** 成功并且**改动过工作区** —— 循环据此决定要不要跑强制验证。 */
+    /**
+     * 成功且改动过工作区；循环据此决定是否运行强制验证。
+     *
+     * @param output 给模型看的文本
+     * @return 成功结果
+     */
     public static ToolOutcome mutated(String output) {
         return new ToolOutcome(true, output, false, null, 0, Failure.NONE, true, null, null);
     }
 
     /**
-     * 成功，**并且产出了一条要落的领域事实**（目前只有任务清单）。
+     * 成功并产出一条领域事实（目前只有任务清单）；不算改动工作区。
      *
-     * <p>它不算"改动过工作区"：清单不是文件，左边那棵树不该因为写了一次计划就重拉。
+     * @param update 领域事实
+     * @param output 给模型看的文本
+     * @return 成功结果
      */
     public static ToolOutcome produced(TodoListUpdated update, String output) {
         return new ToolOutcome(true, output, false, null, 0, Failure.NONE, false, update, null);
     }
 
+    /**
+     * @param reason 给模型看的失败说明
+     * @return 内部错误结果
+     */
     public static ToolOutcome failed(String reason) {
         return failure(Failure.INTERNAL, reason);
     }
 
+    /**
+     * @param failure 失败性质
+     * @param reason  给模型看的失败说明
+     * @return 失败结果
+     */
     public static ToolOutcome failure(Failure failure, String reason) {
         return new ToolOutcome(false, reason, false, null, 0, failure, false, null, null);
     }
 
     /**
-     * 需要人来批，还没执行 —— 这一轮会就此挂起。
+     * 需要人工批准且尚未执行，本轮会挂起。{@code reason} 会进入审批事件并显示在确认界面上，
+     * 因此装在 {@link #output()} 里。
      *
-     * <p>这里的 {@code reason} 是**问人的理由**（"这个程序不在免审批名单里"、
-     * "这条命令会动到工作区外面"），它会原样进 {@code ToolApprovalRequested} 事件、
-     * 出现在人点"批准"的那个界面上。见 {@link CommandApproval}。
-     *
-     * <p>它装在 {@link #output()} 里：等着人批这个结局**没有别的内容可装**
-     *（这一轮不会落 ToolResult，模型也看不到这句话）。
+     * @param reason 需要批准的理由
+     * @return 挂起结果
      */
     public static ToolOutcome approvalRequired(String reason) {
         return failure(Failure.APPROVAL_REQUIRED, reason);
     }
 
+    /**
+     * @return 是否因用户取消而结束
+     */
     public boolean isCancelled() {
         return failure == Failure.CANCELLED;
     }
 
-    /** 这次调用卡在等人批，**没有执行**。 */
+    /**
+     * 这次调用等待批准，尚未执行。
+     *
+     * @return 是否挂起等待批准
+     */
     public boolean needsApproval() {
         return failure == Failure.APPROVAL_REQUIRED;
     }
 
-    /** 补上耗时。工具拿不到自己的总耗时（那是执行器测的），所以由循环补。 */
+    /**
+     * 补上耗时。必须原样保留其余字段（包括领域事实），漏字段不会报错。
+     *
+     * @param millis 耗时毫秒
+     * @return 带耗时的副本
+     */
     public ToolOutcome withDuration(long millis) {
-        // ★ 每一个字段都要原样带过来。漏掉一个（比如新加的 todoUpdate）的症状是
-        // "工具明明报了清单，事件流里却没有"，而工具自己的测试是绿的
-        //（它直接看 execute 的返回值，不经过这一层）
         return new ToolOutcome(success, output, truncated, exitCode, millis, failure, mutated,
                 todoUpdate, presentation);
     }
 
-    /** 换掉给模型看的那段文本，其余字段原样带过来（同上，一个字段都不许漏）。 */
+    /**
+     * 替换给模型看的文本，其余字段原样保留。
+     *
+     * @param text 新文本
+     * @return 副本
+     */
     public ToolOutcome withOutput(String text) {
         return withOutput(text, truncated);
     }
 
     /**
-     * 换掉给模型看的那段文本，并且**同时改变"截断"这个标记**。
+     * 替换给模型看的文本，同时设置截断标记，并保留其余字段。
      *
-     * <p>循环在"一轮输出超预算"时用它把结果压成头尾；那种改写**本来就同时意味着**
-     * 内容被截了（{@code truncated = true}）。让调用方自己拼一个新 record 的话，
-     * 每加一个字段（{@code todoUpdate}、{@code presentation}……）就会在那一处悄悄漏掉 ——
-     * 症状是"工具明明产出了清单，事件流里却没有"。
+     * @param text      新文本
+     * @param truncated 是否已截断
+     * @return 副本
      */
     public ToolOutcome withOutput(String text, boolean truncated) {
         return new ToolOutcome(success, text, truncated, exitCode, durationMs, failure, mutated,
@@ -177,12 +169,10 @@ public record ToolOutcome(boolean success,
     }
 
     /**
-     * 附上一份**只给界面看**的结构化结果（JSON 文本）。
+     * 附加只给界面看的结构化 JSON。它不进模型上下文，也不是领域事实。
      *
-     * <p>它和 {@link #output()} 是两个方向：那个是**给模型看的**（有损的自由文本），
-     * 这个是**给界面看的**（能还原成卡片的结构）。界面拿不到它时退回渲染 output。
-     *
-     * <p>**它不进模型的上下文**，也不该被任何判据读取 —— 它是展示数据，不是事实。
+     * @param presentationJson 结构化结果
+     * @return 副本
      */
     public ToolOutcome withPresentation(String presentationJson) {
         return new ToolOutcome(success, output, truncated, exitCode, durationMs, failure, mutated,

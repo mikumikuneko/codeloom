@@ -10,46 +10,37 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 /**
- * 工作区遍历的共享实现。{@link GrepTool} 与 {@link GlobTool} 都用它。
+ * 工作区遍历的共享实现，供 {@link GrepTool} 与 {@link GlobTool} 使用。
  *
- * <h2>为什么必须剪枝，而不是"列出来再过滤"</h2>
- * 用 {@code Files.walk(...).filter(isSkipped)} 会把 {@code node_modules/}、{@code target/}
- * 里每一个文件**完整列进来**再丢弃 99%。一个带 node_modules 的仓库动辄 10 万+ 文件，
- * 而 agent 一轮里可能调好几次搜索：单次从几十毫秒涨到几秒，内存也白白几百 MB。
- *
- * <p>这里改成 {@code walkFileTree} + {@code SKIP_SUBTREE}：噪声目录**根本不下去**。
- *
- * <h2>为什么这份必须只有一份</h2>
- * 两个工具各写一份 {@code SKIP_DIRS} 时，加一个忽略目录要改两处；漏改一处就会出现
- * "grep 跳过了、glob 还列出来"——模型在两个工具里看到的目录树不一致，而它无从知道。
+ * <p>在目录层直接 {@code SKIP_SUBTREE}，不把噪声目录完整列出再过滤；两个工具共用
+ * 同一份跳过清单，避免它们看到的目录树不一致。
  */
 final class WorkspaceFiles {
 
-    /** 明显不是源码、扫了只会淹没结果的地方。 */
+    /** 不参与遍历的目录名。 */
     static final Set<String> SKIP_DIRS =
             Set.of(".git", "target", "build", "out", "node_modules", ".idea", ".gradle", "dist", ".venv");
 
-    /** 单个文件的大小上限，超过就跳过（二进制、锁文件）。 */
+    /** 单个文件大小上限；超过则跳过。 */
     static final long MAX_FILE_BYTES = 2L * 1024 * 1024;
 
     private WorkspaceFiles() {
     }
 
     /**
-     * 遍历 {@code root}，对每个普通文件调用 {@code onFile}。
+     * 遍历 {@code root}，对每个普通文件调用 {@code onFile}。自动跳过 {@link #SKIP_DIRS}
+     * 中的目录和超大文件。
      *
-     * <p>自动跳过 {@link #SKIP_DIRS} 里的目录（不进子树）和超大文件。
-     *
-     * @param onFile 返回 {@code false} 表示够了，**立即停止遍历** ——
-     *               这让"只取前 N 条"的调用方不必先物化整棵树
+     * @param root   遍历根目录
+     * @param onFile 返回 false 时立即停止遍历
+     * @throws IOException 遍历失败
      */
     static void walk(Path root, Predicate<Path> onFile) throws IOException {
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
 
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                // 在**目录**这一层就剪掉，而不是等走进去了再逐文件判断。
-                // 注意排除 root 自己：用户可能就是想在 target/ 里搜。
+                // 在目录层剪枝；排除 root 本身，用户可能指定在 target/ 内搜索。
                 if (!dir.equals(root) && SKIP_DIRS.contains(dir.getFileName().toString())) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
@@ -66,7 +57,7 @@ final class WorkspaceFiles {
 
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                // 单个文件读不了（权限、被占用）不该让整次搜索失败
+                // 单个文件不可读不应让整次搜索失败。
                 return FileVisitResult.CONTINUE;
             }
         });

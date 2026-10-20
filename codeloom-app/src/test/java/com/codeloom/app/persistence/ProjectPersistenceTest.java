@@ -14,10 +14,10 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@code project} / {@code project_member} 两张表的真库测试。
+ * {@code project} 与 {@code project_member} 两张表的真库测试。
  *
- * <p>重点在成员上：{@code Project} 是一个带 {@code Set<UserId>} 的聚合，落库却是两张表，
- * 所以「写进去读出来还是同一个聚合」这件事必须对着真库验一次。
+ * <p>重点在成员：{@code Project} 是带 {@code Set<UserId>} 的聚合，落库却是两张表，
+ * 写进去读出来仍是同一个聚合这件事必须对着真库验一次。
  */
 class ProjectPersistenceTest extends AbstractPersistenceTest {
 
@@ -52,8 +52,8 @@ class ProjectPersistenceTest extends AbstractPersistenceTest {
         Project project = newProject("codeloom 退人", ALICE, BOB);
         projects.save(project);
 
-        // 要验的是**仓储的行为**：save 是"全删再全插"，所以少掉的那个成员必须真的
-        // 从表里消失。领域方法只负责把"少一个成员"拼出来（退出项目走的就是它）
+        // 验仓储的行为：save 是全删再全插，少掉的成员必须真的从表里消失。
+        // 领域方法只负责把“少一个成员”拼出来（退出项目走的就是它）。
         projects.save(project.withMemberRemoved(BOB));
 
         Project reloaded = projects.findById(project.id()).orElseThrow();

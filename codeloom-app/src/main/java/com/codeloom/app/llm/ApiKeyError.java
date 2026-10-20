@@ -1,11 +1,10 @@
 package com.codeloom.app.llm;
 
 /**
- * 「密钥在本轮跑到一半时没了」那句话。
+ * “密钥在本轮跑到一半时没了”那句话。
  *
- * <p>模型客户端和联网客户端各自会在发请求时现取密钥（见两处的 {@code Supplier}），
- * 而会话建好之后用户可能把它删掉或换掉。三处各写一遍那句话的结果是说法慢慢分叉
- * （"这条会话的…" / "这一家（deepseek）的…"），而它们说的是同一个事实。
+ * <p>模型客户端和联网客户端都在发请求时现取密钥，而用户可能在建好会话之后把它删掉
+ * 或换掉。这句话只有一处来源，免得各处说法慢慢分叉。
  */
 public final class ApiKeyError {
 
@@ -13,7 +12,8 @@ public final class ApiKeyError {
     }
 
     /**
-     * @param providerName **给人看的名字**（{@code Providers.displayNameOf}），不是 id
+     * @param providerName 给人看的服务商名字，不是 id
+     * @return 可直接展示给用户的错误信息
      */
     public static String goneMidTurn(String providerName) {
         return providerName + " 的 API Key 现在取不到了 —— "

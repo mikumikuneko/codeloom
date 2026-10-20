@@ -25,61 +25,33 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
- * 一条会话的事件流，走 SSE 下行。
+ * 一条会话的事件流，走 SSE 下行，断线重连靠浏览器自动带上的 {@code Last-Event-ID} 补历史。
  *
- * <pre>
- *   GET /api/sessions/{sessionId}/stream
- *   Last-Event-ID: 42          ← 断线重连时浏览器自动带上（它自己记的）
- * </pre>
+ * <p>帧的 {@code id:} 只有已落库的事件才有：它是重连游标，给打字中的流式增量安上它会让
+ * 客户端从一个不存在的 seq 接着拉。类型放在 {@code data} 的 JSON 里，不用 {@code event:}
+ * 字段，避免同一信息存两份而不一致。
  *
- * <h2>帧长什么样</h2>
- * <pre>
- *   id: 42
- *   data: {"sessionId":"…","seq":42,"at":"…","type":"TOOL_RESULT","payload":{…}}
+ * <p>认证与授权缺一不可：认证由 Spring Security 用会话 cookie 完成（{@code EventSource}
+ * 发不了自定义请求头），未登录为 401；授权由 {@link ProjectAccess#requireVisible} 完成，
+ * 因为"登录了"不等于"能看这条会话"，只做认证时换个 sessionId 就能订阅别人的流。
  *
- * </pre>
- * <ul>
- *   <li>{@code id:} **只有已落库的事件才有**。它是重连时要回传的游标，
- *       给一条正在打字中的流式增量安上它，客户端就会从一个不存在的 seq 接着拉。
- *   <li>类型放在 {@code data} 里、**不用 {@code event:} 字段**：那个 JSON 本来就要带
- *       {@code type}（反序列化端靠它判别），再写一个 {@code event:} 就是同一个信息存两份，
- *       而两份就有机会不一致。
- * </ul>
+ * <p>控制器放在 app 而不是 realtime：授权类住在 app，依赖方向是 {@code app → realtime}。
+ * 凡是需要授权的入口都在 app，realtime 只管消息怎么流
+ * （{@link SessionStreamService}、{@link EventBus}、SSE 帧格式），不管谁可以看。
  *
- * <h2>鉴权：两件事，缺一不可</h2>
- * <ol>
- *   <li><b>认证</b>由 Spring Security 兜（{@code SecurityConfig}：
- *       {@code anyRequest().authenticated()}）。身份仍然是**会话 cookie** ——
- *       {@code EventSource} 发不了自定义请求头，所以这条通道上除了 cookie 没有别的办法
- *       带凭据。未登录访问得到 401。
- *   <li><b>授权</b>由本类自己兜（{@link ProjectAccess#requireVisible}）：
- *       「登录了」不等于「你能看这条会话」。别处的会话接口都过这一道，这条通道也不例外 ——
- *       一个只做了认证的端点，在 URL 里换一个 sessionId 就能订阅别人的事件流。
- * </ol>
- *
- * <p><b>为什么这个控制器住在 app 而不是 realtime：</b>因为上面那第 2 条。
- * 授权类 {@code ProjectAccess} 住在 app，而依赖方向是 {@code app → realtime} ——
- * realtime 够不到它；放在 realtime 的话那一层就只剩认证可做。
- *
- * <p>于是分工是：**凡是需要授权的入口都在 app**
- * （所有控制器、WebSocket 端点注册都在这里），而 realtime 管的是
- * "消息怎么流"（{@link SessionStreamService}、{@link EventBus}、SSE 帧格式），
- * 不管"谁可以看"。
+ * <p>通道与认证的理由见
+ * {@code docs/decisions/architecture/2026-09-24-two-realtime-channels-and-cookie-auth.md}。
  */
 @RestController
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class SessionStreamController {
 
     /**
-     * 连接的最长寿命，默认 30 分钟。
+     * 连接的最长寿命，默认 30 分钟。刻意不设成永不过期：客户端静默消失（拔网线、进程被杀）
+     * 时服务端只能靠写失败发现，而没有事件的会话永远不会写失败，会一直占着订阅。
+     * 到期后浏览器自动重连并带 {@code Last-Event-ID}，不会丢事件。
      *
-     * <p>**刻意不设成"永不过期"**：客户端静默消失（拔网线、进程被杀）时，
-     * 服务端这边没有通知，只能靠写失败来发现。而一条正好没有任何事件的会话
-     * 永远不会有写失败的机会 —— 那样它就会一直占着一个订阅。
-     * 到期后浏览器会自动重连并带上 {@code Last-Event-ID}，什么都不会丢。
-     *
-     * <p>做成可配是为了测试能调到 1 秒 —— 否则每条开了流的测试都要等 30 分钟才会
-     * 让那个异步请求结束，而容器关闭时会一直等它。
+     * <p>可配置是为了测试能调到 1 秒；否则开了流的测试要等 30 分钟，容器关闭也会一直等。
      */
     private final Duration streamTimeout;
 
@@ -98,48 +70,42 @@ public class SessionStreamController {
         this.streamTimeout = streamTimeout;
     }
 
+    /**
+     * 订阅一条会话的事件流。
+     *
+     * @param lastEventId 断线重连的游标；为空表示从头补历史
+     * @return SSE 连接
+     */
     @GetMapping(path = "/api/sessions/{sessionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(Principal principal,
                             @PathVariable String sessionId,
                             @RequestHeader(name = "Last-Event-ID", required = false) Long lastEventId) {
-        // ★ 授权必须在**建 emitter 之前**。
-        //
-        //   一旦把 emitter 返回出去，响应头和 200 就已经在路上了 —— 那时候再抛异常
-        //   只会变成"流里面的一帧错误"，客户端看到的是"连上了，然后坏了"，
-        //   而它该看到的是一个干净的 404。这也是为什么校验不能塞进下面的 try 里。
-        //
-        //   用的是 requireVisible 而不是 requireDriver：**观战要看得到别人的会话**。
-        //   这条通道是观战的主干，所以它必须对项目成员开放 —— 但只对成员开放。
+        // 授权必须在建 emitter 之前：一旦返回 emitter，响应头和 200 已经在路上，
+        // 再抛异常只会变成流里的一帧错误，客户端看到"连上了然后坏了"而不是干净的 404。
+        // 用 requireVisible 而不是 requireDriver：观战需要看到别人的会话，但只对成员开放
         User me = currentUser.require(principal);
         access.requireVisible(me.id(), SessionId.of(sessionId));
 
         SseEmitter emitter = new SseEmitter(streamTimeout.toMillis());
         AtomicReference<EventBus.Subscription> subscription = new AtomicReference<>();
 
-        // 客户端消失有好几种方式（正常关、超时、写失败），每一种都得把订阅关掉 ——
-        // 漏掉任何一个，订阅表就会随着"历史上连过的连接数"一直长
+        // 正常关闭、超时、写失败都要关订阅，漏掉任何一个，订阅表会随历史连接数一直增长
         emitter.onCompletion(() -> close(subscription));
         emitter.onTimeout(() -> {
-            // ★ **超时不能只关订阅，还要把 emitter 收掉。**
-            //
-            //   这条连接背后是一个带超时的 DeferredResult（见
-            //   ResponseBodyEmitterReturnValueHandler）。超时回调跑完之后，只要结果**还没被设置**，
-            //   框架就会给它设一个 AsyncRequestTimeoutException —— 于是走错误分派，拿一个已经
-            //   定死 text/event-stream 的响应去渲染 JSON 错误体（日志里"No converter for
-            //   LinkedHashMap with preset Content-Type 'text/event-stream'"就是这么来的），
-            //   顺带把 Spring Session 的过滤器再跑一遍（"Session was invalidated" 出自那里）。
-            //
-            //   complete() 正是"由应用把这次请求正常结束掉"的那一下（见它自己的 javadoc），
-            //   结果一被设置，上面那条错误路径就不会走
+            // 超时不能只关订阅，还必须 complete() 掉 emitter：连接背后是带超时的
+            // DeferredResult，结果未设置时框架会设 AsyncRequestTimeoutException 并走错误分派，
+            // 用已定死 text/event-stream 的响应去渲染 JSON 错误体（日志里的
+            // "No converter for LinkedHashMap with preset Content-Type 'text/event-stream'"
+            // 和 "Session was invalidated" 都来自这条路径）。complete() 设置结果后错误路径不再走
             close(subscription);
             emitter.complete();
         });
-        // 这里**不要** complete()：上面那条注记写着，send 出错之后不该再调它
+        // 不要在 onError 里 complete()：send 出错后不该再调它
         emitter.onError(cause -> close(subscription));
 
         Consumer<EventEnvelope> sink = envelope -> {
             if (!write(emitter, envelope)) {
-                // 写不进去就是"这个客户端已经不在了"。关掉订阅，后面的就不用再往这儿发了
+                // 写不进去说明客户端已经不在了；关掉订阅，后续不再发送
                 close(subscription);
             }
         };
@@ -156,7 +122,8 @@ public class SessionStreamController {
     }
 
     /**
-     * @return false 表示这个连接已经写不进去了（客户端走了）
+     * @param envelope 要推送的事件
+     * @return false 表示连接已写不进去（客户端走了）
      */
     private boolean write(SseEmitter emitter, EventEnvelope envelope) {
         try {

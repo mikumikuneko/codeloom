@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { diffLines, wordDiff, wordDiffs } from './textDiff'
 
 /**
- * 钉的是这几条：**末尾换行不算一行**、改动之外的上下文会被收成一条 `gap`、
- * **没有改动时一行都不裁**、以及超规模时退化成"全删全加但一行不丢"。
+ * 钉的是：末尾换行不算一行；改动之外的上下文被收成一条 `gap`；没有改动时一行都
+ * 不裁；超规模时退化成"全删全加但一行不丢"。
  */
 
 const lines = (...text: string[]) => text.join('\n')
@@ -44,7 +44,7 @@ describe('diffLines', () => {
     const many = Array.from({ length: 20 }, (_, i) => `line ${i}`)
     const rows = diffLines(lines(...many, 'tail'), lines(...many, 'changed'))
 
-    // 前面那些没动的行被收掉了，只剩末尾那几行上下文 + 改动
+    // 前面没动的行被收掉了，只剩末尾几行上下文和改动。
     expect(rows[0]).toEqual({ kind: 'gap', hidden: expect.any(Number) })
     expect(rows.some((row) => row.kind === 'removed' && row.text === 'tail')).toBe(true)
     expect(rows.some((row) => row.kind === 'added' && row.text === 'changed')).toBe(true)
@@ -74,8 +74,8 @@ describe('diffLines', () => {
   })
 
   it('规模超了就直接"全删 + 全加"：不做对齐，但**一行不丢**', () => {
-    // 两个 600 行的块：600 × 600 = 360,000 已经超过 250,000 那张表的上限，
-    // 而且两边内容全不一样（真去找对齐也找不到）
+    // 两个 600 行的块：600 × 600 = 360,000，超过 250,000 的上限，
+    // 而且两边内容全不一样。
     const before = Array.from({ length: 600 }, (_, i) => `old ${i}`).join('\n')
     const after = Array.from({ length: 600 }, (_, i) => `new ${i}`).join('\n')
 
@@ -131,7 +131,7 @@ describe('wordDiffs', () => {
   })
 
   it('中间隔着没动的行就不配对 —— 那说明它们不是同一处改动', () => {
-    // 删掉的是 x、加上的是 y：中间那句 b 在两边都对得上，所以它们不是一对
+    // 删的是 x、加的是 y；中间的 b 在两边都对得上，所以它们不是一对。
     const rows = diffLines('a\nx\nb', 'a\nb\ny')
     const words = wordDiffs(rows)
 

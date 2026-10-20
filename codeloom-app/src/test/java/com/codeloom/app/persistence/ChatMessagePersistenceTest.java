@@ -16,12 +16,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@code chat_message} 表的真库测试。
  *
- * <p>这个类里唯一必须对着真库验的是**自增主键回填**：{@code append} 要返回一个
- * id 已分配好的完整对象，而那个 id 是 {@code useGeneratedKeys} 塞进
- * {@code ChatMessageInsert} 的。这条路径没有纯单测能覆盖。
+ * <p>必须对着真库验的是自增主键回填：{@code append} 要返回 id 已分配的完整对象，
+ * 而 id 由 {@code useGeneratedKeys} 回填，纯单测覆盖不到。
  *
- * <p>每个测试用**新生成的 projectId**，于是「这个项目下的消息」必然只有本测试插的，
- * 断言可以精确到条数和顺序；不然就得写成 contains。
+ * <p>每个测试用新生成的 projectId，这个项目下的消息必然只有本测试插的，
+ * 断言可以精确到条数和顺序。
  */
 class ChatMessagePersistenceTest extends AbstractPersistenceTest {
 
@@ -39,8 +38,8 @@ class ChatMessagePersistenceTest extends AbstractPersistenceTest {
         ChatMessage message = chat.append(projectId, ALICE, "看一下 OrderService", null, null, NOW);
 
         assertThat(message.id().value()).isPositive();
-        // 用 id-1 做游标，命中的必然只有这一条：id 是全局自增的，它前面那个号哪怕是别人的
-        // 消息，也不属于这个 projectId
+        // 用 id-1 做游标只会命中这一条：id 全局自增，前一个号即使属于别人，
+        // 也不在这个 projectId 下。
         assertThat(chat.findAfter(projectId, message.id().value() - 1, 10)).containsExactly(message);
     }
 
@@ -84,10 +83,8 @@ class ChatMessagePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("【精度边界】created_at 是 DATETIME(3)：**返回的那条和读回来的那条必须是同一个时刻**")
     void subMillisecondPrecisionIsTruncatedOnTheWayIn() {
-        // 时间戳用的是 DATETIME(3)（建表时定的：同一会话可能在同一毫秒内落多条事件，
-        // 秒级精度排不出先后）。所以微秒以下不存在 —— 关键是**在写进去之前就截**：
-        // 否则广播出去的那条（append 的返回值）和历史接口读回来的那条时间不同，
-        // 同一条消息会带着两个时刻（和事件落库那条同一个做法）
+        // 列是 DATETIME(3)：微秒以下不存在。关键是在写进去之前就截，否则广播出去的
+        // 那条（append 返回值）和历史接口读回来的那条会带着两个时刻。
         Instant withNanos = Instant.parse("2026-09-25T10:00:00.123456789Z");
 
         ChatMessage saved = chat.append(projectId, ALICE, "精度", null, null, withNanos);

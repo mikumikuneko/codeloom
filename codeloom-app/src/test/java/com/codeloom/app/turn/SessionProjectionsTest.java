@@ -30,10 +30,10 @@ import java.util.OptionalInt;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 会话的活状态（跨轮那条投影）。
+ * 会话的活投影（跨轮缓存）。
  *
- * <p>这里用的是一个只在内存里的 {@link EventStore} —— 要盯的是**缓存**那层的行为：
- * 复用它、补读它、什么时候把它作废重来。数据库那一层由别的测试盯着。
+ * <p>使用只在内存里的 {@link EventStore}，关注缓存层的行为：复用、补读、何时作废重建。
+ * 数据库层由其他测试覆盖。
  */
 class SessionProjectionsTest {
 
@@ -43,8 +43,8 @@ class SessionProjectionsTest {
     private final FakeStore events = new FakeStore();
 
     /**
-     * 装配器。**这条测试不关心用户名** —— 投影里唯一查它的一处是"别人捎来的留言"
-     * 要标来源（见 {@link ContextAssembler}），而这里没有留言，所以明写"不要名字"。
+     * 装配器。本测试不关心用户名：投影里唯一查它的是给别人捎来的留言标来源
+     * （见 {@link ContextAssembler}），而这里没有留言。
      */
     private static final ContextAssembler NAMELESS = new ContextAssembler(userId -> null);
 
@@ -70,10 +70,9 @@ class SessionProjectionsTest {
     }
 
     /**
-     * 拿到的投影和"从整条流从头建一条"必须**逐字符相同**。
+     * 缓存投影必须与从整条流重建的结果逐字符相同。
      *
-     * <p>这是整个缓存唯一的正确性判据：它错了不会报错，只会让模型看见的上下文
-     * 重复一段或者少一段。
+     * <p>这是缓存唯一的正确性判据：出错不会报错，只会让模型看到的上下文重复或少一段。
      */
     private void assertSameAsFromScratch(SessionId sessionId, ContextAssembler.Projection cached) {
         ContextAssembler.Projection fresh = new ContextAssembler(userId -> null).projection(PROMPT);
@@ -108,7 +107,7 @@ class SessionProjectionsTest {
         // 另一个实例往这条会话写了事件（同步、合并、对方的操作都会这样）
         events.append(new UserMessage("别处写进来的一句"));
 
-        // 再拿的时候补读到，而且**只读了新增那一截**（见 FakeStore.readAfterCalls）
+        // 再取时补读到新增部分，而且只读新增那一截（见 FakeStore.readAfterCalls）
         ContextAssembler.Projection again = projections.acquire(sessionWith(PROMPT));
         assertThat(again).isSameAs(projection);
         assertThat(events.readAfterCalls).containsExactly(0L, 1L);
@@ -137,8 +136,8 @@ class SessionProjectionsTest {
     @Test
     @DisplayName("【分页】改写类事件落在第二页时，重来拿的是整条流 —— 不是手里那一页")
     void aRewriteBeyondTheFirstPageStillRebuildsFromTheWholeStream() {
-        // 一页 500 条，前 600 条把改写事件顶到第二页去。补读那一趟手里只有第二页，
-        // 而"推倒重来"要的是整条流 —— 拿那一片当整条流，前面 500 条会静默消失
+        // 一页 500 条，前 600 条把改写事件推到第二页。补读那一趟手里只有第二页，
+        // 而重建需要整条流；把它当整条流会让前面 500 条静默消失
         for (int i = 1; i <= 600; i++) {
             events.append(new UserMessage("第 " + i + " 句"));
         }
@@ -196,7 +195,7 @@ class SessionProjectionsTest {
 
         capped.acquire(sessionWith(a, PROMPT));
         capped.acquire(sessionWith(b, PROMPT));
-        // 再碰一次 a —— 于是"最久没用过"换成了 b，而不是先来的 a
+        // 再访问一次 a，于是最久未用者变成 b，而不是先来的 a
         capped.acquire(sessionWith(a, PROMPT));
         capped.acquire(sessionWith(c, PROMPT));
 
@@ -251,8 +250,8 @@ class SessionProjectionsTest {
     // ------------------------------------------------------------------
 
     /**
-     * 只在内存里的事件表。刻意实现成"**和真表一样按 seq 分页**"：
-     * 补读那条路最容易出的错是漏掉中间那一页，而那正是分页才有的错。
+     * 只在内存里的事件表，刻意按 seq 分页，与真表一致：补读最容易漏掉中间一页，
+     * 而那正是分页才会出现的错误。
      */
     private static final class FakeStore implements EventStore {
 
@@ -287,7 +286,7 @@ class SessionProjectionsTest {
             return of(sessionId);
         }
 
-        /** 这条测试盯的是**投影**，压缩那道闸归 {@code ContextCompactorTest} 管。 */
+        /** 本测试关注投影；压缩触发由 {@code ContextCompactorTest} 覆盖。 */
         @Override
         public OptionalInt lastContextTokens(SessionId sessionId) {
             throw new UnsupportedOperationException();

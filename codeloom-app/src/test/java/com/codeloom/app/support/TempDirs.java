@@ -8,16 +8,15 @@ import java.util.Comparator;
 import java.util.stream.Stream;
 
 /**
- * 测试用的临时目录：创建、以及**能删干净**的递归删除。
+ * 测试用临时目录：创建，以及能删干净的递归删除。
  *
- * <h2>为什么删除不能只是一句 deleteIfExists</h2>
- * <b>Windows 上 git 的对象文件是只读的</b>（{@code .git/objects/...}），而
- * {@code Files.delete} 对只读文件直接抛 {@code AccessDeniedException} ——
- * 于是清理会在测试**全部通过之后**炸掉，看起来像测试失败。
- * 这个坑在 Linux 上不存在（那边只看目录的写权限），所以别按 Linux 的直觉删。
+ * <p>删除不能只调用 {@code deleteIfExists}：Windows 上 git 对象文件是只读的
+ *（{@code .git/objects/...}），{@code Files.delete} 对只读文件会抛
+ * {@code AccessDeniedException}，清理在测试全部通过之后才炸。Linux 只看目录写权限，
+ * 不会有这个问题，因此不能按 Linux 的直觉实现。
  *
- * <p>两份实现的话，其中一份漏掉只读处理不会有任何征兆 —— 它在别人的 Windows 机器上、
- * 且在测试通过之后才反应出来。
+ * <p>集中一份实现，否则漏掉只读处理没有任何征兆，且只在别人的 Windows 机器上、
+ * 测试通过之后才暴露。
  */
 public final class TempDirs {
 
@@ -25,10 +24,8 @@ public final class TempDirs {
     }
 
     /**
-     * 建一个临时目录。
-     *
-     * <p>返回的是 {@code toRealPath()} 的结果：Windows 上系统临时目录可能是短路径名
-     * （8.3 格式），而 git 返回的是长路径名 —— 不归一化的话，测试里按路径比较会对不上。
+     * 建一个临时目录，返回 {@code toRealPath()} 的结果：Windows 的系统临时目录可能是
+     * 8.3 短路径，而 git 返回长路径，不归一化会导致测试里路径比较对不上。
      */
     public static Path create(String prefix) {
         try {

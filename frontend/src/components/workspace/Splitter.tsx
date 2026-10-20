@@ -1,20 +1,16 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 
-/** 键盘一次挪多少。给不能拖的人一条路 —— 和拖动是同一件事，只是入口不同。 */
+/** 键盘一次挪多少。给不能拖的人一条路：与拖动是同一件事，只是入口不同。 */
 const KEY_STEP = 16
 
 /**
- * 两栏之间那条可拖的把手。
+ * 两栏之间可拖的把手。
  *
- * <h2>它同时是那条分界线</h2>
- * 工作区中间那一片从前自带左右两条边框（"唯一自己带分界线的一栏"）。
- * 现在那两条线由把手来画 —— 因为拖动需要一个**够大的命中区**（1px 的线抓不住），
- * 而在 1px 的线旁边再放一个 6px 的透明条，就会出现"看得见的线"和"抓得住的条"
- * 不重合的两样东西：人对着线拖，线却不动。
+ * 它同时画那条分界线：拖动需要够大的命中区（1px 的线抓不住），在线旁再放一个
+ * 透明条会让"看得见的线"和"抓得住的条"不重合，人对着线拖，线却不动。
  *
- * <h2>为什么按住时要把整页的光标换掉</h2>
- * 只在把手上设 `cursor` 的话，鼠标一划出去就变回箭头 —— 而这时候人还在拖。
- * 拖动期间那块区域光标是唯一在回答"现在能干什么"的东西。
+ * 按住时换掉整页光标：只在把手上设 `cursor` 的话，鼠标一划出去就变回箭头，而人
+ * 还在拖。
  */
 export function Splitter({
   label,
@@ -22,9 +18,9 @@ export function Splitter({
   onReset,
 }: {
   label: string
-  /** 往右拖给正数、往左拖给负数。**哪边变宽由调用方决定**（两栏的方向相反） */
+  /** 往右拖给正数、往左拖给负数。哪边变宽由调用方决定（两栏方向相反） */
   onResize: (delta: number) => void
-  /** 双击回到默认宽度。拖到一个别扭的位置之后，人需要一个不用重拖的出口 */
+  /** 双击回到默认宽度。拖到别扭的位置后需要一个不用重拖的出口 */
   onReset: () => void
 }) {
   const [dragging, setDragging] = useState(false)
@@ -38,7 +34,7 @@ export function Splitter({
     const cursor = body.style.cursor
     const select = body.style.userSelect
     body.style.cursor = 'col-resize'
-    // 拖动时整页禁掉选中：不然手一抖就会把旁边的文字刷成蓝色
+    // 拖动时整页禁掉选中，否则手一抖会把旁边的文字刷成蓝色。
     body.style.userSelect = 'none'
     return () => {
       body.style.cursor = cursor
@@ -47,7 +43,7 @@ export function Splitter({
   }, [dragging])
 
   function grab(event: ReactPointerEvent<HTMLButtonElement>) {
-    // 捕获指针：不捕获的话，手快一点划出这 6px 就丢了，而人还没松手
+    // 捕获指针：不捕获的话，手快一点划出这 6px 就丢了，而人还没松手。
     event.currentTarget.setPointerCapture(event.pointerId)
     last.current = event.clientX
     setDragging(true)
@@ -64,8 +60,8 @@ export function Splitter({
   return (
     <button
       type="button"
-      // role=separator 是"可拖的分隔条"那个标准写法：读屏会念成"分隔条"而不是"按钮"，
-      // 而左右方向键是它约定的操作方式
+      // role=separator 是"可拖分隔条"的标准写法：读屏念成"分隔条"而不是"按钮"，
+      // 左右方向键是它约定的操作方式。
       role="separator"
       aria-orientation="vertical"
       aria-label={label}

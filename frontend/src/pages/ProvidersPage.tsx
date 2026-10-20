@@ -9,21 +9,16 @@ import { errorText, apiKeys, type ConfiguredKey, type ProviderPreset } from '@/l
 import { useAsync } from '@/lib/useAsync'
 
 /**
- * 供应商：**一家一行**，点「配置 / 编辑」就在原地展开成表单。
+ * 供应商：一家一行，点「配置 / 编辑」在原地展开成表单。
  *
- * <h2>为什么没配过的也列出来</h2>
- * 因为"支持哪些家"是产品知道的事，而这个页面的问题本来就是"我该做什么"。
- * 只列已经配好的，第一次进来就是一片空白 —— 一片空白不回答问题，只让人怀疑自己点错了地方。
+ * 没配过的也列出来："支持哪些家"是产品知道的事，而这页的问题本来就是"我该做什么"。
+ * 只列已配好的，第一次进来就是一片空白，而空白不回答问题。
  *
- * <p>（这条是照着 deepseek-harness 改的：它那句注释写的是"provider 存在但还没有 key 时，
- * **那张设置卡片就是它在这一页上的存在形式**"。）
+ * 原地展开而不是左右分栏：编辑字段只有三个，"我在改哪一家"在展开的卡片里看得见、
+ * 不用靠位置猜；分栏还会多出"右边空着显示什么"的问题。
  *
- * <h2>为什么是原地展开，而不是左边一列右边一栏</h2>
- * 编辑的字段只有三个，而"我在改哪一家"这件事在展开的卡片里看得见、不用靠位置去猜。
- * 左右分栏还会多出"右边空着的时候该显示什么"这种问题 —— 而那正是上一版空荡荡的原因。
- *
- * <h2>请求地址从头到尾不出现</h2>
- * 发请求由服务端做，地址是服务端按这一家取的。这里只有给人看和点的东西：名字、官网、密钥。
+ * 请求地址从头到尾不出现：发请求由服务端做，地址由服务端按这一家取。这里只有给人
+ * 看和点的东西：名字、官网、密钥。
  */
 export function ProvidersPage() {
   const keys = useAsync(() => apiKeys.list(), [])
@@ -59,7 +54,7 @@ export function ProvidersPage() {
               key={preset.id}
               preset={preset}
               configured={configured}
-              // 从一家切到另一家时**整个表单重建**：于是输入框里的内容不会带着上一家的残留
+              // 从一家切到另一家时整个表单重建：输入框不会带着上一家的残留。
               editing={editing === preset.id}
               saved={saved === preset.id}
               onToggle={() => {
@@ -85,10 +80,9 @@ export function ProvidersPage() {
 }
 
 /**
- * 一家的卡片。收起时两行（名字 + 官网），展开时下面接一个表单。
+ * 一家的卡片。收起时两行（名字 + 官网），展开时下面接表单。
  *
- * <p>**官网那一行只在预设里有点开的价值** —— 它是"这家在哪儿"，
- * 而不是"我们往哪儿发请求"（那个不出现）。
+ * 官网那一行只在预设里有点开的价值：它是"这家在哪儿"，不是"我们往哪儿发请求"。
  */
 function ProviderRow({
   preset,
@@ -119,9 +113,9 @@ function ProviderRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-medium">{preset.displayName}</span>
-            {/* 状态**不用颜色用形状**：实心点+字 = 已配置，空心环 = 还没配。
-                两个灰度不同的点并排是读不出差别的，而这行里只有这一个二进制信息；
-                不借绿色 —— "通过/正常"的语义色在这套界面里另有主人（diff、验证） */}
+            {/* 状态不用颜色用形状：实心点加字 = 已配置，空心环 = 还没配。两个灰度
+                不同的点并排读不出差别，而这行只有这一个二进制信息；不借绿色——
+                "通过/正常"的语义色在这套界面里另有主人（diff、验证） */}
             {configured ? (
               <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
                 <span aria-hidden className="size-1.5 rounded-full bg-muted-foreground" />
@@ -140,8 +134,8 @@ function ProviderRow({
             href={preset.officialUrl}
             target="_blank"
             rel="noreferrer"
-            // 和正文里的链接同一套：静止时**虚线**下划线（实线等于在喊"点我"），
-            // 指上去才转实、才亮到正文色
+            // 和正文里的链接同一套：静止时虚线（实线等于在喊"点我"），指上去才
+            // 转实、才亮到正文色。
             className="block truncate text-xs text-muted-foreground underline decoration-dotted underline-offset-[3px] transition-colors hover:decoration-solid hover:text-foreground"
           >
             {preset.officialUrl}
@@ -149,9 +143,8 @@ function ProviderRow({
         </div>
 
         {saved && !editing && <span className="shrink-0 text-xs text-muted-foreground">已保存</span>}
-        {/* 「配置」和「编辑」是两种响度：还没配的时候，配上是这张卡唯一要做的事
-            （描边）；配好之后，改它只是偶尔的动作（ghost 小字）。
-            一样轻等于告诉用户"配不配都行" —— 而这一页的存在意义就是让他配上 */}
+        {/* 「配置」和「编辑」是两种响度：没配时配上是这张卡唯一要做的事（描边）；
+            配好后改它只是偶尔动作（ghost）。一样轻等于说"配不配都行" */}
         <Button
           variant={editing || configured ? 'ghost' : 'outline'}
           size="sm"
@@ -175,11 +168,10 @@ function ProviderRow({
 }
 
 /**
- * 一家的表单：名字、官网、API Key。**没有请求地址**。
+ * 一家的表单：名字、官网、API Key。没有请求地址。
  *
- * <h2>密钥那一格为什么是空的，而不是把那把 key 显示出来</h2>
- * 因为**读不回来**：库里的密钥是密文（这是刻意的）。已有 key 时那一格留一排点，
- * 是"它在这儿"的意思；要换就整体重填，而右边的小眼睛只作用于**你正在输入的**那串。
+ * 密钥那格是空的而不是显示那把 key：库里的密钥是密文，读不回来。已有 key 时留
+ * 一排点表示"它在这儿"；要换就整体重填，小眼睛只作用于正在输入的那串。
  */
 function ProviderForm({
   preset,
@@ -205,8 +197,8 @@ function ProviderForm({
     setBusy(true)
     try {
       await apiKeys.configure(preset.id, name, apiKey)
-      // 提交之后**立刻清空密钥输入框**：它已经在服务端存成密文了，
-      // 留在一个能被截屏、被浏览器自动填充的框里没有好处
+      // 提交之后立刻清空密钥输入框：它已在服务端存成密文，留在能被截屏、被浏览器
+      // 自动填充的框里没有好处。
       setApiKey('')
       setRevealed(false)
       onSaved()
@@ -218,8 +210,8 @@ function ProviderForm({
   }
 
   /**
-   * 真的去删。**失败的那句话交给确认框显示**，不动表单自己的 error ——
-   * 那个位置在表单下方，人刚从框里点完"删除"，眼睛还在框上。
+   * 真的去删。失败那句话交给确认框显示，不动表单自己的 error：人刚从框里点完
+   * "删除"，眼睛还在框上。
    */
   async function remove(): Promise<string | null> {
     if (!configured) return null
@@ -254,7 +246,7 @@ function ProviderForm({
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
             autoComplete="off"
-            // 已经有 key 时留一排点：它是"它在这儿"的意思，**不是那把 key**（读不回来）
+            // 已有 key 时留一排点：它是"它在这儿"的意思，不是那把 key（读不回来）。
             placeholder={configured?.hint ? '••••••••••••' : 'sk-…'}
             className="pr-9 font-mono"
             required
@@ -315,9 +307,8 @@ function ProviderForm({
 /**
  * 一家的图标。
  *
- * <p>**按 id 查一张本地图**（`public/providers/`）：图标是展示，不该让后端为它多开一个接口。
- * 认不出来的 id（自定义 provider）回落成首字母 —— 一个方块加一个字，
- * 比一个破图或者空白强。
+ * 按 id 查一张本地图（`public/providers/`）：图标是展示，不该让后端为它多开接口。
+ * 认不出来的 id（自定义 provider）回落成首字母，比破图或空白强。
  */
 const ICONS: Record<string, string> = {
   deepseek: '/providers/deepseek.svg',

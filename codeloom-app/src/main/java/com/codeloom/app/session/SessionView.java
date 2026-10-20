@@ -5,20 +5,24 @@ import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.session.Session;
 
 /**
- * 会话对外长什么样。
+ * 会话对外的视图。
  *
- * <h2>刻意没有 {@code worktreePath}</h2>
- * 和 {@link com.codeloom.app.project.ProjectView} 同理：那是服务端的文件系统路径，
- * 客户端拿它什么都做不了。判断标准是"客户端拿它能做什么"，不是"它敏感吗"。
+ * <p>刻意没有 {@code worktreePath}：服务端文件系统路径对客户端没有用途，判据是客户端
+ * 拿它能做什么（参见 {@link com.codeloom.app.project.ProjectView}）。
  *
- * <h2>{@code branch} 和 {@code headCommit} 是**工作区**的属性</h2>
- * 它们出现在这里，是因为界面上要显示"这条会话的代码现在在哪个 commit"，而回滚也是按它
- * 来选的。但归属要说清楚：这两个值来自工作区，而工作区挂在「用户 × 项目」上 ——
- * 所以**同一个人的几条会话会显示同一对值**。那不是 bug，是"换会话不换代码"的直接表现。
+ * <p>{@code branch} 与 {@code headCommit} 是工作区的属性，而工作区挂在「用户 × 项目」上，
+ * 因此同一个人的几条会话会显示同一对值；这是"换会话不换代码"的直接结果。
+ * {@code firstMessage} 是历史列表的标题，取用户开口的第一句；还没说过话时为空。
  *
- * <h2>{@code firstMessage} 是"这是哪一条会话"</h2>
- * 历史列表拿它当每一行的标题：同一栏里列的是同一个人的会话，"谁在说"区分不了它们，
- * 而**用户开口的第一句**正是人自己记得住的那个开头。还没人说过话时为空。
+ * @param id           会话 id
+ * @param projectId    所属项目
+ * @param ownerId      会话所有者
+ * @param branch       工作区分支
+ * @param headCommit   工作区当前 HEAD
+ * @param state        会话状态
+ * @param turnIndex    对话位置
+ * @param model        当前模型配置
+ * @param firstMessage 用户第一句话；没有时为 null
  */
 public record SessionView(String id,
                           String projectId,
@@ -30,6 +34,12 @@ public record SessionView(String id,
                           Model model,
                           String firstMessage) {
 
+    /**
+     * @param session      会话
+     * @param workspace    会话所在工作区
+     * @param firstMessage 用户第一句话，可为 null
+     * @return 会话视图
+     */
     public static SessionView of(Session session, Workspace workspace, String firstMessage) {
         return new SessionView(
                 session.id().value(),
@@ -44,10 +54,14 @@ public record SessionView(String id,
     }
 
     /**
-     * 模型配置。**里面没有、也永远不该有密钥**——密钥不进入任何领域对象。
+     * 模型配置。绝不含密钥，密钥不进入任何领域对象。
      *
-     * <p>也没有请求地址：会话记的是"哪一家"，地址是那一家的属性（见 {@code Providers}）。
-     * 前端拿地址没用（请求不由它发），而露出来只会让人以为那是可以改的。
+     * <p>也没有请求地址：会话记的是"哪一家"，地址是那家的属性（见 {@code Providers}）；
+     * 请求不由前端发，地址对它没有用途。
+     *
+     * @param provider     供应商 id
+     * @param modelId      模型 id
+     * @param systemPrompt 平台写入的系统提示词
      */
     public record Model(String provider, String modelId, String systemPrompt) {
 

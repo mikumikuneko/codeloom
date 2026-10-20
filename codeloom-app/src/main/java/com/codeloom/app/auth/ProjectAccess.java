@@ -13,22 +13,13 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
- * 「这个人能不能碰这个东西」。所有资源端点都从这里过一遍。
+ * 资源访问判定：这个人能不能碰这个东西。所有资源端点都从这里过一遍。
  *
- * <h2>不是成员时返回 404，而不是 403</h2>
- * 这是刻意的。403 等于告诉对方"**这个东西存在**，只是不给你看" ——
- * 拿一批 id 挨个试一遍，就能把系统里有哪些项目、哪些会话枚举出来。
- * 项目 id 是 UUID、猜不到，但这不构成理由：能枚举和不能枚举是性质上的差别。
- *
- * <p>所以对"不是我的东西"一律装作不存在。
- *
- * <h2>但成员访问别人的会话，返回的是 403</h2>
- * 因为那时候"这东西存在"是**他已经知道的事实**（他就在这个项目里，
- * 会话列表他也看得到）。这时候还装不存在只会让人困惑，而 403 说的正是实情：
- * 你看得到，但这件事不归你做。
- *
- * <p>同一条规则在两种上下文里给出不同的码，判断依据是"对方本来知不知道它存在"，
- * 而不是"哪个码更常见"。
+ * <p>不是成员时返回 404 而不是 403：403 等于确认对象存在，拿一批 id 就能枚举出项目和
+ * 会话；对“不是我的东西”一律装作不存在。但成员访问别人的会话返回 403 —— 那时对象
+ * 存在是他已经知道的事实，装不存在只会让人困惑。判据是“对方本来知不知道它存在”，
+ * 不是哪个码更常见。见
+ * {@code docs/decisions/architecture/2026-09-26-authorization-404-before-403.md}。
  */
 @Component
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -43,7 +34,12 @@ public class ProjectAccess {
     }
 
     /**
-     * @throws ResponseStatusException 404：项目不存在，或者这个人不是它的成员 —— 两者不区分
+     * 取项目并确认这个人是它的成员。
+     *
+     * @param userId    当前用户
+     * @param projectId 项目
+     * @return 项目
+     * @throws ResponseStatusException 404：项目不存在，或这个人不是它的成员 —— 两者不区分
      */
     public Project requireMember(UserId userId, ProjectId projectId) {
         return projects.findById(projectId)
@@ -52,9 +48,12 @@ public class ProjectAccess {
     }
 
     /**
-     * 取一条会话，并确认这个人**看得见**它（是它所属项目的成员）。
+     * 取一条会话，并确认这个人看得见它（是它所属项目的成员）。
      *
-     * @throws ResponseStatusException 404：会话不存在，或者这个人不在它所属的项目里
+     * @param userId    当前用户
+     * @param sessionId 会话
+     * @return 会话
+     * @throws ResponseStatusException 404：会话不存在，或这个人不在它所属的项目里
      */
     public Session requireVisible(UserId userId, SessionId sessionId) {
         Session session = sessions.findById(sessionId).orElseThrow(() -> notFound("会话不存在"));
@@ -66,13 +65,15 @@ public class ProjectAccess {
     }
 
     /**
-     * 确认这个人能**驱动**这条会话 —— 看得出它，而且它是**他自己**的。
+     * 确认这个人能驱动这条会话：看得出它，而且它是他自己的。
      *
-     * <p>为什么驱动要更严：项目的模型是"每个人有自己的 agent 会话，另一方旁观"。
-     * 允许成员去驱动别人的会话，等于让 A 用自己的提示词去改 B 的工作区 ——
-     * 那既破坏"两个独立会话"这个前提，也让审计流里再也说不清"这轮是谁让它跑的"。
+     * <p>驱动必须比旁观更严：允许成员驱动别人的会话，等于让 A 用自己的提示词去改
+     * B 的工作区，既破坏“两个独立会话”这个前提，也让审计流说不清这轮是谁让它跑的。
      *
-     * @throws ResponseStatusException 403：看得见，但不是他的
+     * @param userId    当前用户
+     * @param sessionId 会话
+     * @return 会话
+     * @throws ResponseStatusException 404：他看不到这条会话；403：看得到，但不是他的
      */
     public Session requireDriver(UserId userId, SessionId sessionId) {
         Session session = requireVisible(userId, sessionId);

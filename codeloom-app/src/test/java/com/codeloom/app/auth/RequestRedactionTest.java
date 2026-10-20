@@ -6,17 +6,14 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 三个入参 record 都带着明文凭据，而 record 默认的 {@code toString} 会把字段原样打出来。
+ * 三个入参 record 都带明文凭据，而 record 默认的 {@code toString} 会把字段原样打出来。
  *
- * <p>测的不是文案，是"**没有任何一条日志路径能带出凭据**"这条约定 —— 撑着它的就是各自的
- * `toString()` 覆写。有人在日志里打一次请求对象，这条约定就得靠它们接住。
- *
- * <p>三处一起测，是因为它们是同一个病：漏掉任何一处，另外两处的覆盖就是自欺。
- * 理由写在 {@link ApiKeyController.ConfigureRequest#toString()} 上，另两处指过去。
+ * <p>测的不是文案，是“没有任何一条日志路径能带出凭据”这条约定；撑着它的是各自的
+ * {@code toString()} 覆写。三处一起测：漏掉任何一处，另外两处的覆盖就是自欺。
  */
 class RequestRedactionTest {
 
-    /** 和 `ApiKeyApiTest` 用同一串：一眼假，形状也不同于真 Key。 */
+    /** 和 {@code ApiKeyApiTest} 用同一串：一眼假，形状也不同于真 Key。 */
     private static final String KEY = "sk-example-key-not-a-real-credential";
     private static final String PASSWORD = "example-password-not-a-real-one";
 

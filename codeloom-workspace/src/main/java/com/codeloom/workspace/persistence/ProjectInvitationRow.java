@@ -7,11 +7,9 @@ import com.codeloom.domain.user.UserId;
 import java.time.Instant;
 
 /**
- * {@code project_invitation} 表的一行。
+ * {@code project_invitation} 表的一行：只有字段和两个方向的转换，没有逻辑。
  *
- * <p>和别的 Row 一样：只有字段和两个方向的转换，没有任何逻辑。
- * 「这张邀请还能不能用」不在这里判断 —— 那是领域对象的事（见
- * {@link ProjectInvitation#isUsableAt}），这一层只知道怎么把它搬进搬出。
+ * <p>"这张邀请还能不能用"由领域对象判断（见 {@link ProjectInvitation#isUsableAt}）。
  */
 public record ProjectInvitationRow(String token,
                                    String projectId,
@@ -22,7 +20,7 @@ public record ProjectInvitationRow(String token,
                                    Instant acceptedAt,
                                    Instant revokedAt) {
 
-    /** 查询用的列清单。理由同 {@code SessionRow.COLUMNS}：不用 {@code SELECT *}，且别名写死在 SQL 里。 */
+    /** 查询列清单：不用 {@code SELECT *}，别名写死，理由同 {@code SessionRow.COLUMNS}。 */
     static final String COLUMNS = """
             token, project_id AS projectId, created_by AS createdBy, created_at AS createdAt,
             expires_at AS expiresAt, accepted_by AS acceptedBy, accepted_at AS acceptedAt,
@@ -36,14 +34,13 @@ public record ProjectInvitationRow(String token,
                 invitation.createdBy().value(),
                 invitation.createdAt(),
                 invitation.expiresAt(),
-                // acceptedBy 和 acceptedAt 是一起有值/一起为空的（领域对象守着），
-                // 所以这里分开取包不会出现"只剩一半"的行
+                // acceptedBy 与 acceptedAt 由领域对象保证同时有值或同时为空
                 invitation.acceptedBy() == null ? null : invitation.acceptedBy().value(),
                 invitation.acceptedAt(),
                 invitation.revokedAt());
     }
 
-    /** 行 → 领域对象。不在这里做防御性校验，让它在紧凑构造器里炸，炸得越早越好。 */
+    /** 行 → 领域对象；不做防御性校验，直接由领域构造器拒绝脏数据。 */
     ProjectInvitation toDomain() {
         return new ProjectInvitation(
                 token,

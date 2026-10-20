@@ -15,30 +15,18 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 「退出项目」在库里要做的全部事情，**在一个事务里**。
+ * 退出项目时在库里要做的全部事情，在一个事务里完成。
  *
- * <h2>为什么是一个独立的 bean</h2>
- * 和 {@code SessionErasure} 同一条理由：{@code @Transactional} 只在**跨 bean 调用**时
- * 生效，自己调自己拿不到代理。给事务边界一个明确的落点，
- * 而不是散落在调用方那句"我记得要开事务"里。
+ * <p>拆成独立 bean 是因为 {@code @Transactional} 只在跨 bean 调用时生效，
+ * 与 {@code SessionErasure} 同理。
  *
- * <h2>顺序是这件事的一半，而且错了不会报错</h2>
- * <ol>
- *   <li><b>先清事件和幂等键 —— 它们都得赶在会话行被删之前。</b>
- *       这两条 SQL 靠 {@code session} 表定位"哪些行属于这个人"，
- *       会话行没了它们就匹配 0 行，而 <strong>DELETE 影响 0 行不报错</strong>：
- *       结果是那些行永远留在库里，且没有任何入口能发现。</li>
- *   <li><b>再删会话行。</b></li>
- *   <li><b>然后是"这个人自己的那棵树"</b>（库里那一行；磁盘上的目录由调用方
- *       在事务之后清，因为这一层够不到文件系统）。</li>
- *   <li><b>最后才是项目本身</b>：还有人就走"少一个成员"（房主可能易主），
- *       没人了就走真删除。</li>
- * </ol>
+ * <p>顺序是契约的一半，错了不会报错：事件和幂等键必须先删，它们靠 {@code session} 表
+ * 定位行，会话行删掉后只会匹配 0 行，而 DELETE 影响 0 行不报错，残留永远不会被发现。
+ * 然后删会话行、这个人的工作区行（磁盘目录由调用方在事务后清），最后处理项目本身：
+ * 还有人则只移除成员，没人则真正删除。
  *
- * <h2>聊天记录和邀请为什么不跟着人走</h2>
- * 它们挂在**项目**上，不是挂在这个人身上。他走了、项目还在的时候，
- * 留下的人照旧看得到之前聊过什么、还有哪些没用掉的邀请 —— 那些不属于离开的人。
- * 只有项目本身要消失（最后一个人退出）时，它们才一起走。
+ * <p>聊天记录和邀请挂在项目上而不是人上：项目还在时留下的人仍能看到；只有项目消失时
+ * 才一起删除。
  */
 @Component
 public class ProjectDeparture {
@@ -68,19 +56,20 @@ public class ProjectDeparture {
     }
 
     /**
-     * @return {@code true} = 他是这里最后一个人，**项目从此不存在了** ——
-     *         调用方还要去把仓库目录从磁盘上清掉（这件事必须等事务提交之后做）
+     * @param project 请求进入时读到的项目快照
+     * @param leaver  退出的人
+     * @return true 表示项目已不存在（他是最后一个人，或上一次退出已经删掉它），调用方
+     *         还要在事务提交后清掉磁盘上的仓库目录；false 表示项目仍在
      */
     @Transactional
     public boolean leave(Project project, UserId leaver) {
         ProjectId projectId = project.id();
 
-        // 参数里的 project 是请求进来时读到的快照，可能已经过期（比如对方也点了退出）。
-        // 先锁项目，再用锁定读拿**当前**成员；两个人都退出时，后到的那个必须看到
-        // 先到的已经走了，否则会把对方重新写回成员表。
+        // 入参快照可能已过期（对方也可能退出）。先锁项目再锁定读当前成员：
+        // 两个人都退出时，后到的必须看到先到的已经走了，否则会把对方写回成员表
         Project current = projects.lockAndFind(projectId).orElse(null);
 
-        // ★ 顺序不能动：这两条靠 session 表定位，必须在会话行被删之前跑
+        // 顺序不能动：这两条靠 session 表定位，必须在会话行被删之前跑
         events.byProjectAndOwner(projectId, leaver);
         requests.discardByProjectAndOwner(projectId, leaver);
         sessions.discardByProjectAndOwner(projectId, leaver);
@@ -89,7 +78,8 @@ public class ProjectDeparture {
 
         if (current == null || !current.hasMember(leaver)) {
             // 项目已经没了（上一次退出删掉了），或者这个人已经走了。
-            // 个人数据已经清过；返回 true 让调用方继续清仓库目录，重复删除是幂等的。
+            // 个人数据已经清过；只有项目真的没了才返回 true —— 调用方据此清仓库目录，
+            // 重复删除是幂等的。人已经走了但项目还在时返回 false，不能动共享的仓库。
             return current == null;
         }
 

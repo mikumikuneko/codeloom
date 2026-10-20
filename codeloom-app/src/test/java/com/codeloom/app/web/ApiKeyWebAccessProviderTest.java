@@ -18,10 +18,10 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 联网能力的门控：**哪一家、有没有密钥**。
+ * 联网能力的门控：供应商必须是 DeepSeek，且该用户配置了密钥。
  *
- * <p>这两条是用户拍板的口径（见决策记录）：模型不是 DeepSeek 时不提供联网 ——
- * 否则用户以为在用别家，账单却落在 DeepSeek 账号上。
+ * <p>模型不是 DeepSeek 时不提供联网，否则用户以为在用别家，账单却落在 DeepSeek 账号上。
+ * 理由见 {@link ApiKeyWebAccessProvider}。
  */
 class ApiKeyWebAccessProviderTest {
 

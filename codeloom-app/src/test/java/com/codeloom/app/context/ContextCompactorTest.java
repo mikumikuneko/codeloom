@@ -33,11 +33,9 @@ import java.util.OptionalInt;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 压缩的**触发依据**：什么时候该压全靠那几个数，而它们一度是**系统性低估中文**的
- * （见 {@link ContextCompactor#estimatedTokens} 的注释）。这类错误不会报错，
- * 只会让压缩来得太晚 —— 所以必须钉住。
- *
- * <p>另外钉住那道"便宜的闸"：读数离水位还远时，这一轮**不该去读整条流**。
+ * 压缩的触发依据：那几个数决定什么时候压。按字符估算会系统性低估中文
+ * （见 {@link ContextCompactor#estimatedTokens}），这类错误不报错，只会让压缩来得太晚，
+ * 所以必须钉住。另钉住提前短路：读数离水位还远时不读整条流。
  */
 class ContextCompactorTest {
 
@@ -58,10 +56,8 @@ class ContextCompactorTest {
     @Test
     @DisplayName("【核心】DeepSeek 的压缩水位在 80 万，**不是四万多**")
     void deepseekCompactsAtEightyPercentOfAMillion() {
-        // 这一条钉的就是那个错：窗口常量一度是 64,000，而 DeepSeek 实际是 1,000,000，
-        // 于是压缩在 9% 的地方就触发了 —— 每压一次白花一次模型调用、作废一次 prompt 缓存。
-        // 80 万的出处是 deepseek-harness 的默认算式（窗口 × 0.8），
-        // 窗口本身的出处是实测 + 官方文档
+        // 窗口常量写成 64,000 会让压缩在 9% 触发，每压一次白花一次调用、作废一次缓存。
+        // 80 万来自窗口 × 0.8；窗口本身以实测和官方文档为准。
         assertThat(ContextCompactor.fullThreshold(session("deepseek-flash")))
                 .isEqualTo(800_000);
         // 旧名走的是同一个模型，水位必须一样
@@ -72,24 +68,21 @@ class ContextCompactorTest {
     @Test
     @DisplayName("认不出的模型退回保守默认，而且**水位仍然是个正数**")
     void unknownModelFallsBackToASaneThreshold() {
-        // deepseek-harness 那个"离上限至少留 65,536"的余量是照 1M 定的；照搬到 64k 的窗口上
-        // 会算出负数 —— 而那意味着"该不该压"永远为真，每一轮都在压，比原来的毛病更糟。
-        // 所以余量按窗口封顶（最多四分之一）
+        // 65,536 的余量是照 1M 窗口定的；照搬到 64k 窗口会算出负数，导致每轮都压。
+        // 所以余量按窗口封顶（最多四分之一）。
         int threshold = ContextCompactor.fullThreshold(session("some-local-model"));
 
-        // 64k − 4,096 − 16,000（那个 4,096 现在是**认不出的模型的默认输出上限**，
-        // 从 ModelCapabilities 来 —— 它从前是会话上的 maxTokens，已经挪走了）
+        // 64k − 4,096（认不出的模型的默认输出上限）− 16,000（64k 的四分之一）。
         assertThat(threshold).isEqualTo(43_904);
         assertThat(threshold).isLessThan(64_000);      // 低于窗口
-        assertThat(threshold).isGreaterThan(0);        // 而且是正数 —— 这才是那条守卫的意义
+        assertThat(threshold).isGreaterThan(0);        // 正数 —— 这才是那条守卫的意义
     }
 
     @Test
     @DisplayName("【核心】真实读数比估算大时，**用真实读数** —— 这正是中文会话的样子")
     void measuredReadingWinsOverTheCharacterEstimate() {
-        // 两个汉字的历史：按"四字符一 token"估出来是 0（2/4 取整），
-        // 而服务商上一次亲口说这份上下文是 5,000。真实的中文会话就是这个形状：
-        // 估算低得离谱，真值才是对的
+        // 两个汉字按“四字符一 token”估出来是 0，而服务商上次报的是 5,000。
+        // 真实中文会话就是这个形状：估算低得离谱，真值才对。
         List<StoredEvent> history = withEvents(
                 new UserMessage("你好"),
                 usage(5_000, 64_000));
@@ -100,15 +93,15 @@ class ContextCompactorTest {
     @Test
     @DisplayName("估算比真实读数大时用估算 —— 宁可早压，不能晚压")
     void characterEstimateWinsWhenItIsLarger() {
-        // 一段纯 ASCII：这时候"四字符一 token"是准的甚至偏高，
-        // 而那个真实读数（200）明显偏小。取大的，才是安全的那一边
+        // 纯 ASCII 下“四字符一 token”是准的甚至偏高，而真实读数 200 明显偏小；
+        // 取大的才是安全的那一边。
         List<StoredEvent> history = withEvents(
                 new UserMessage("x".repeat(4_000)),
                 usage(200, 64_000));
 
-        // 4,000 个字符 + 投影追加的 64 字符平台时钟，按"四字符一 token"是 1,016。
-        // 时钟现在住在投影里（见 MessageFold 的 UserMessage 分支），估算看到的是
-        // 实际要发给模型的那段文本，不是原始正文
+        // 4,000 字符加投影追加的 64 字符平台时钟，按四字符一 token 是 1,016。
+        // 时钟住在投影里（见 MessageFold 的 UserMessage 分支），估算看到的是实际
+        // 要发给模型的那段文本，不是原始正文。
         assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(1_016);
     }
 
@@ -117,16 +110,15 @@ class ContextCompactorTest {
     void fallsBackToTheEstimateBeforeAnyReadingExists() {
         List<StoredEvent> history = withEvents(new UserMessage("x".repeat(400)));
 
-        // 同上：400 字符正文 + 64 字符时钟 = 464，按四字符一 token 是 116
+        // 400 字符正文加 64 字符时钟等于 464，按四字符一 token 是 116。
         assertThat(compactorOver(null).estimatedTokens(history, SESSION_ROW)).isEqualTo(116);
     }
 
     @Test
     @DisplayName("跳过没有读数的用量事件，继续往前找 —— 那种轮次是常态，不是异常")
     void skipsUsageEventsWithoutAReading() {
-        // 中间那一轮被取消了（或者压根没调过模型），它落下的用量事件里**没有读数**
-        // （那一对是 null，不是 0）。只看最后一条的话就什么也拿不到，
-        // 白丢一个本来能用的下界
+        // 中间那一轮被取消或没调过模型，用量事件里没有读数（是 null，不是 0）。
+        // 只看最后一条会白丢一个本来能用的下界。
         List<StoredEvent> history = withEvents(
                 new UserMessage("你好"),
                 usage(12_345, 64_000),
@@ -139,8 +131,7 @@ class ContextCompactorTest {
     @Test
     @DisplayName("在加这个字段之前落的旧用量事件也不算数 —— 它们没有读数")
     void ignoresLegacyUsageEvents() {
-        // 旧行里那两个键压根不存在，反序列化出来是 null（不是 0）——
-        // 「上下文是 0」不可能发生，所以 0 只能当暗号用，而暗号是这里刻意不要的东西
+        // 旧行里没有那两个键，反序列化出来是 null 而不是 0。这里刻意不用 0 当哨兵。
         List<StoredEvent> history = withEvents(
                 new UserMessage("你好"),
                 withoutReading());
@@ -151,9 +142,8 @@ class ContextCompactorTest {
     @Test
     @DisplayName("【摘要输入】别人捎来的留言，装给摘要模型时带着**真名**")
     void theSummaryInputCarriesRealNamesOnNotes() {
-        // 摘要一旦落下去就顶替整段历史，所以它怎么写"这是谁的请求"会一直留在后续每一次
-        // 调用里。压缩器从前用的是一份**没有查名字那一层**的装配器，于是摘要里只会写
-        // "协作者" —— 这件事不报错，也没有任何地方会提醒
+        // 摘要会顶替整段历史，所以“这是谁的请求”会留在后续每次调用里。
+        // 用了不带名字查询的装配器时，摘要只会写“协作者”，而且不报错。
         List<StoredEvent> history = withEvents(
                 new UserMessage("先看 README"),
                 new AgentNoteDelivered(SessionId.generate(), UserId.of("u-li"),
@@ -167,14 +157,13 @@ class ContextCompactorTest {
     }
 
     // ------------------------------------------------------------------
-    // 那道便宜的闸
+    // 提前短路
 
     @Test
     @DisplayName("【那道闸判不反】压缩点之前只落状态事件，所以'只看读数'与'取大者'同判")
     void theCheapGateAgreesWithTheFullEstimateAtTheCompactionPoint() {
-        // 压缩点之前会发生什么，见 TurnExecutor.runOnce：上一轮收尾落一条带读数的用量事件，
-        // 这一轮先落两条状态变更（重试回 IDLE、进 THINKING），才轮到压缩。
-        // 状态变更**不进上下文** —— 所以取大者拿到的仍然是那个读数，短路与老路是同一个答案
+        // 压缩点之前，上一轮收尾落一条带读数的用量事件，这一轮先落两条状态变更。
+        // 状态变更不进上下文，所以取大者仍是那个读数，短路与老路答案相同。
         List<StoredEvent> history = withEvents(
                 new UserMessage("第一句"),
                 usage(700_000, 1_000_000),
@@ -227,14 +216,14 @@ class ContextCompactorTest {
 
     // ------------------------------------------------------------------
 
-    /** 压缩器；**写入器给 null** —— 这几个用例都停在"要不要压"那一步，到不了写入。 */
-    /** 不要名字的那份：这些用例里没有留言，名字对它们一个字都不影响。 */
+    /** 不要名字的那份：这些用例里没有留言，名字对它们没有影响。 */
     private static final ContextAssembler NAMELESS = new ContextAssembler(userId -> null);
 
-    /** 查得到名字的那份 —— 生产上装配的就是它（见 {@code ContextAssemblyConfig}）。 */
+    /** 查得到名字的那份，生产上装配的就是它（见 {@code ContextAssemblyConfig}）。 */
     private static final ContextAssembler NAMED = new ContextAssembler(
             id -> id.equals(UserId.of("u-li")) ? "小李" : null);
 
+    /** 压缩器；写入器给 null —— 这几个用例都停在“要不要压”那一步，到不了写入。 */
     private static ContextCompactor compactorOver(EventStore store) {
         return compactorOver(store, NAMELESS);
     }
@@ -243,7 +232,7 @@ class ContextCompactorTest {
         return new ContextCompactor(store, NO_CLIENTS, null, assembler);
     }
 
-    /** 只在内存里、并且**记账**的事件表 —— 这条测试要断言的正是"读了几次"。 */
+    /** 只在内存里、并且记账的事件表；这条测试要断言的正是读了几次。 */
     private static final class RecordingStore implements EventStore {
 
         private final OptionalInt reading;
@@ -286,7 +275,7 @@ class ContextCompactorTest {
         return new TurnTokensUsed(100, 20, 0, 0, contextTokens, contextWindow, "deepseek-flash");
     }
 
-    /** 一次**没有读数**的结算：这一轮一次模型都没调成（被取消、或者服务商没报用量）。 */
+    /** 一次没有读数的结算：这一轮一次模型都没调成（被取消，或服务商没报用量）。 */
     private static TurnTokensUsed withoutReading() {
         return new TurnTokensUsed(100, 20, 0, 0, null, null, "deepseek-flash");
     }

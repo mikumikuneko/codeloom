@@ -18,78 +18,52 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * 把会话的事件流**投影**成给模型的消息列表。
+ * 把会话的事件流投影成发给模型的消息列表。
  *
- * <h2>这个类产出的就是"存事实、看投影"里那个投影</h2>
- * 存的是事件（当时发生了什么），这里产出的是消息数组（这次调用要发什么）。
- * 同一份事件流可以投影出多种视图，这是其中最重要的一种。
+ * <p>投影必须是确定性的：同一份事件流在任何时刻装配出的消息逐字符相同，否则模型服务商的
+ * 前缀缓存会失效。因此它不读当前时间（时钟取事件自带的 {@code occurredAt}）、不用随机数；
+ * 事件通常只向尾部追加消息；压缩、清理旧工具结果和回滚会改写已经投出去的消息，
+ * 审批答复也会在原地替换占位工具消息。
  *
- * <h2>为什么必须是确定性投影</h2>
- * 模型服务商的 prompt 缓存是**前缀匹配**的，命中价比未命中低得多。
- * 所以同一个事件流必须投影出**逐字符相同**的消息前缀 —— 这是纯函数，
- * 不依赖**当前**时间（时钟取事件自带的 {@code occurredAt}）、不依赖随机数、
- * 不做任何"看起来更聪明"的润色。
- *
- * <p>推论：事件**只往尾部追加消息**（三种会回头改已有消息的事件除外，见下）——
- * 这条性质是上面那个缓存便宜的全部来源，动它之前先想清楚代价。
- *
- * <h2>这一块由两个类分担</h2>
- * {@link Projection} 是**跨轮往前推进**的那条；它把"折一遍"交给 {@link MessageFold}
- *（把一批事件变成消息，时钟和任务清单也在那里投影成消息）。
- * 本文件只放门面和那条可推进的投影。
- *
- * <h2>不在上下文里的事件</h2>
- * 状态变化、checkpoint、验证结论这些都不进上下文 —— 它们要么是
- * 派生的（验证结论来自工具结果）、要么是给审计看的（checkpoint），模型不需要知道。
- * 但它们**都要落库**，只是投影时不选它们而已。
+ * <p>{@link Projection} 负责跨轮推进，{@link MessageFold} 负责把一批事件折成消息。
+ * 状态变化、checkpoint、验证结论和用量等事件不进上下文，但仍然要落库。
  */
 public final class ContextAssembler {
 
     /**
-     * 按 id 查用户名。
-     *
-     * <h2>投影里唯一需要它的地方</h2>
-     * 别人捎来的留言 —— 消息格式里没有"第三方"这个角色，它只能以 user 的身份出现，
-     * 所以必须标明来源（那句由 {@link MessageFold} 拼）。
-     *
-     * <p>**它是"读的时候查"的，不是写的时候抄下来的**：用户名会变，而事件里只记 id
-     *（见 {@code AgentNoteDelivered}）。查不到时的兜底话由 {@link MessageFold#senderOf}
-     * 负责 —— 宁可说"协作者"，也不编一个名字。
-     *
-     * <p>查出来的名字**会被折进那条消息**，之后就不动了：折好的前缀必须逐字节稳定
-     *（见类注释），不能每轮重算。所以改过用户名之后，模型看到的仍是当时的那个名字；
-     * 而**界面**不受这个约束 —— 它每次渲染都按 id 现查，显示的是现在的名字。
+     * 按 id 查用户名。只在投影别人捎来的留言时调用；增量推进不会重算已折进消息的名字，
+     * 但整条流重建时会按当时用户名重新折入。查不到时由 {@code MessageFold} 用「协作者」兜底。
      */
     private final Function<UserId, String> displayNameOf;
 
     /**
-     * <p><b>这一层必须由调用方给出来</b>（没有"默认不带名字"的构造）：装配出来的东西
-     * 就是发给模型的那份输入，而"这句话是谁说的"在里面是**承重**的 ——
-     * 一个悄悄漏掉这一层的装配器不会报错，只会让模型分不清自己用户的要求和别人的留言。
-     * 不要名字的地方就明写 {@code id -> null}（那时{@code MessageFold} 会回退成"协作者"）。
+     * @param displayNameOf 按 id 查用户名；不要名字的调用方明写 {@code id -> null}。
+     *                      没有默认缺省：漏掉这一层不会报错，只会让模型分不清用户和协作者
      */
     public ContextAssembler(Function<UserId, String> displayNameOf) {
         this.displayNameOf = Objects.requireNonNull(displayNameOf, "displayNameOf");
     }
 
     /**
+     * 把整条事件流装配成消息列表。
+     *
      * @param events       按 seq 升序的完整事件流
-     * @param systemPrompt 会话级系统提示词。**里面不能放每次都变的内容**
-     *                     （比如当前时间戳），否则每一轮都会缓存未命中
+     * @param systemPrompt 会话级系统提示词；不能放每次都变的内容（如当前时间戳），否则每轮缓存未命中
+     * @return 不可变的消息列表
      */
     public List<LlmMessage> assemble(List<StoredEvent> events, String systemPrompt) {
         List<LlmMessage> messages = new ArrayList<>();
         assembleInto(events, systemPrompt, messages);
-        // 复制一份再交出去 —— 返回值不可变是这个类的契约
+        // 返回值不可变是这个类的契约
         return List.copyOf(messages);
     }
 
     /**
-     * 装进调用方给的 list。
+     * 把整条事件流装进调用方给的列表，先清空该列表。
      *
-     * <p>它就是"开一条新投影、把整条流喂进去"（见 {@link #projection}），
-     * 所以只读一次历史的调用方走这条路，热路径走可推进的那条 —— **两条路是同一份代码**，
-     * 不会各写一遍然后慢慢分叉。
+     * @param events       按 seq 升序的完整事件流
+     * @param systemPrompt 会话级系统提示词
+     * @param messages     输出列表
      */
     public void assembleInto(List<StoredEvent> events, String systemPrompt,
                              List<LlmMessage> messages) {
@@ -97,47 +71,41 @@ public final class ContextAssembler {
     }
 
     /**
-     * 开一条**可以往前推进**的投影。
+     * 开一条可以跨轮推进的投影：只折 seq 比上次大的事件，已经投出的消息留在内存里。
      *
-     * <p>一轮里模型循环每迭代一次都要重新装配一遍上下文，而每次从头投影整条流＝把前面的活重做一遍
-     *（一轮最多 25 次）—— 会话越长这份白工越大，而它付在"模型下一步该看什么"这条最要紧的路上。
-     * 所以推进的投影只处理**新到的**事件，内存里留着已经投出来的消息和那几张表。
+     * <p>压缩、清理旧工具结果和回滚会改写已投出的消息，无法增量折叠；遇到它们时从整条流重建。
+     * 审批答复替换占位工具消息不在此列，它可以在原地增量处理。
+     * 推进的坐标是 seq，不是“第几条”。
      *
-     * <p>**三种事件会回头改已经投出去的消息**（压缩把前缀换成摘要、清理旧工具结果把正文换掉、
-     * 回滚砍掉尾部）—— 靠"只接着处理新到的事件"补不上，只能推倒重来。
-     * 它们都很罕见，所以"重来"不心疼，"猜错了却看起来对"才心疼。
-     *
-     * <p>推进的判据是 **seq**（不是"第几条"）：调用方给的是同一条不断变长的流，
-     * 而 seq 是它唯一稳定的坐标。
+     * @param systemPrompt 会话级系统提示词
+     * @return 新投影
      */
     public Projection projection(String systemPrompt) {
         return new Projection(systemPrompt, displayNameOf, null);
     }
 
     /**
-     * 同上，另给它一条**重新取到整条流**的路。
+     * 同上，并给重建时取整条流的入口。分页喂事件的调用方必须用它：重建时需要整条流，
+     * 手里那片会让前面的事件静默消失。见 {@link Projection#fold}。
      *
-     * <p>给"分页喂"的调用方用：那种调用方每次只递一片，而投影遇到改写类事件要推倒重来时，
-     * 需要的是**整条流**而不是那一片 —— 没这条来源，它就只能拿那一片凑，
-     * 结果是前面那一整段静默消失。见 {@link Projection#fold}。
-     *
-     * @param wholeStream 取当前整条事件流。**每次重来都会调一次**，所以它得是"去读最新的"，
-     *                    不是一份事先拍下来的快照
+     * @param systemPrompt 会话级系统提示词
+     * @param wholeStream  每次重建调用一次，必须返回当时最新的整条流，而不是事先拍下的快照
+     * @return 新投影
      */
     public Projection projection(String systemPrompt, Supplier<List<StoredEvent>> wholeStream) {
         return new Projection(systemPrompt, displayNameOf,
                 Objects.requireNonNull(wholeStream, "wholeStream"));
     }
 
-    /** UTF-16 下一个字符最多占的字节数。见 {@code Projection#approximateSizeBytes}。 */
+    /** UTF-16 字符按最坏情况占 2 字节，用于内存占用上界。 */
     private static final int BYTES_PER_CHAR_WORST_CASE = 2;
 
     /**
-     * 一串消息的字符量：**正文 + 工具调用的参数**。
+     * 一串消息的字符量：正文加工具调用参数。压缩按 token、内存淘汰按字节，
+     * 但两边统计的字段集合以这里为唯一口径。
      *
-     * <p>这两样是投影里唯一会长的部分，也是真正会发给模型的部分。压缩那边按 token 估算、
-     * 内存淘汰那边按字节估算 —— 单位不同，但**数哪些字段必须只有一个答案**，
-     * 否则同一条对话在两处的"大小"会不一样，而两处都很像对的。
+     * @param messages 要统计的消息
+     * @return 字符数
      */
     public static long charactersOf(List<LlmMessage> messages) {
         long chars = 0;
@@ -157,39 +125,27 @@ public final class ContextAssembler {
 
         private final String systemPrompt;
 
-        /** 见 {@link ContextAssembler#displayNameOf} —— 投影是静态嵌套类，所以这里各持一份。 */
+        /** 与 {@link ContextAssembler#displayNameOf} 相同；静态嵌套类各持一份引用。 */
         private final Function<UserId, String> displayNameOf;
 
-        /**
-         * 推倒重来时去哪取**整条流**。null 表示调用方保证递进来的每次都是整条流（或它的前缀）——
-         * 一次装配整条流的调用方就是这样，它们不用给。
-         */
+        /** 重建时取整条流的来源；null 表示调用方保证每次递进来的都是整条流或它的前缀。 */
         private final Supplier<List<StoredEvent>> wholeStream;
-        /** 已经处理过的事件里最大的那个 seq。0 = 一条都还没处理（seq 从 1 开始，见 EventEnvelope）。 */
+        /** 已处理事件的最大 seq；0 = 尚未处理（seq 从 1 开始，见 {@code EventEnvelope}）。 */
         private long foldedUpTo;
-        /** 把事件折成消息的那一个。推倒重来时会换一个新的（见 {@link #begin}）。 */
+        /** 把事件折成消息；重建时替换为新实例（见 {@link #begin}）。 */
         private MessageFold messageFold;
-        /** 投影的产出：交给模型的那串消息。**只往尾部追加** —— 前缀逐字节不变是缓存的前提（见类注释）。 */
+        /** 投影产出，只向尾部追加；前缀逐字节不变是前缀缓存的前提。 */
         private final List<LlmMessage> messages = new ArrayList<>();
-        /**
-         * 压缩的水位线：**序号不超过它的事件不再投影** —— 它们已经被摘要替换掉了
-         * （见 {@code ContextCompacted}）。0 = 没压过。
-         */
+        /** 压缩水位线：seq 不超过它的事件已被摘要替换，不再投影；0 = 未压缩。 */
         private long watermark;
-        /** 这条对话里 {@code read_file} 读过哪些文件（工作区相对路径），见 {@link #readPaths()}。 */
+        /** 这条对话里 {@code read_file} 读过哪些文件，见 {@link #readPaths()}。 */
         private final ReadPathTracker reads = new ReadPathTracker();
-        /** 尾部那次批准了、但还没补跑的调用，见 {@link #pendingApprovedCall()}。 */
+        /** 尾部那次已批准、但还没补跑的调用，见 {@link #pendingApprovedCall()}。 */
         private final PendingCallTracker approvals = new PendingCallTracker();
 
         /**
-         * 上面那几份事实的**全部**。
-         *
-         * <p>它存在的理由只有一条：**"全部"只写在这里** —— 折事件时遍历它、推倒重来时也
-         * 遍历它，于是那两份动作不可能漏掉某一份。一个一个点名（先前那种写法）迟早会有人
-         * 添了一份、却只更新了这两处之一，**而那不会报错** —— 只会让它带着被退掉的那段
-         * 时间的痕迹活下来。
-         *
-         * <p>顺序无所谓：几份事实之间没有依赖，各自看各自的事件。
+         * 全部派生事实。折事件与重建都只遍历这一份清单，新增一份事实时不会漏掉其中一处；
+         * 各事实之间没有依赖，顺序无关。
          */
         private final List<Derived> derived = List.of(reads, approvals);
 
@@ -201,58 +157,50 @@ public final class ContextAssembler {
         }
 
         /**
-         * 投影**已经处理过的最后一条事件**在流里的序号（0 = 一条都还没处理）。
+         * 投影已处理事件的最大 seq；0 = 尚未处理。自己给事件编号的调用方（单测、批处理）
+         * 必须从这里接着编，否则新事件会被 {@link #fold(List)} 当成旧的跳过。
+         * 它表示“喂到哪儿了”，不产出消息的事件也算处理过。
          *
-         * <p>给"自己给事件编号"的调用方用（没有 appender 的场合：单测、批处理）。
-         * 得从这儿接着往下编：从 1 重新编的话，新事件的序号会落在已经处理过的范围里，
-         * 被 {@link #fold(List)} 当成旧的跳过 —— 表现是模型看不见这一轮刚发生的事。
-         *
-         * <p>这是"**喂到哪儿了**"，不是"产出到哪儿了"：不产出消息的事件（压缩水位线之前的那些）
-         * 也算处理过。
+         * @return 已处理的最大 seq
          */
         public long foldedUpTo() {
             return foldedUpTo;
         }
 
         /**
-         * 这串消息**大致**占多少字节 —— 只给"这张表最多占多少内存"画个界用，不求精确。
+         * 这串消息大致占多少字节，用于给内存占用画上界，不求精确。按每字符 2 字节的最坏情况估算：
+         * 高估只会导致早淘汰一次，低估会让内存没有边界。
          *
-         * <p>字符量由 {@link #charactersOf} 统一数：内存淘汰按字节、压缩按 token，
-         * 但"数哪些字段"必须是同一个集合（正文 + 工具参数）。
-         *
-         * <p>算正文与工具参数：它们是投影里唯一会长的部分。
-         *
-         * <p>**按最坏情况算**（一个字符两个字节）：中文在内存里就是两字节，
-         * 而这是个上界 —— 宁可高估。高估的后果是早淘汰一次，低估的后果是内存没有边界。
+         * @return 字节数上界
          */
         public long approximateSizeBytes() {
             return charactersOf(messages) * BYTES_PER_CHAR_WORST_CASE;
         }
 
         /**
-         * 这条对话里读过哪些文件（工作区相对路径）。
+         * 这条对话里读过哪些文件（工作区相对路径）。它是“读过才许覆盖”那道门的输入。
          *
-         * <p>"读过才许覆盖"这条规则就是拿它重建的，见 {@link ReadPathTracker}。
+         * @return 工作区相对路径集合
          */
         public Set<String> readPaths() {
             return reads.paths();
         }
 
         /**
-         * 上一轮里**批准了、但还没补跑**的那次调用。
-         *
-         * <p>它就是"挂起等人批 → 用户点了批准 → 进程在那之后退出了"那条路的入口。
+         * 上一轮里已批准、但还没补跑的那次调用；没有就是空。
          * 判据见 {@link PendingCallTracker}。
+         *
+         * @return 待补跑的调用
          */
         public Optional<ToolCall> pendingApprovedCall() {
             return approvals.pendingApprovedCall();
         }
 
         /**
-         * 把事件折到流的末尾，然后把当前的上下文交给 {@code sink}。
+         * 折入新事件，把当前上下文写进 {@code sink}（先清空）。
          *
-         * <p>{@code events} 是**同一条不断变长的流**（调用方每轮往里追加），
-         * 这里只折 seq 比上次大的那些。
+         * @param events 同一条不断变长的事件流；只处理 seq 比上次大的
+         * @param sink   输出列表
          */
         public void advance(List<StoredEvent> events, List<LlmMessage> sink) {
             fold(events);
@@ -262,16 +210,13 @@ public final class ContextAssembler {
         }
 
         /**
-         * 只把新事件折进来，**不要**当前上下文。
+         * 只折入新事件，不交出当前上下文；之后要发给模型时再调用 {@link #advance}。
          *
-         * <p>给"养着一条跨轮投影"的调用方用：它每轮只需要让投影追上库里最新的一条，
-         * 上下文等真要发给模型时再 {@link #advance} 要。
+         * <p>{@code events} 可以只是一片。遇到改写类事件需要重建时，有整条流来源就用来源重新取，
+         * 没有就只能在 {@code events} 上重建——后者只在“递进来的就是整条流”时成立。见
+         * {@code docs/decisions/bug-fix/2026-10-10-projection-rebuild-wants-the-whole-stream.md}。
          *
-         * <p>{@code events} **可以只是一片**（分页喂的调用方就是这么喂的）—— 但遇到
-         * 改写类事件要推倒重来时，重来要的是**整条流**，所以那时会用构造时给的那条来源
-         * 重新取一遍（见 {@link ContextAssembler#projection(String, Supplier)}）。
-         * 没给来源的调用方只能在 {@code events} 上重来：那**只在"递进来的就是整条流"时**
-         * 才成立。
+         * @param events 新事件，或分页递进来的一片
          */
         public void fold(List<StoredEvent> events) {
             List<StoredEvent> fresh = new ArrayList<>();
@@ -280,38 +225,35 @@ public final class ContextAssembler {
                     fresh.add(stored);
                 }
             }
+            List<StoredEvent> baseline = null;
             if (rewritesHistory(fresh)) {
                 startOver();
-                // ★ 重来就是**整条流**再来一遍，不是"接着折新来的那批" ——
-                // 只折新的等于把前面全丢了。
-                //
-                // 而分页喂时递进来的这一片**不是整条流**：拿它当整条流，前面那一整段会静默消失
-                //（实测：601 条事件里前 500 条直接没了），所以要回去问那条来源
-                fresh = wholeStream != null ? wholeStream.get() : events;
+                // 重建必须重折整条流；分页递进来的这一片不是整条流，直接拿它会静默丢掉前面的段。
+                baseline = wholeStream != null ? wholeStream.get() : events;
+                fresh = baseline;
             }
             if (messageFold == null) {
-                begin(events);
+                // 重建时必须拿整条流（baseline）；第一次建立投影时先把递进来的这一段当起点，
+                // 后续遇到压缩/清理会再触发重建，那时才向 wholeStream 要全量
+                begin(baseline != null ? baseline : events);
             }
 
             for (StoredEvent stored : fresh) {
-                // 派生事实看**所有**事件；而回滚管得着，那由它们各自消化（见 Derived）
+                // 派生事实接收所有事件，回滚由各自消化（见 Derived）。
                 for (Derived fact : derived) {
                     fact.accept(stored);
                 }
-                // 水位线之前的清单**不在这里折**：begin 已经把最新那份带到摘要之后，
-                // 更早的由摘要代表。水位线之后的照常追加。
+                // 水位线之前的清单不在这里折：begin 已把最新那份带到摘要之后，更早的由摘要代表。
                 if (stored.seq() > watermark) {
                     messageFold.accept(stored);
                 }
                 foldedUpTo = stored.seq();
             }
             messageFold.flush();
-            // 收尾必做：把「请求了却没有结果」的调用配对上，见 closeOpenCalls。
-            // 它幂等：第二次调用时 openCallIds 已经空了
             messageFold.closeOpenCalls();
         }
 
-        /** 这三种事件回头改已经投出去的消息，增量折不出来，见 {@link #projection(String)}。 */
+        /** 压缩、清理旧工具结果和回滚会改写已投出的消息，无法增量折叠；审批答复的替换可以。 */
         private static boolean rewritesHistory(List<StoredEvent> fresh) {
             return fresh.stream().anyMatch(stored -> stored.event() instanceof ContextCompacted
                     || stored.event() instanceof ToolResultsCleared
@@ -319,11 +261,8 @@ public final class ContextAssembler {
         }
 
         /**
-         * 把投影退回"一条都还没处理"：清完之后下一个喂进来的必须是**整条流**
-         *（{@link #fold(List)} 就是这么用的 —— 清完立刻 {@link #begin(List)} 重建）。
-         *
-         * <p>那几份派生事实由 {@link #derived} 那一个遍历清掉：它们各自还留着上一次折的
-         * 结果，不清的话这次重折会在旧账上再记一遍。**一份都不能漏**，所以这里不点名。
+         * 把投影退回“一条都还没处理”。清完之后下一次喂进来的必须是整条流；
+         * {@link #fold(List)} 会在清完立刻重建。
          */
         private void startOver() {
             messages.clear();
@@ -334,33 +273,35 @@ public final class ContextAssembler {
         }
 
         /**
-         * 从头开始那一下：系统提示词、压缩摘要、水位线、正文被清过的调用集合
-         * 都在这一刻定下来。
+         * 从头建立投影：系统提示词、压缩摘要、水位线和正文被清过的调用集合在这里确定。
+         * 派生事实不在这里折，由 {@link #fold(List)} 统一遍历。
          *
-         * <p>派生状态（读过哪些文件、尾部那只事件）**不在这里**折：
-         * 由 {@link #fold(List)} 那趟遍历统一折，而且只有那一处 —— 走到这一支时，
-         * 那趟遍历手里的 {@code fresh} 就是整条流。
+         * @param events 整条事件流
          */
         private void begin(List<StoredEvent> events) {
             if (systemPrompt != null && !systemPrompt.isBlank()) {
                 messages.add(LlmMessage.system(systemPrompt));
             }
-            // 被清过正文的那些调用必须**在遍历之前**扫出来：清理事件排在它清的那些
-            // 结果**后面**，边遍历边应用就得回头改已经投影出去的消息
+            // 被清过正文的调用必须在遍历之前扫出：清理事件排在被清结果之后，边遍历边应用会回头改已投出的消息。
             messageFold = new MessageFold(messages, clearedCallIds(events), displayNameOf);
 
-            // 压到哪儿了决定"从哪个序号开始投影"，同样得在遍历之前定下来
+            // 压缩位置决定从哪个 seq 开始投影，同样必须在遍历之前确定。
             Compaction compaction = lastCompaction(events);
             if (compaction != null) {
                 messageFold.acceptSummary(compaction.summary());
                 watermark = compaction.droppedUpToSeq();
-                // 水位线之前的旧快照不再一份份搬过来 —— 它们已经被摘要代表了。
-                // 只把水位线前**最新**的那份带到摘要之后：计划还在，历史不堆。
+                // 水位线前的旧快照由摘要代表，只带最新一份到摘要之后。
                 latestTodoAtOrBefore(events, watermark).ifPresent(messageFold::accept);
             }
         }
 
-        /** 水位线之前（含）最后一份清单快照。压缩之后只带这一份，旧的由摘要代表。 */
+        /**
+         * 水位线之前（含）最后一份清单快照。
+         *
+         * @param events    事件流
+         * @param watermark 压缩水位线
+         * @return 最新一份清单快照；没有就是空
+         */
         private static Optional<StoredEvent> latestTodoAtOrBefore(List<StoredEvent> events, long watermark) {
             StoredEvent latest = null;
             for (StoredEvent stored : events) {
@@ -375,11 +316,10 @@ public final class ContextAssembler {
         }
 
         /**
-         * 从事件流里找出**最后一次**压缩。
+         * 从事件流里找出最后一次压缩。后一条的摘要已经涵盖前一次，用早期那条会丢掉后来的内容。
          *
-         * <p>取最后一条而不是第一条：压过两次的话，后一条的水位线更靠前、覆盖得更早，
-         * 而且它的摘要里已经把前一次的摘要一起总结进去了
-         * （见 {@link ContextCompacted} 的类注释）—— 用第一条会丢掉后来的那一段。
+         * @param events 事件流
+         * @return 最后一次压缩；没有就是 null
          */
         private static Compaction lastCompaction(List<StoredEvent> events) {
             Compaction latest = null;
@@ -394,7 +334,12 @@ public final class ContextAssembler {
         private record Compaction(long droppedUpToSeq, String summary) {
         }
 
-        /** 扫出所有被清过正文的调用 id。多个清理事件会累积到同一个集合里。 */
+        /**
+         * 扫出所有被清过正文的调用 id。
+         *
+         * @param events 事件流
+         * @return 调用 id 集合
+         */
         private static Set<String> clearedCallIds(List<StoredEvent> events) {
             Set<String> cleared = new HashSet<>();
             for (StoredEvent stored : events) {

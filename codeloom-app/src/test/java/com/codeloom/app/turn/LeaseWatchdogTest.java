@@ -18,11 +18,10 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 续约看门狗守的那条规则：**续不上就等于失去执行权** —— 无论那是"被拒"，
- * 还是"这次调用本身炸了"。
+ * 续约看门狗的规则：续不上就视为失去执行权，无论续约被拒还是调用本身抛异常。
  *
- * <p>后者一度没人接：异常从虚拟线程里冒出去、线程安静地死掉，而 {@code leaseLost} 永远是假 ——
- * 本轮于是"以为锁还在"照常跑完。
+ * <p>后者若不接住，异常会从虚拟线程冒出、线程静默死亡，而 {@code leaseLost} 永远为假，
+ * 本轮会以为锁还在并照常跑完。
  */
 class LeaseWatchdogTest {
 
@@ -61,7 +60,7 @@ class LeaseWatchdogTest {
         THROWS
     }
 
-    /** 续约间隔给得很短：这条测试要验的是**判定**，不是等待。 */
+    /** 续约间隔很短：这条测试验证判定，不验证等待。 */
     private static final class FakeLease implements ExecutionLease {
 
         private final Renewal behaviour;

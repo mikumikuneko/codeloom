@@ -8,30 +8,14 @@ import java.nio.file.Path;
 import java.util.Objects;
 
 /**
- * 工具执行时需要的一切。
+ * 工具执行所需的上下文。所有字段在真实调用路径上都有值，不提供省略审批判据或读账本的重载。
  *
- * <p>刻意把所有工具都要用的东西捆在一个对象里：以后要加新能力（比如"当前会话的
- * token 预算还剩多少"），只需要在这里加字段，不用改每个工具的签名。
- *
- * <h2>只有这一个构造器</h2>
- * 不提供"省掉判据 / 省掉读账本"的重载：审批判据和读账本在真实的调用路径上
- * **永远都有值**，为测试图方便而生的入口只会让人去猜"这个字段是不是可以不填"，
- * 而答案是不行。
- *
- * @param worktree      这条会话的隔离工作区。**所有文件操作都被限制在它里面**
- * @param commandExecutor 跑命令用的执行器（不可信路径，收的是模型写的那一行）
- * @param cancellation  取消信号
- * @param requiresApproval 这条命令需不需要人来批，**以及为什么要问**。收的是**整行命令**，
- *                         因为判据要看第一个词（名单）也要看后面的路径（树内树外），
- *                         还得先判断这行命令看不看得懂。**由调用方注入**：那个判据住在
- *                         workspace 模块，而 agent 模块刻意不依赖它 —— 判据只能从上面传下来，
- *                         不能让工具反向去拿。见 {@link CommandApproval}（为什么是理由而不是布尔）
- * @param reads            这条对话（会话）里读过哪些文件。见 {@link ReadLedger}。
- *                         **它是有状态的**（工具往里记一笔），而 {@code ToolContext} 每次
- *                         工具调用都新造一个 —— 所以账本身挂在调用方那里，这里只拿一个引用
- * @param web              联网能力。没有联网能力的会话拿到的是 {@link WebAccess#none()}
- *                         —— 那样的会话本来也拿不到联网工具（见 {@code ToolCatalog}），
- *                         所以这条路上走到它不是"没有能力"，是接线错了
+ * @param worktree         隔离工作区；文件类工具把路径限制在其中，run_command 交给执行器，不受路径守卫约束
+ * @param commandExecutor  命令执行器，接收模型写的整行命令
+ * @param cancellation     取消信号
+ * @param requiresApproval 整行命令的审批判据，返回需要批准的理由；由调用方注入
+ * @param reads            这条会话读过的文件；有状态，由调用方持有
+ * @param web              联网能力；无联网能力时为 {@link WebAccess#none()}
  */
 public record ToolContext(Path worktree,
                           CommandExecutor commandExecutor,

@@ -10,24 +10,19 @@ import org.springframework.stereotype.Component;
 import java.util.function.Consumer;
 
 /**
- * 一轮里那半截**正在长出来的**东西推给正在看的人：模型逐 token 吐出的正文和思考。
+ * 把一轮中正在生成的正文和思考推送给正在看的人。
  *
- * <p>{@link #liveListener} 只走易失通道。**已落库的事件不从这里走** ——
- * 它们由 {@link EventAnnouncer} 在事务提交之后宣布，那里也写着两条通道为什么必须分开
- * （一条丢了是数据丢失，一条丢了只是少刷一段字）。
- *
- * <h2>为什么从 TurnExecutor 里拿出来</h2>
- * 这段只碰一个依赖，和执行器的租约、状态机、提交没有半点共享状态。
+ * <p>{@link #liveListener} 只走易失通道；已落库的事件由 {@link EventAnnouncer} 在事务提交
+ * 后宣布（两条通道分开的理由见那里：一条丢了是数据丢失，一条丢了只是少刷一段字）。
+ * 独立出来是因为它只依赖一个组件，与执行器的租约、状态机、提交没有共享状态。
  */
 @Component
 public class TurnBroadcaster {
 
     /**
-     * 流式增量攒到这么多字符就推一次。
-     *
-     * <p>为什么是 64：一次发布是一次 Redis 往返 + 一次 JSON 编码，而这条回调跑在
-     * 读模型流的线程上；64 个字符约十几 token，等于把往返次数降到原来的十几分之一，
-     * 而前端每次拿到的是不到一行的文字 —— 看起来还是连续的。
+     * 流式增量攒到这么多字符推一次。发布是一次 Redis 往返加一次 JSON 编码，而回调跑在读取
+     * 模型流的线程上；64 字符约十几 token，把往返次数降到原来的十几分之一，前端拿到的仍是
+     * 不到一行的文字，看起来连续。
      */
     private static final int DELTA_FLUSH_CHARS = 64;
 
@@ -38,23 +33,18 @@ public class TurnBroadcaster {
     }
 
     /**
-     * 流式增量的去向：模型正在打字的那半截（正文和思考各走一路）。
+     * 流式增量的去向：模型正在生成的正文和思考，各走一路。
      *
-     * <p>只有**增量帧**走这条易失通道。工具调用的完成帧不进这里 ——
-     * 它随后会作为 {@code ToolCallRequested} 落库并走持久通道广播，
-     * 两条路都发的话客户端会看到两次。
+     * <p>只有增量帧走这条易失通道；工具调用的完成帧不进这里，它随后会作为
+     * {@code ToolCallRequested} 落库并走持久通道，两条都发会让客户端看到两次。
      *
-     * <h2>为什么要攒一下再发</h2>
-     * 这个回调是**在读模型那条流上同步执行**的，而每一次发布都是一次 Redis 往返。
-     * 逐 token 发的话，一段一千 token 的回复就是一千次往返，而且全部加在
-     * "读流"这条路径上 —— 那会拖慢消费本身，也就拖慢了整轮。
+     * <p>回调在读取模型流的线程上同步执行，每次发布都是一次 Redis 往返；逐 token 发会让
+     * 一段一千 token 的回复产生一千次往返，并拖慢读流本身。因此攒到
+     * {@value #DELTA_FLUSH_CHARS} 字符发一次，并在每条非增量帧之前把缓存推出去，
+     * 否则末尾半句会压到下一轮。粒度过小等于没省，过大则前端渲染一跳一跳。
      *
-     * <p>攒到 {@value #DELTA_FLUSH_CHARS} 个字符发一次，并且在每一条非增量帧之前
-     * 把攒着的推出去。粒度不能再小（等于没省），也不宜太大 ——
-     * 一帧就是前端一次渲染，太大看起来会一跳一跳的。
-     *
-     * @return 喂给 {@code AgentTurn} 构造器的那个回调。**一轮一个** ——
-     *         它内部的配额状态是按"一次模型调用"重置的，跨轮复用会算错
+     * @return 喂给 {@code AgentTurn} 的回调；一轮一个，因为内部配额按一次模型调用重置，
+     *         跨轮复用会算错
      */
     Consumer<StreamEvent> liveListener(SessionId sessionId) {
         LiveDeltas pending = new LiveDeltas();
@@ -73,24 +63,20 @@ public class TurnBroadcaster {
                 }
                 return;
             }
-            // 别的帧（一次模型调用结束、有工具调用要执行）之前把攒着的推出去 ——
-            // 不推的话，末尾那半句会一直压着等下一条增量，而那可能就是这一轮最后一句
+            // 其他帧（一次调用结束、要执行工具）之前先推出缓存：否则末尾半句会一直等到
+            // 下一条增量，而那可能已是本轮最后一句
             flushText(sessionId, pending);
             flushReasoning(sessionId, pending);
             if (streamEvent instanceof StreamEvent.Finished) {
-                // 一次调用结束，**思考的配额归零**：配额是每次调用的，不是整轮的。
-                // 一轮里可能调好几次模型（工具往返之间），每次都有自己的思考，
-                // 也各自会落成一条自己的 AssistantMessage
+                // 一次调用结束，思考配额归零：配额按每次调用计，一轮里可能有多次模型调用，
+                // 各自落成自己的 AssistantMessage
                 pending.reasoningPublished = 0;
             }
         };
     }
 
     /**
-     * 一轮里积攒着、还没推出去的流式增量。
-     *
-     * <p>正文和思考**各自一个缓冲区**：它们去的是界面上两个不同的区域，
-     * 混在一个 StringBuilder 里就没法分开发了。
+     * 一轮中积攒、尚未推送的流式增量。正文和思考各一个缓冲区，因为它们去界面上两个不同区域。
      */
     private static final class LiveDeltas {
 
@@ -98,14 +84,11 @@ public class TurnBroadcaster {
         private final StringBuilder reasoning = new StringBuilder();
 
         /**
-         * **本次模型调用**已经攒下的思考字符数。
+         * 本次模型调用已经攒下的思考字符数。到 {@link AgentTurn#MAX_REASONING_CHARS} 停止接收，
+         * 与落库截断同上限，避免"打字时看到三万字、刷新后只剩一万六"。
          *
-         * <p>到 {@link AgentTurn#MAX_REASONING_CHARS} 就不再收了。这和落库那边的截断是
-         * 同一个上限，为的是不出现"正在打字时看到三万字、刷新后只剩一万六"。
-         *
-         * <p>超限时**不多发一个"已截断"的标记**：这一轮结束后 {@code AssistantMessage}
-         * 会带着完整（且已截断）的思考到达，前端那时会用落库的版本替换掉流式的那份，
-         * 标记自然就出现了。在流里再补一次，反而多一条要维护的重复逻辑。
+         * <p>超限时不多发"已截断"标记：本轮结束后 {@code AssistantMessage} 会带完整且已截断的
+         * 思考到达，前端用落库版本替换流式版本时标记自然出现；在流里再补一次是重复逻辑。
          */
         private int reasoningPublished;
 

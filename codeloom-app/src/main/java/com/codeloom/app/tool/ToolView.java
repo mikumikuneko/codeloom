@@ -1,33 +1,24 @@
 package com.codeloom.app.tool;
 
 /**
- * 一个工具**声明**的样子，给界面用。
+ * 一个工具声明的呈现形状，给界面用。
  *
- * <p>它不是一个工具的"定义" —— 给模型看的定义在 {@code ToolDefinition}（名字、说明、
- * 参数 schema），那三样模型要，界面不要。界面要的是另外三样：用什么形状渲染、
- * 动作词叫什么、主语在参数里的哪一项。
+ * <p>这不是给模型看的定义（{@code ToolDefinition} 的名字、说明、参数 schema）；界面需要的
+ * 是渲染形状、动作词和主语参数。声明由工具自己给出，界面因此不需要认识具体工具名，
+ * 新增工具时也不会因为漏改前端而悄悄退化显示。
  *
- * <p>为什么界面不自己写一张按工具名查的表：那张表在**加第八个工具的那天不会跟着变**，
- * 而症状是"这条调用的显示退化了"，没人会想到是前端少了一行。
- * 声明由工具自己给出，界面就永远不用认识任何工具名。
+ * <p>null 字段在响应里缺席（全局配置
+ * {@code spring.jackson.default-property-inclusion: non_null}），所以"没有主语"表现为
+ * {@code subjectKey} 这一项不存在，而不是值为 null；前端必须按可选字段读取，
+ * 不能只判断 {@code === null}。
  *
- * @param name          工具名。界面拿它和事件里的 {@code toolName} 对上
- * @param shape         什么形状：{@code read} / {@code edit} / {@code search} /
- *                      {@code execute} / {@code plan} / {@code web} / {@code other}。
- *                      界面按它选组件 —— **闭集**，所以新增工具只要形状是已有的，
- *                      界面一行都不用改
- * @param label         动作词（读取 / 新建 / 修改 / 运行 / 查找 / 搜索 / 抓取）。界面直接显示它。
- *                      <b>没声明时这个字段在响应里是缺席的</b>（见下）
- * @param subjectKey    参数里哪一项是这次调用的主语；<b>没有主语时缺席</b>
- * @param subjectIsPath 主语是不是一个工作区里的路径 —— 界面拿它决定"能不能点开"。
- *                      它是基本类型，所以永远在场
- *
- *                      <h2>null 的字段在响应里是缺席的</h2>
- *                      这是全局约定（{@code spring.jackson.default-property-inclusion: non_null}），
- *                      整个 API 都这样。所以"这个工具没有主语"在线上是**这一项不存在**，
- *                      而不是 {@code "subjectKey": null}。前端按"可选"读它，
- *                      别写成 {@code === null} 那种只认一种空值的判据 ——
- *                      那样写出来的判据在真实响应上永远不成立。
+ * @param name          工具名，界面用它和事件里的 {@code toolName} 对上
+ * @param shape         渲染形状：{@code read}、{@code edit}、{@code search}、{@code execute}、
+ *                      {@code plan}、{@code web} 或 {@code other}。闭集，界面按它选组件，
+ *                      新增工具只要形状已有，界面不用改
+ * @param label         动作词；未声明时在响应里缺席
+ * @param subjectKey    参数中作为主语的那一项；没有主语时缺席
+ * @param subjectIsPath 主语是否为工作区路径，决定界面能否点开；基本类型，永远在场
  */
 public record ToolView(String name,
                        String shape,

@@ -6,7 +6,7 @@
 
 ## 定了什么
 
-每人一棵 git worktree。树挂在「**人 × 项目**」上（`WorkspaceId(UserId ownerId, ProjectId projectId)`），分支名 `workspace/<ownerId>`，路径 `<root>/<ownerId>/<projectId>`。同一个人的两条会话**共用**同一棵树 —— 换一段对话不该让上一轮的改动消失，也不该多一个"隔离会话"开关。
+每人一棵 git worktree。树挂在「**人 × 项目**」上（`WorkspaceId(UserId ownerId, ProjectId projectId)`），分支名是 `workspace/` 加 `ownerId`，路径是根目录下按 `ownerId`、`projectId` 分两层。同一个人的两条会话**共用**同一棵树 —— 换一段对话不该让上一轮的改动消失，也不该多一个"隔离会话"开关。
 
 两个人的改动**靠合并交汇**（`ProjectMerger` / `MergeService`），不靠实时同步。一棵树同时只有一把执行租约，所以同一个人的两条会话不能同时跑。
 

@@ -25,12 +25,11 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 把一条会话**组装成一轮的输入**：读历史、取客户端、配工具、猜验证命令。
+ * 把一条会话组装成一轮的输入：历史、客户端、工具、验证命令。
  *
- * <h2>为什么从 TurnExecutor 里拿出来</h2>
- * 这一段和执行器的其余部分**没有共享状态**：它不碰租约、不推状态机、不提交。
- * 而"这一轮拿什么去喂模型"是**最常被单独讨论**的一段（换模型、改系统提示词、
- * 调工具集、动验证策略都会落到这儿），值得一个能被单独读、单独测的地方。
+ * <p>它不碰租约、不推状态机、不提交，与执行器其余部分没有共享状态；而"这一轮喂什么给模型"
+ * 是最常被单独讨论的一段（换模型、改系统提示词、调工具集、动验证策略都会落在这里），
+ * 因此独立出来便于阅读和测试。
  */
 @Component
 public class TurnInputFactory {
@@ -38,17 +37,18 @@ public class TurnInputFactory {
     private final LlmClientProvider clients;
     private final CommandExecutor commands;
 
-    /** 会话的活状态（投影）在这儿 —— 见 {@link SessionProjections}。 */
+    /** 会话的活状态，见 {@link SessionProjections}。 */
     private final SessionProjections projections;
 
-    /** 判据的来源：命令白名单。**循环拿不到它**（agent 不依赖 workspace），
-     *  所以在这里翻译成一个判据函数喂进去，见下面最后那个参数。 */
+    /**
+     * 命令白名单。循环拿不到它（agent 不依赖 workspace），因此在这里翻译成判据函数传入。
+     */
     private final CommandPolicy policy;
 
-    /** 工具集。进程里唯一那份 —— 见 {@link ToolCatalog}。 */
+    /** 进程内唯一的工具集，见 {@link ToolCatalog}。 */
     private final ToolCatalog catalog;
 
-    /** 这条会话能不能联网。判据在它自己那儿（provider + 密钥），这里只取结果。 */
+    /** 会话能否联网；判据在它自己那里（供应商加密钥），这里只取结果。 */
     private final ApiKeyWebAccessProvider webAccess;
 
     public TurnInputFactory(LlmClientProvider clients,
@@ -68,26 +68,23 @@ public class TurnInputFactory {
     /**
      * 组装这一轮的输入。
      *
-     * <p>历史**不在这里读**：会话的投影是活的（见 {@link SessionProjections}），
-     * 它每次交出来之前会自己补读到库里最新的一条 —— 所以"上一轮刚写的事件必须立刻可见"
-     * 照样成立，而且不用把整条流读回来。
+     * <p>历史不在这里读：投影是活的（见 {@link SessionProjections}），每次交出前会补读到库里
+     * 最新，所以"上一轮刚写的事件立刻可见"成立，又不必重读整条流。
      */
     TurnInput create(Session session, Workspace workspace, CancellationToken cancellation) {
         ModelConfig model = session.model();
-        // 联网能力按这条会话判（用哪一家、那个人有没有密钥，见 ApiKeyWebAccessProvider）。
-        // 有才把联网工具放进工具列表 —— 没有就不放：摆出来再让每次调用失败，是白烧一次调用
+        // 联网能力按会话判（供应商 + 密钥，见 ApiKeyWebAccessProvider）。有才放入工具列表：
+        // 摆出来再让每次调用失败，只会白烧一次调用
         Optional<WebAccess> web = webAccess.find(session.ownerId(), model);
         return new TurnInput(
                 session.id(),
                 projections.acquire(session),
-                // **给 agent 的是项目根，不是工作区根。**
-                // 它所有的相对路径、以及 run_command 的工作目录，都以项目根为准 ——
-                // 于是"这个项目在哪儿"对它是一句确定的话，不用猜
+                // 给 agent 的是项目根而不是工作区根：相对路径和 run_command 工作目录都以它为准，
+                // "项目在哪儿"因此是确定的话，不用猜
                 ProjectLayout.rootOf(workspace),
                 model.systemPrompt(),
-                // 建会话时已经拦过一次，走到这里还取不到客户端只有一种情况：
-                // **这一轮跑起来之后密钥被删了**。所以不必再给一段"怎么去配"的引导，
-                // 说清"发生了什么"就够 —— 它会被记成一次失败的轮次，不是 500
+                // 建会话时已拦过一次，这里取不到客户端只可能是本轮开始后密钥被删了。
+                // 不必再给配置引导，说清事实即可；它会被记成一次失败轮次，不是 500
                 clients.findClient(session.ownerId(), model).orElseThrow(() ->
                         new IllegalStateException(ApiKeyError.goneMidTurn(
                                 Providers.displayNameOf(model.provider())))),
@@ -96,43 +93,29 @@ public class TurnInputFactory {
                 web.isPresent() ? catalog.withWeb() : catalog.registry(),
                 commands,
                 TokenBudget.DEFAULT,
-                // 验证命令按工作区里的构建文件猜（认不出来就不验证）。
-                // 猜错的代价比"不验证"大得多：模型会去修一个根本不存在的问题
+                // 验证命令按工作区的构建文件猜，认不出就不验证；
+                // 猜错的代价比不验证大，模型会去修一个不存在的问题
                 VerificationPlan.detect(ProjectLayout.rootOf(workspace)).orElse(VerificationPlan.NONE),
                 cancellation,
-                // 什么时候才问人。**三个条件，中了任何一个就问**：
-                //
-                //   ① 这行命令的第一个词不在免审批名单里（带路径的也算不在，见 CommandPolicy）；
-                //   ② 或者它**动到了工作区外面**的东西；
-                //   ③ 或者这行命令我们**看不懂** —— 里面有变量、命令替换、管道、
-                //      重定向、波浪号这些"解释起来会变样"的东西（见 CommandLine）。
-                //
-                // ① 和 ② 是免审批名单的两半：名单只看程序名，于是
-                // `rm -rf node_modules` 和 `rm -rf C:\…\Documents` 在它眼里一样，
-                // 而"用户在项目树内是自由的"这句话落到 rm/mv 上说的正是**路径**。
-                // 见 CommandPathScope。
-                //
-                // 整行交给 shell 之后，变量展开、命令替换、glob 全都活了过来 —— 那些
-                // 我们看不见的东西一律先问人（③），而不是假装看懂了。
-                //
-                // 注意这里决定的只是"要不要问"，**不是"能不能跑"** ——
-                // 答案永远是"能"，只是可能要先点一下批准
+                // 何时先问人，三个条件任一命中：第一个词不在免审批名单（含带路径的）；
+                // 命令会动到工作区外的路径；或整行包含变量、命令替换、管道、重定向、
+                // 波浪号等解释起来会变样、我们看不懂的语法（见 CommandLine）。
+                // 名单只看程序名，所以 rm -rf node_modules 与 rm -rf 项目外路径同等对待，
+                // 路径边界由 CommandPathScope 判断。
+                // 这里只决定"要不要问"，不决定"能不能跑"：答案永远是能，只是可能要先批准
                 commandLine -> whyAsk(workspace, commandLine),
                 web.orElseGet(WebAccess::none));
     }
 
     /**
-     * 为什么这条命令要先问人 —— 空 = 不用问。
+     * 这条命令为什么需要先问人；空表示不用问。
      *
-     * <h2>为什么回来的是理由，不是一个布尔</h2>
-     * 因为这句话要**摆在人面前**：他要看着它点"批准"。而三种情况要人过目的东西
-     * 完全不同 —— 一个是不认识那个程序、一个动的是工作区外面的路径、一个是这行命令
-     * 压根看不懂。只说"需要确认"的话，那个确认就是走过场。
+     * <p>返回理由而不是布尔，因为理由要摆在人面前供其判断：不认识程序、动到工作区外的路径、
+     * 命令本身看不懂，这三种需要人看的东西完全不同，只说"需要确认"会让确认变成走过场。
      */
     private Optional<String> whyAsk(Workspace workspace, String commandLine) {
-        // 一路 `&&` / `||` / `;` 串起来的是"依次跑几条"，每条各自查一遍就够了 ——
-        // 整行按单个 &（后台）、|（管道）判"看不懂"的话，模型每写一次
-        // `javac X.java && java X` 都要人点一次批准
+        // &&、||、; 串起来的是依次执行的几条命令，每条各查一遍即可。若把整行按单个 &
+        // 或 | 判成"看不懂"，模型每写一次 javac X.java && java X 都要人点批准
         Optional<List<List<String>>> commands = CommandLine.simpleCommands(commandLine);
         if (commands.isEmpty()) {
             return Optional.of("这行命令里有变量、命令替换、管道、重定向，或者引号没配对 ——"

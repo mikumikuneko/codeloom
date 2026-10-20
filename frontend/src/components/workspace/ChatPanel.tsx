@@ -7,32 +7,22 @@ import { personDot, slotsOf, type PersonSlot } from '@/lib/people'
 import { formatChatTime } from '@/lib/time'
 import { useProjectChat } from '@/lib/useProjectChat'
 
-/** 隔了这么久就值得标一次时间。挑 5 分钟是因为它正好是"一口气说完"和"过一会儿又说"的分界。 */
+/** 隔了这么久就值得标一次时间。5 分钟是一口气说完和过一会儿又说之间的分界。 */
 const TIME_GAP_MS = 5 * 60 * 1000
 
 /**
  * 聊天室。
  *
- * <h2>它和左边的会话流**长得不一样**，这是有意的</h2>
- * 会话流里是 agent 在说话，这里是人。两件不同的事该有两种不同的样子：
- * <ul>
- *   <li><b>在这里</b>：头像贴边、气泡朝内 —— 自己的在右、对方的在左。
- *       那是聊天软件的通用语法，它承载的信息是"这句是谁说的"。</li>
- *   <li><b>那里</b>：满宽、不用气泡，一条消息就是满宽的一块文本（那条"谁的 agent"的彩色竖线已经删了）。</li>
- * </ul>
+ * 它和左边的会话流长得不一样，这是有意的：会话流里 agent 在说话，这里是人。这里
+ * 头像贴边、气泡朝内（自己的在右、对方的在左），表达"这句是谁说的"；会话流满宽、
+ * 不用气泡。
  *
- * <h2>头像就是名字，所以名字不再写一遍</h2>
- * 头像上那个字是用户名的头一个，底色是全站那套"谁是谁"的颜色
- * （见 {@code lib/people.ts}，和会话流里"谁的 agent"是同一对）——
- * 于是"青 = 那个人"整站成立，而名字写在旁边只是把同一件事说了两次。
+ * 头像就是名字，旁边不再写一遍：头像字是用户名的第一个字，底色是全站"谁是谁"的
+ * 颜色（见 `lib/people.ts`）。
  *
- * <h2>时间只在中途标，不在每条上标</h2>
- * 相邻两条隔了 {@link TIME_GAP_MS} 以上才在**后面那条的上方**插一条居中的时间。
- * 两个人对着说话的时候时间几乎没用，而每条都挂一个会把这一栏从"对话"读成"日志"。
- *
- * <p>写的时候按远近分层：今天只看时分，往前一天、一年各加一层限定。
- * 不加的话昨天 22:00 和今天 22:00 在屏幕上长得一模一样 —— 那时候"时间"这个信息
- * 本身就是错的，比没有还坏。
+ * 时间只在中途标：相邻两条超过 `TIME_GAP_MS` 才在后面那条上方插一条居中时间；
+ * 每条都挂会把这一栏从对话读成日志。格式按远近分层（今天只给时分，往前加日期），
+ * 否则昨天 22:00 和今天 22:00 长得一样，时间信息本身就是错的。
  */
 export function ChatPanel({
   project,
@@ -43,38 +33,37 @@ export function ChatPanel({
 }: {
   project: Project
   meId: string | undefined
-  /** 按 id 查名字。**和工作区里那份是同一个** —— 两处各建一张 Map 会有两套"查不到时说什么" */
+  /** 按 id 查名字，与工作区那份是同一个：两处各建 Map 会有两套"查不到时说什么" */
   nameOf: (id: string) => string | null
-  /** 现在是不是正看着聊天。不在看的时候它仍然挂着连接 —— 见下面那段 */
+  /** 现在是否正看着聊天。不在看时连接仍然挂着，见下面那段 */
   active?: boolean
-  /** 消息条数变了就叫一声。工作区靠它决定「聊天」标签上要不要点一个未读点 */
+  /** 消息条数变了就通知；工作区靠它决定「聊天」标签上要不要点未读点 */
   onMessages?: (count: number, active: boolean) => void
 }) {
   const { messages, disconnected, loaded, send } = useProjectChat(project.id)
 
   const slots = slotsOf(project.members.map((m) => m.id))
 
-  // 离开这个标签页也**不卸载**它：连接要一直开着，否则"对方说话"这件事
-  // 只有回来那一刻才知道（而人不知道什么时候该回来）。见 WorkspacePage 的渲染处。
+  // 离开这个标签页也不卸载它：连接要一直开着，否则"对方说话"只有回来那一刻
+  // 才知道（见 WorkspacePage 的渲染处）。
   //
-  // **等历史到了再报**：那一批是"打开页面时本来就在那儿的话"，不该算未读。
+  // 等历史到了再报：那一批是打开页面时本来就在那儿的话，不该算未读。
   useEffect(() => {
     if (loaded) onMessages?.(messages.length, active)
   }, [messages.length, loaded, active, onMessages])
 
   return (
-    // 滚动、贴底、断线提示都在 LivePane 里；输入框在 ComposerBox 里 ——
-    // **两层外壳都和会话流共用**，所以这里只回答一个问题：一条聊天消息长什么样
+    // 滚动、贴底、断线提示在 LivePane 里；输入框在 ComposerBox 里。两层外壳都和
+    // 会话流共用，所以这里只回答一个问题：一条聊天消息长什么样。
     <LivePane
       disconnected={disconnected}
       progress="连接断了，正在重连…"
       visible={active}
       footer={
-        // send 是同步的（往 socket 里塞一下），所以清空是**乐观**的。
-        // **还没连上时它不会丢**：useProjectChat 把消息排到 onopen 再补发。
-        // 连接已经建立、但发送途中恰好断了的那种情况仍会丢 —— WebSocket 的 send
-        // 没有回执，这一层分辨不出来。这里接受这个代价：保留草稿会让
-        // "发送失败"看起来像"还没发"，而断线提示已经说清了为什么
+        // send 同步（往 socket 里塞一下），所以清空是乐观的。还没连上时不会丢：
+        // useProjectChat 排到 onopen 再补发。已连接但发送途中恰好断线仍会丢：
+        // WebSocket 的 send 没有回执，这一层分辨不出来。保留草稿会让"发送失败"
+        // 看起来像"还没发"，断线提示已经说清了原因。
         <ComposerBox placeholder="说点什么" disabled={disconnected} onSend={send} />
       }
     >
@@ -106,10 +95,10 @@ export function ChatPanel({
 }
 
 /**
- * 这一条上面要不要插时间。
+ * 这一条上面是否要插时间。
  *
- * <p>判据是**和上一条的间隔**，不是"离现在多久" —— 后者会让翻上去的历史永远没有时间。
- * 第一条也标：一屏聊天记录没有起点时间，读起来是没有锚的。
+ * 判据是与上一条的间隔，不是"离现在多久"：后者会让翻上去的历史永远没有时间。
+ * 第一条也标，否则一屏聊天记录没有起点时间。
  */
 function needsTime(messages: ChatMessage[], index: number): boolean {
   if (index === 0) return true
@@ -119,10 +108,10 @@ function needsTime(messages: ChatMessage[], index: number): boolean {
 }
 
 /**
- * 一条消息：头像贴边、气泡朝里。自己的那一侧整个翻过来。
+ * 一条消息：头像贴边、气泡朝内。自己那一侧整个翻过来。
  *
- * <p>{@code flex-row-reverse} 不只是"把头像挪到右边"—— 它连主轴方向一起翻，
- * 所以两边用的是同一份 DOM 顺序和同一套间距，不需要为"自己的"再写一遍布局。
+ * `flex-row-reverse` 连主轴方向一起翻，两边因此共用同一份 DOM 顺序和间距，
+ * 不需要为"自己的"另写布局。
  */
 function Line({
   message,
@@ -140,7 +129,7 @@ function Line({
       <Avatar name={authorName} slot={slot} />
 
       <div className="max-w-[70%] rounded-lg bg-secondary px-3 py-1.5">
-        {/* 头像把名字接过去了，但那只是给眼睛的 —— 读屏软件读不到一个 aria-hidden 的圆 */}
+        {/* 头像把名字接过去了，但那只给眼睛：读屏软件读不到 aria-hidden 的圆 */}
         <span className="sr-only">{authorName}：</span>
         <p className="whitespace-pre-wrap break-words text-sm">{message.text}</p>
       </div>
@@ -149,10 +138,10 @@ function Line({
 }
 
 /**
- * 头像：用户名的头一个字，底色是这个人的颜色。
+ * 头像：用户名的第一个字，底色是这个人的颜色。
  *
- * <p>上面那个字是**深色**的 —— 那两块底色（青 {@code #5fa8b8}、紫 {@code #b87ba6}）
- * 都是中亮度，白字压不住，对比度掉到 2 出头，小字号下基本是糊的。
+ * 字用深色：两块底色（青 `#5fa8b8`、紫 `#b87ba6`）都是中亮度，白字对比度只有
+ * 2 出头，小字号下是糊的。
  */
 function Avatar({ name, slot }: { name: string; slot: PersonSlot }) {
   return (
@@ -166,7 +155,7 @@ function Avatar({ name, slot }: { name: string; slot: PersonSlot }) {
   )
 }
 
-/** 第一个**字**。不写 `charAt(0)` —— 那是第一个 UTF-16 码元，emoji 会被切成半个。 */
+/** 第一个字。不用 `charAt(0)`：那是第一个 UTF-16 码元，emoji 会被切成半个。 */
 function firstChar(name: string): string {
   return [...name.trim()][0] ?? '?'
 }

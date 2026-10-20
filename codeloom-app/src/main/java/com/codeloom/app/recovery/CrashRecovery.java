@@ -22,27 +22,17 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 进程起来之后，收拾上一次没能收场的会话。
+ * 进程启动后收拾上一次未能收场的会话：逐个尝试获取租约，获取到就把执行到一半的工具调用
+ * 补写成 {@code ToolInterrupted}；获取不到说明有实例仍在运行，跳过。
  *
- * <pre>
- *   1. 扫出所有**非终态**的会话
- *   2. 逐个抢租约 —— 抢不到说明那个实例还活着，跳过
- *   3. 抢到了：把"执行到一半的工具调用"补写成 {@code ToolInterrupted}
- * </pre>
+ * <p>补写这条事实是为了防止重放：那个调用可能已经改过文件、跑过构建，重跑就是二次修改。
+ * 模型看到该事件后会先确认现状，安全性已经足够，因此不做自动续跑 —— 本项目部署在宿主机、
+ * 有人值守，用户说一句"接着"即可。
  *
- * <h2>为什么到第 3 步就停</h2>
- * 补写 {@code ToolInterrupted} 是为了**防止重放**：那个调用可能已经改了文件、跑过构建，
- * 重新执行一遍就是二次修改。而只要这条事实在事件流里，模型下次看到它就会先去确认现状
- * （{@code ContextAssembler} 把它投影成"不要直接重试，先用 read_file 确认"）——
- * 安全性已经拿到了。
+ * <p>不需要另建心跳检测：租约过期本身就意味着持有它的实例已经不在，这正是
+ * {@code ExecutionLease} 的设计。
  *
- * <p>**不做自动接着跑**：用户说一句"接着写"就够了 —— 他看到的事实，正是那条"上次那个
- * 调用没完成"，模型会照着先去确认现状。自动续跑只在**无人值守的服务**里有价值
- * （容器 / systemd 自动重启，那边没人说"继续"），而本项目的部署形态是宿主机 + 人在键盘前。
- *
- * <h2>为什么不需要另建一套心跳存活检测</h2>
- * 第 2 步抢租约就是那个检测。租约过期本身就意味着"持有它的那个实例已经不在了" ——
- * 这正是 {@code ExecutionLease} 把它写进设计里的原因。
+ * <p>理由见 {@code docs/decisions/architecture/2026-09-28-crash-recovery-writes-facts-not-resumes.md}。
  */
 @Component
 public class CrashRecovery {
@@ -64,14 +54,12 @@ public class CrashRecovery {
         this.writer = writer;
     }
 
-    /** 应用就绪之后跑一次。放在就绪之后而不是更早：那时数据库、Redis 都已经可用。 */
+    /** 应用就绪后跑一次；此时数据库和 Redis 都已可用。 */
     @EventListener(ApplicationReadyEvent.class)
     public void recoverUnfinishedSessions() {
-        // 扫全部会话，**不做状态过滤**："这条要不要恢复"的判断在 recover() 里
-        // （看有没有执行到一半的工具调用），一条空闲的会话对它来说是空操作。
-        //
-        // 不用"列出那几个可能未完成的状态"的白名单：新增状态时会静默漏掉它，
-        // 而漏掉恢复是危险的方向 —— 一个执行到一半的工具调用会被重新执行一遍。
+        // 扫描全部会话，不做状态过滤：是否要恢复由 recover() 判断（看有没有执行到一半的
+        // 工具调用），空闲会话是空操作。不用"可能未完成的状态"白名单：新增状态会被静默
+        // 漏掉，而漏掉恢复会让一个执行到一半的调用被重新执行
         List<Session> candidates = sessions.findAll();
         if (candidates.isEmpty()) {
             return;
@@ -90,13 +78,15 @@ public class CrashRecovery {
     /**
      * 恢复一条会话。
      *
-     * <p>包级可见是为了能单独测它 —— 上面那个扫描会遍历整个库，测试里不该用它。
+     * <p>包级可见是为了单独测试：上面的扫描会遍历整个库，测试不应使用它。
+     *
+     * @param session 待检查的会话
      */
     void recover(Session session) {
         Optional<LeaseToken> acquired = leases.tryAcquire(session);
         if (acquired.isEmpty()) {
-            // 拿不到租约 = 有实例正持有它 = 那棵树有人管，不用我们操心。
-            // 注意"有人管"可能是**同一个人的另一条会话**：它们共用一棵树
+            // 租约被持有说明那棵树有人管，跳过。注意持有者可能是同一个人的另一条会话，
+            // 因为它们的树是共用的
             return;
         }
         LeaseToken token = acquired.get();
@@ -118,42 +108,31 @@ public class CrashRecovery {
     /**
      * 执行到一半的调用：有 {@code ToolCallRequested}，却没有对应的结束事实。
      *
-     * <p>这里的 switch **用了 default**，和 {@code EventCodec} 里那种"必须逐条列出"不同。
-     * 区别在于这个方法是**筛选**而不是**映射**：漏掉一个类型，结果就是"不选它" ——
-     * 而它本来也不在这份名单里。映射漏了会算错，筛选漏了只是选得少一点。
+     * <p>本方法不做 switch：每个事件“把调用推到哪一步”由 {@code ToolCallLifecycle} 的
+     * 穷尽 switch 回答（新增类型在那里编译不过），这里只把那一步翻译成“加入名单 / 移出
+     * 名单”。这是筛选而不是映射 —— 漏掉一组判据只会少选，不会把一个调用算错。
      *
-     * <h2>{@code ToolApprovalRequested} 绝不能进这份名单</h2>
-     * 进了的话，<strong>"正等人批"的调用和"崩溃时执行到一半"的调用长得一模一样</strong>
-     *（都是"有 requested、没有收尾"）：
-     * 模型请求跑一条白名单外的命令 → 挂起进 {@code AWAITING_APPROVAL}（它**刻意不是终态**，
-     * 就是等重启之后还能被看见）→ 进程重启时被当成"执行到一半"补写 {@code ToolInterrupted}
-     * → 那条事件在 {@code TurnStates} 里映成 {@code THINKING}，而
-     * {@code AWAITING_APPROVAL → THINKING} 是<b>非法迁移</b> → 抛异常 →
-     * 会话被打成 {@code FAILED}。<b>也就是重启一次，那个等着你点的批准就变成了一个错误。</b>
-     *
-     * <p>所以名单里要的是 {@code ToolApprovalResolved}，不是 {@code ToolApprovalRequested}
-     * —— 见下面那两条 case。
+     * <p>{@code ToolApprovalRequested} 绝不能进名单："正等人批"与"崩溃时执行到一半"
+     * 都表现为有 requested、没有收尾，但前者还没跑。混入后，重启会把
+     * {@code AWAITING_APPROVAL} 经 {@code ToolInterrupted} 映成 {@code THINKING}，
+     * 而那是非法迁移，会话会被打成 {@code FAILED} —— 一次重启就把等待中的批准变成错误。
+     * 名单要的是 {@code ToolApprovalResolved}：批准后重新加入，拒绝后移除。
      */
     private List<String> unfinishedToolCalls(SessionId sessionId) {
         Set<String> pending = new LinkedHashSet<>();
         for (StoredEvent stored : events.readAll(sessionId)) {
             Event event = stored.event();
-            // **"这条事件把那次调用推到哪一步"由域层那一处说**（见 ToolCallLifecycle）——
-            // 这里只管"那一步对这个名单意味着什么"。哪些事件算终局、为什么，
-            // 都写在那边；漏掉一种在那里编译不过
+            // "这条事件把调用推到哪一步"由域层统一说明（见 ToolCallLifecycle），
+            // 这里只判断那一步对名单意味着什么；漏掉一种终局在那里编译不过
             ToolCallLifecycle.openedBy(event).ifPresent(pending::add);
             ToolCallLifecycle.closedBy(event).ifPresent(pending::remove);
 
-            // 挂起等人批：这个调用**还没跑**，它在等一个人 —— 那不是"执行到一半"。
-            // 会话状态停在 AWAITING_APPROVAL，重启之后那条批准还应该点得动
+            // 挂起等人批：调用还没跑，不算"执行到一半"；状态停在 AWAITING_APPROVAL，
+            // 重启后那条批准仍应可点
             ToolCallLifecycle.approvalAskedBy(event).ifPresent(pending::remove);
 
-            // 答复到了：**批了就得跑**，所以它又回到名单里。
-            //
-            // 这一条不是对称的补充，是必须的：少了它，进程死在上一条和
-            // "批准之后那次真正执行"之间的缝里时，这个调用会被安静地漏掉 ——
-            // 模型永远不会知道它批准过的那个调用压根没跑（比"跑了一半"更糟，
-            // 因为它看起来像已经做完了）。拒了就是这件事结束了，不该进名单
+            // 批准后必须重新加入：否则进程死在上一条与真正执行之间的缝隙里时，这个调用会
+            // 被安静漏掉，模型永远不知道它批准过的调用没跑。拒绝则是结束，不再加入
             ToolCallLifecycle.approvalGrantedBy(event).ifPresent(pending::add);
             ToolCallLifecycle.approvalRefusedBy(event).ifPresent(pending::remove);
         }

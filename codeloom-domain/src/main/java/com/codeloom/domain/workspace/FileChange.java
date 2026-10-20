@@ -1,32 +1,22 @@
 package com.codeloom.domain.workspace;
 
 /**
- * 一个文件**一步之内**改了多少行。
+ * 一个文件在一步之内改了多少行。粒度是"这一步"，不是这个文件的全部历史。
  *
- * <p>粒度是"这一步"，不是"这个文件从开天辟地到现在"。所以它回答的是
- * "刚才那一下动了什么"，而那个问题在翻旧账时才有意义。
- *
- * @param path    路径。**两条产出路径基点不同**：{@code changesIntroducedBy} 给的是仓库根
- *                相对（形如 {@code untitled/a.txt}）；落进 {@code WorkspaceChanges} 之前
- *                已由 {@code ProjectLayout.toProjectPath} 翻成**项目相对**（{@code a.txt}）
+ * @param path    路径。{@code changesIntroducedBy} 给的是仓库根相对（如
+ *                {@code untitled/a.txt}）；落进
+ *                {@link com.codeloom.domain.event.WorkspaceChanges} 前由
+ *                {@code ProjectLayout.toProjectPath} 转成项目相对（{@code a.txt}）
  * @param added   新增行数。二进制文件是 0，见 {@link #binary}
  * @param deleted 删除行数。同上
- * @param binary  二进制文件 —— git 对它给不出行数，只能告诉你"它变了"。
- *                <p>{@code added} 和 {@code deleted} 都是 0 的**文本**文件才是"没改"，
- *                这两件事必须分得开，所以它单列一个字段而不是拿 0 兼作标记。
- *                <p>补一句：0/0 也**可能是整文件替换**（比如换行符统一）——
- *                git 数不出行数上的差别，但它确实改了。所以想判"这次没动它"时，
- *                别只看增删是不是 0
- * @param created **这一步是新建了这个文件**，不是改了一个已有的。
- *
- *                <h2>为什么要分出来</h2>
- *                因为"新建一个文件"和"改一个已有文件"是两种不同强度的信号：
- *                前者几乎总意味着"我要做一块新东西"（新建 {@code AuthService.java}），
- *                而后者可能只是修个 typo。协作提醒（"对方也在做这块"）只报前者，
- *                报后者会把它淹成噪声。
- *
- *                <p>**不能拿行数去猜**（比如"只增不减"）：往一个空文件里写内容
- *                和从头建一个文件，在 numstat 里长得一模一样。
+ * @param binary  二进制文件——git 给不出行数，只能告诉你它变了；{@code added} 与
+ *                {@code deleted} 都是 0 的文本文件才是"没改"，所以它单列一个字段而
+ *                不是拿 0 兼作标记。0/0 也可能是整文件替换（如换行符统一），所以判断
+ *                "这次没动它"时不能只看增删是不是 0
+ * @param created 这一步新建了文件，而不是修改已有文件。协作提醒只报新建：新建几乎总意味着
+ *                "要做一块新东西"，而修改可能只是修 typo，全报会成噪声；也不能靠行数
+ *                猜——往空文件里写内容和新建文件在 numstat 里一样。见
+ *                {@code docs/decisions/feature/2026-10-02-collaboration-notice-for-new-files.md}
  */
 public record FileChange(String path, int added, int deleted, boolean binary, boolean created) {
 
@@ -39,7 +29,14 @@ public record FileChange(String path, int added, int deleted, boolean binary, bo
         }
     }
 
-    /** 改动已有的文件（不是新建）。绝大多数调用点要的是这个。 */
+    /**
+     * 改动已有的文件（不是新建）。绝大多数调用点要的是这个。
+     *
+     * @param path    路径
+     * @param added   新增行数
+     * @param deleted 删除行数
+     * @param binary  是否为二进制文件
+     */
     public FileChange(String path, int added, int deleted, boolean binary) {
         this(path, added, deleted, binary, false);
     }

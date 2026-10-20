@@ -22,20 +22,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 真跑子进程。
  *
- * <h2>它收的是**一行命令**</h2>
- * 一行交给一层 shell 解释（见 {@link CommandShell}），所以这里的命令写成
- * {@code "git --version"} 这个样子，而不是一串分词好的参数。
- *
- * <p>被测命令只用这台机器上**必然有**的那几个：{@code git}（项目必需）、
- * {@code java}（跑测试就要）、{@code mvn}（构建就要）、{@code node}（前端就要）。
- * 不引入新的环境依赖。
+ * <p>命令是一行文本，由一层 shell 解释（见 {@link CommandShell}）。被测命令只使用这台
+ * 机器上必然存在的工具：git、java、mvn、node。
  */
 class LocalCommandExecutorTest {
 
     @TempDir
     Path tempDir;
 
-    /** 执行器只收工作目录，不要整个 Workspace 聚合 —— 不可信路径不需要会话身份。 */
+    /** 执行器只接收工作目录，不需要会话身份。 */
     private Path workspace;
 
     @BeforeEach
@@ -43,7 +38,7 @@ class LocalCommandExecutorTest {
         workspace = tempDir.toAbsolutePath();
     }
 
-    /** 两个参数显式写出来，读测试的人能看到用了哪个 shell。 */
+    /** 两个参数显式写出，便于看出用的是哪个 shell。 */
     private LocalCommandExecutor executor() {
         return new LocalCommandExecutor(ProcessRunner.nativeCharset(), CommandShell.detect(null));
     }
@@ -64,10 +59,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【执行器不做准入判断】不在任何清单里的程序照样交给操作系统去跑")
     void doesNotGateOnAnExecutableList() {
-        // 执行器不判断准入，只负责包 shell + 跑 + 带回结果。它一度拿可执行文件白名单当准入判断，
-        // 而同一个白名单又是"要不要问人"的判据 —— 于是**需要审批的命令一定被它拒绝**。
-        //
-        // 用一条**必然存在**的命令来验：不在任何清单里（这里根本没有清单），但它跑得起来。
+        // 执行器不判断准入，只负责包 shell、执行、带回结果；拿白名单当准入会让
+        // 需要审批的命令永远跑不起来。用一条必然存在的命令验证：不在任何清单里也能跑。
         CommandResult result = executor().execute(
                 workspace, "java -version",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
@@ -79,10 +72,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("不存在的程序：包了 shell 之后它变成**一次普通的命令失败**，而不是起不来")
     void aMissingExecutableIsAnOrdinaryCommandFailure() {
-        // 现在是 **bash 报的 command not found，退出码 127** —— 和终端里打错一个命令
-        // 看到的一模一样。包 shell 之后，"命令不存在"本来就是 shell 的活，不该再由我们判断：
-        // 模型拿到的是标准报错，而不是我们编的一句话（从前它先是"越权异常"，
-        // 后来是"进程起不来"）。
+        // 包 shell 之后由 bash 报 command not found、退出码 127，与终端里一致；
+        // 模型拿到的是标准报错，不是平台编的提示
         CommandResult result = executor().execute(
                 workspace, "codeloom-no-such-program-xyz --help",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
@@ -117,9 +108,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【那一行不被我们改写】带了目录的程序名就照那个路径跑，跑不到就失败")
     void theLineIsNotRewritten() {
-        // 这一行原样交给 shell：改写了的话，人批准的和实际跑的就成了两条命令。
-        // 防"模型指着自己塞进来的程序"这件事换到了判据那一边 ——
-        // 带目录的词一律不免审批（见 CommandPolicy）。
+        // 这一行原样交给 shell；改写了的话，人批准的和实际执行的就是两条命令。
+        // 带目录的词由 CommandPolicy 判为不免审批。
         CommandResult result = executor().execute(
                 workspace, "/definitely/not/here/git --version",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
@@ -161,7 +151,7 @@ class LocalCommandExecutorTest {
                 workspace, "git rev-parse --show-toplevel",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
 
-        // 用 isSameFile 而不是字符串比较 —— Windows 上短路径名会让字面比较失败
+        // 用 isSameFile 而不是字符串比较：Windows 的短路径名会让字面比较失败
         assertThat(Files.isSameFile(Path.of(result.output().strip()), tempDir)).isTrue();
     }
 
@@ -174,8 +164,8 @@ class LocalCommandExecutorTest {
                 Duration.ofSeconds(30), limit, CancellationToken.none());
 
         assertThat(result.truncated()).isTrue();
-        // 上界要贴着实现算出来，不能随手写个 1000 —— 那样"截断到多少"等于没验。
-        // 两个流各自被截到 limit，合并体最多是 limit + 一个换行 + limit
+        // 上界按实现算，不能随手写一个宽松值；两个流各截到 limit，
+        // 合并体最多是 limit + 一个换行 + limit
         assertThat(result.output().length()).isLessThanOrEqualTo(2 * limit + 1);
     }
 
@@ -189,12 +179,11 @@ class LocalCommandExecutorTest {
                 Duration.ofMillis(900), 10_000, CancellationToken.none());
 
         assertThat(result.termination()).isEqualTo(CommandTermination.TIMED_OUT);
-        // **不是失败，是"没跑完"** —— 两者的区别正是这次改动要立起来的东西
+        // 超时是"没跑完"，不是失败
         assertThat(result.success()).isFalse();
-        // 退出码不给：被强杀的进程那个数字没有意义，而它一旦交出去就会被拿去判断
+        // 退出码不给：被强杀进程的数字没有业务意义，交出去就会被拿去判断
         assertThat(result.exitCode()).isNull();
-        // ★ 这一条是重点：那半截输出恰恰是最该看的 —— "跑到哪一步卡住的"全在里面，
-        // 而从前超时抛异常时会把它**一起扔掉**
+        // 已产生的输出必须还回来，它包含"跑到哪一步卡住"的信息
         assertThat(result.output()).contains("构建进行到一半");
     }
 
@@ -209,13 +198,12 @@ class LocalCommandExecutorTest {
                     workspace, "node -e 'setTimeout(()=>{}, 30000)'",
                     Duration.ofSeconds(60), 10_000, cancellation));
 
-            // 不用先睡一觉等它起来：取消的检查点在等待循环里每 100ms 看一次，
-            // 所以信号早到（进程还没拉起来）晚到（正跑着）结果都一样 ——
-            // 都是"发现已取消 → 杀掉整棵进程树"。固定 sleep 只是让快机器白等
+            // 不用 sleep 等进程起来：等待循环每 100ms 检查一次取消信号，
+            // 信号早到或晚到都会杀掉整棵进程树
             cancellation.cancel();
 
-            // 取消和超时一样，是**结果**而不是异常 —— 只是终止原因不同。
-            // 上层据此落 ToolCancelled（用户意图），而不是一条"工具失败了"
+            // 取消与超时一样是结果而不是异常，只是终止原因不同；
+            // 上层据此记录 ToolCancelled（用户意图），而不是工具失败
             CommandResult result = running.get();
             assertThat(result.termination()).isEqualTo(CommandTermination.CANCELLED);
             assertThat(result.success()).isFalse();
@@ -226,9 +214,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("超时只允许更短：【荒唐的超时会被夹到内部上限】，而正常请求原样通过")
     void clampNeverLengthensTheTimeout() {
-        // 直接测 clamp 本身。写成"跑一条命令看它多久被杀"的话，要么真等满 15 分钟，
-        // 要么把上限做成可注入的配置 —— 而它本来就该是个不可调的硬上限。
-        // 见 clamp 的注释：它包级可见就是为了这条断言
+        // 直接测 clamp：真跑的话要等满 15 分钟，或把硬上限做成可配置。
+        // 它包级可见就是为了这条断言
         assertThat(LocalCommandExecutor.clamp(Duration.ofDays(30)))
                 .as("超过上限的请求被夹到上限")
                 .isEqualTo(LocalCommandExecutor.clamp(null))
@@ -252,9 +239,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【不该挂】不带参数读标准输入的命令立刻结束 —— 子进程的 stdin 一启动就关了")
     void commandsThatReadStdinFinishInsteadOfHanging() {
-        // `cat` 不带参数会一直读标准输入。从前那条管道我们**从没关过**，于是它就一直等
-        // —— 用户看到的是"命令卡住了"，而真相是在等一个永远不来的字节。
-        // 超时只有 5 秒：真挂了这条测试会以超时异常失败，而不是慢慢跑完
+        // 不带参数的 cat 会一直读标准输入；子进程的 stdin 一启动就关闭，它应立刻结束。
+        // 超时设为 5 秒：真挂了会以超时失败
         CommandResult result = executor().execute(
                 workspace, "cat",
                 Duration.ofSeconds(5), 10_000, CancellationToken.none());
@@ -266,9 +252,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【引号能活到子进程手里】带空格的参数原样到达 —— 走脚本文件换来的")
     void quotedArgumentsArriveIntact() {
-        // 若直接把那一行交给 `bash -c`，引号会在"JVM → MSYS"那段路上被吃掉 ——
-        // 这一条实测会输出 "x"（而不是 "x y"）。先落一份脚本再跑，
-        // 整条路上只有一个纯 ASCII 的路径作为参数
+        // 直接走 bash -c 时引号会在 JVM 到 MSYS 的路上被吃掉（实测输出 "x" 而不是
+        // "x y"）；落成脚本后，命令行上只有一个纯 ASCII 路径
         CommandResult result = executor().execute(
                 workspace, "printf '%s\\n' \"x y\"",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
@@ -279,8 +264,7 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【编码】UTF-8 的输出照常 —— 兜底逻辑不能把本来对的那条路弄坏")
     void utf8OutputStillDecodes() {
-        // 命令行里**真的有中文**（不是 \\u 转义）：这也是上面那条引号性质的延伸 ——
-        // 从前送 `-c` 时，中文那些字节会吃掉紧挨着它的引号，shell 会报"引号没配平"
+        // 命令行里真的有中文：走 -c 时中文字节会吃掉紧挨着它的引号，shell 会报引号未配平
         CommandResult result = executor().execute(
                 workspace, "node -e 'console.log(\"中文 abc\")'",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());
@@ -301,13 +285,9 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【编码·端到端】跟随本机编码的子进程也解得对 —— 不是所有工具都说 UTF-8")
     void decodesAChildThatFollowsTheNativeEncoding() throws IOException {
-        // 这条走的是**兜底分支**：裸 JVM 的 stdout 跟随 native.encoding
-        // （中文 Windows 上是 GBK），解不出合法 UTF-8，于是按本机编码重解。
-        // 上面那条 node 的测试走的是另一条分支（node 说 UTF-8）。两条都得有。
-        //
-        // 源码刻意写成**纯 ASCII**（中文用 \\u 转义）：javac 会按本机编码读源文件，
-        // 而这里要验的是"子进程输出"的编码，不是"源文件"的编码 ——
-        // 把两件事缠在一起，失败了会分不清是哪一边
+        // 这条走兜底分支：裸 JVM 的 stdout 跟随 native.encoding（中文 Windows 上是 GBK），
+        // 解不出合法 UTF-8 时按本机编码重解；node 那条走的是 UTF-8 分支，两条都要覆盖。
+        // 源码刻意写成纯 ASCII（中文用 \\u 转义），避免把源文件编码与输出编码混在一起
         Path source = workspace.resolve("EchoChinese.java");
         Files.writeString(source, """
                 public class EchoChinese {
@@ -317,8 +297,8 @@ class LocalCommandExecutorTest {
                 }
                 """, StandardCharsets.US_ASCII);
 
-        // 路径要**引用**之后再拼进那一行，空格和反斜杠才不出事；
-        // 斜杠换成 / 是给 shell 看的（Windows 上两种都认）
+        // 路径加引号后再拼进命令行，避免空格与反斜杠出问题；
+        // 斜杠换成 /（Windows 上两种都认）
         String javaFile = source.toString().replace('\\', '/');
 
         CommandResult result = executor().execute(
@@ -332,8 +312,8 @@ class LocalCommandExecutorTest {
     @Test
     @DisplayName("【Windows】裸名 mvn 由 shell 解析 —— 从前必须写成 mvn.cmd 才起得来")
     void bareNamesAreResolvedByTheShell() {
-        // Windows 上 mvn 实际是 mvn.cmd，而 ProcessBuilder 不按 PATHEXT 解析 ——
-        // 从前必须写成 mvn.cmd 才起得来。包了一层 shell 之后，这件事归 shell 管
+        // Windows 上 mvn 实际是 mvn.cmd，ProcessBuilder 不按 PATHEXT 解析；
+        // 包一层 shell 后，名字解析归 shell 管
         CommandResult result = executor().execute(
                 workspace, "mvn -v",
                 Duration.ofSeconds(60), 10_000, CancellationToken.none());

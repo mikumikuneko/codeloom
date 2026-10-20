@@ -20,35 +20,18 @@ import java.util.Optional;
 /**
  * 答复一次挂起的审批，然后让那条会话接着跑。
  *
- * <h2>为什么这里要自己抢一次租约</h2>
- * 落 {@code ToolApprovalResolved} 是**写事件流**，而 {@code EventStore} 的每个写方法
- * 都要求 {@link LeaseToken}（fencing 保护，见那份接口的类注释）。答复请求是个普通
- * HTTP 请求、不持有任何执行权 —— 所以它得像 {@code CrashRecovery} 那样，
- * **临时抢一次**：抢到 → 落事件 → 放掉 → 再让执行器自己抢着跑。
+ * <p>落 {@code ToolApprovalResolved} 是写事件流，而 {@code EventStore} 的写方法都要求
+ * {@link LeaseToken}。答复请求是普通 HTTP、不持有执行权，所以临时抢一次租约：抢到、
+ * 落事件、放掉，再由执行器自己抢着续跑。抢不到时告诉调用方它现在正忙（409），不硬写。
  *
- * <p>抢不到是正常情况（会话刚被别的路径 resume 了），那时该做的是告诉调用方
- * "它现在正忙"，而不是硬写进去。
+ * <p>答复之后直接续跑，不让用户再说一句“继续”：那一轮本来就是为等人批准而停下的。
+ * 例外是拒绝且没有留下理由 —— 此时不续跑，把这一轮停在等用户说话。
  *
- * <h2>为什么答复之后要 resume 而不是等用户再发话</h2>
- * 那一轮是**为了等人批才停下的**，不是用户想停。答复一到就该接着走 ——
- * 让用户再敲一句"继续"是多余的仪式，而且那一句会作为新的用户消息进上下文，
- * 把"这本来是在等答复"这件事冲淡。
- *
- * <p>**但拒绝、而且他没留下指示时是例外**：那时候不接着跑，而是把这一轮停在"等用户说话"。
- * Claude Code 也是直接中止整个回合 —— 用户把这件事叫停了、又没说下一步怎么办，
- * 让模型自己猜一个做法往下跑多半是白烧一轮。
- * 详见 {@link #resolve} 里那段注释。
- *
- * <h2>三次写入为什么各自成一小段事务，而不是整个包一个</h2>
- * {@link TurnExecutor#resume} 是**同步跑完一整轮**的，所以 {@link #resolve} 整个包一个事务
- * 会把那一轮也裹进去。两条后果都不轻：宣布挂在提交上，用户点完批准要等整轮跑完界面才有反应；
- * 而且只要中间有任何一处写入真按自己的事务提交了，这个长事务的宣布就排到它后面 ——
- * **晚发的旧事件会被订阅端直接丢掉**（那个判据在 {@code EventAnnouncer} 上），
- * 不是"晚一点到"。
- *
- * <p>三次写入各写各的，也就和 {@code SessionWriter} 那篇"每次调用都是一小段事务"同一个主张。
- * 代价是它们不再原子：中间挂了会留下"答复记了、收尾没记"，而那一支有兜底 ——
- * 崩溃恢复会把它补成一条终局（见那篇决策），界面上也不会一直停在"正在跑"。
+ * <p>三次写入各自成一小段事务，不能包成一个：{@link TurnExecutor#resume} 同步跑完一整轮，
+ * 包进去会让宣布挂在整轮提交上，晚发的旧事件还会被订阅端直接丢弃。代价是中间失败会留下
+ * “答复记了、收尾没记”，由崩溃恢复补成终局。理由见
+ * {@code docs/decisions/architecture/2026-10-10-announcing-is-a-property-of-writing.md}
+ * 与 {@code docs/decisions/architecture/2026-09-28-crash-recovery-writes-facts-not-resumes.md}。
  */
 @Component
 public class ApprovalService {
@@ -69,37 +52,41 @@ public class ApprovalService {
     }
 
     /**
-     * 记下答复，然后续跑。
+     * 记下答复，然后按情况续跑。
      *
-     * @param resolvedByUserId 谁批的。**在 controller 里由登录态得到** —— 那是"平等协作"下
-     *                         唯一能说清责任的东西，不能让调用方随便填。记 **id 不是用户名**：
-     *                         追责要的是身份，而用户名会变 —— 唯一不等于它是身份
-     *                        （见 {@link ToolApprovalResolved}）
+     * <p>{@code resolvedByUserId} 必须由控制器从登录态取得，不能让调用方随意填写：
+     * 那是“平等协作”下唯一能说清责任的东西。记 id 而不是用户名 —— 追责要的是身份，
+     * 用户名会变（见 {@link ToolApprovalResolved}）。
+     *
+     * @param sessionId        要答复的会话
+     * @param callId           挂起的工具调用
+     * @param approved         是否批准
+     * @param resolvedByUserId 做出答复的用户 id，由控制器从登录态取得
+     * @param reason           拒绝时留下的理由；拒绝且为空白时不续跑这一轮
+     * @throws ResponseStatusException 409：执行租约已被别的路径持有，会话尚在收尾
      */
     public void resolve(SessionId sessionId, String callId, boolean approved,
                         UserId resolvedByUserId, String reason) {
-        // 会话要先读出来：租约是按它所在的**那棵树**抢的（见 ExecutionLease）
+        // 租约按会话所在的那棵树抢（见 ExecutionLease）
         Session session = sessions.findById(sessionId).orElseThrow(
                 () -> new IllegalArgumentException("会话不存在：" + sessionId));
 
         Optional<LeaseToken> acquired = leases.tryAcquire(session);
         if (acquired.isEmpty()) {
-            // "正在执行中"现在可能是**同一个人的另一条会话**在执行 —— 它们共用一棵树。
-            //
-            // 409 而不是 500：**挂起那一刻本身还在收尾**（写 checkpoint、用量，再放锁），
-            // 而审批卡片在 TOOL_APPROVAL_REQUESTED 到达时就画出来了 —— 手快的人可能
-            // 在那几毫秒里点下去。那不是"服务器坏了"，是"还没停稳，再点一次"。
+            // 409 而不是 500：挂起那一刻本身可能还在收尾（写 checkpoint、用量，再放锁），
+            // 而审批卡片在请求到达时就已经画出。用户手快时会撞上这几毫秒，
+            // 该做的是“还没停稳，再点一次”。
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "这一轮还在收尾，等它停下来再答复");
         }
 
         LeaseToken token = acquired.get();
-        // 这一轮是**就此停住**，还是接着跑。见下面那段注释
         boolean stopHere;
         try {
             // 租约只挡住后来的写者，不会让请求开头那份快照变新。等锁期间另一轮
             // （或一次换模型）可能已经改过 state/model；append 会把整行写回去，
-            // 所以先重读一次。
+            // 所以先重读一次。见
+            // {@code docs/decisions/bug-fix/2026-10-19-lock-then-reread-before-writing-back.md}。
             Session current = sessions.findById(sessionId).orElseThrow(
                     () -> new IllegalStateException("会话不存在：" + sessionId));
             SessionWriter.Written written = writer.append(
@@ -107,38 +94,27 @@ public class ApprovalService {
 
             SessionWriter.Written latest = written;
             if (!approved) {
-                // **拒绝 = 这次调用到此为止**，得给它记一条收尾。
-                //
-                // 少了它会怎样：界面上那条调用会永远停在"正在跑"的样子
-                // （实际用出来的症状：拒绝之后那一行一直闪），
-                // 而事件流里也留下一个答不出"它后来怎么了"的调用。
-                // 哪些事件算终局，由域层那一处说（见 ToolCallLifecycle）。
-                //
-                // 不带理由：那是"决定"的一部分，已经在上面那条答复里了。见 ToolRejected
+                // 拒绝是这次调用的终点，必须记一条收尾，否则界面上那一行永远停在
+                // “正在跑”，事件流里也答不出“它后来怎么了”。哪些事件算终局见
+                // ToolCallLifecycle。不带理由：理由属于上面的答复。
                 latest = writer.append(written.session(), new ToolRejected(callId), token);
             }
 
-            // **拒绝、而且没留下指示 → 这一轮不接着跑。**
-            //
-            // Claude Code 就是这么分的：留了话（feedback）就把它附进工具结果、接着走；
-            // 没留话就**把整个回合中止掉**。理由是那种情况下模型的处境：用户把这件事
-            // 叫停了，还没说下一步怎么办 —— 让它自己猜一个做法往下跑多半白烧一轮，
-            // 而他叫停的往往正是那个方向。
-            //
-            // 停下来的方式：`abortTurn` 只把轮次号推一格（这一轮对他已经结束了，
-            // 下一句话该是新的一轮），**不打 checkpoint** —— 那一轮没有新的产出位置，
-            // 可回的点还是挂起时那条（它就在这次批准之前）
+            // 拒绝且没有留下指示时，这一轮不接着跑，而是停在“等用户说话”。
+            // 用户叫停了这件事又没说下一步，让模型自己猜多半是浪费一轮调用。
+            // 停下用 abortTurn：只把轮次号推一格，不打 checkpoint —— 这一轮没有
+            // 新的产出位置，可回的点仍是挂起时那条。
             stopHere = !approved && blank(reason);
             if (stopHere) {
-                // 用 latest.session()，不是最上面那个快照：状态已经被 append 推到 WAITING_USER 了，
-                // 拿旧的那份去收尾会再落一条一模一样的迁移事件。
-                // commitSha 传 null：这一轮没有新的产出位置可打（要回退的话，点还是挂起时那条）
+                // 用 latest.session()，不是请求开头那份快照：状态已经被 append 推到
+                // WAITING_USER，用旧的收尾会再落一条一模一样的迁移事件。
+                // commitSha 传 null：这一轮没有新的产出位置可打。
                 writer.abortTurn(latest.session(), null,
                         SessionState.WAITING_USER, "REJECTED", token);
             }
         } finally {
-            // 先把自己的锁放掉再叫执行器 —— 它自己会去抢，而我们持有的话它只会拿到 Busy，
-            // 于是这次答复**静默地什么都没干**（用户以为批了，其实那一轮根本没被唤醒）
+            // 先放锁再叫执行器：它自己会去抢，我们持有时它只会拿到 Busy，
+            // 于是这次答复静默地什么都没做。
             leases.release(token);
         }
 

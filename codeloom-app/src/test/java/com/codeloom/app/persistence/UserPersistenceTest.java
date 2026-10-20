@@ -19,8 +19,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@code user} 表的真库测试。
  *
- * <p>账号上有唯一索引，所以这里每个测试都用随机账号 —— 开发库里可能已经有人手工
- * 注册过账号，撞名会让测试莫名其妙地红，而那不是被测代码的问题。
+ * <p>账号和用户名都有唯一索引，每个测试用随机值：开发库里可能已有手工注册的行，
+ * 撞名会让测试莫名地红，而那与被测代码无关。
  */
 class UserPersistenceTest extends AbstractPersistenceTest {
 
@@ -54,8 +54,7 @@ class UserPersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("【真库】改名改密码不会顺手把 created_at 一起改写")
     void saveDoesNotRewriteCreatedAt() {
-        // created_at 记的是「什么时候注册的」，不是「这一行最后一次被写是什么时候」。
-        // 所以它不在 upsert 的更新列表里 —— 这条测试就是钉住这一点的。
+        // created_at 记的是注册时间，不是最后一次写入时间，所以不在更新列表里。
         User user = register("Carol");
         users.save(user);
 
@@ -80,16 +79,15 @@ class UserPersistenceTest extends AbstractPersistenceTest {
         User clash = new User(UserId.generate(), "user-" + UUID.randomUUID(), BCrypt_HASH,
                 name, REGISTERED_AT);
 
-        // 抛出去，而不是**安静地改掉别人的那一行** —— 那正是 ON DUPLICATE KEY UPDATE
-        // 在有两个唯一键的表上会干的事（见 UserMapper.update 那段）
+        // 要抛出去，而不是安静地改掉别人的行 —— 那正是 ON DUPLICATE KEY UPDATE
+        // 在有两个唯一键的表上会干的事。
         assertThatThrownBy(() -> users.save(clash)).isInstanceOf(DuplicateKeyException.class);
     }
 
     // ------------------------------------------------------------------
 
     /**
-     * 造一个用户。**账号和用户名都带随机尾巴** —— 两条唯一键，而开发库里可能还留着
-     * 上一次跑留下的同名行（清漏了不该让下一次测试莫名地红）。
+     * 造一个用户。账号和用户名都带随机尾巴：两条唯一键，开发库里可能还留着上次的同名行。
      */
     private static User register(String displayName) {
         return User.register("user-" + UUID.randomUUID(), BCrypt_HASH,

@@ -9,24 +9,14 @@ import org.springframework.stereotype.Component;
 import java.util.Optional;
 
 /**
- * 一家 → 它的请求地址。**全应用唯一一处解析地址的地方。**
+ * 服务商到请求地址的解析，全应用唯一一处。
  *
- * <h2>为什么要收成一处</h2>
- * "地址从哪儿来"有**两个来源**，而它们必须有一个确定的优先顺序：
+ * <p>地址有两个来源，优先级固定：{@link Providers} 的预设表优先，其次才是用户密钥记录里的
+ * {@code baseUrl}（只对自定义 provider 有意义）。分开写会让两处对优先级的判断走岔，
+ * 表现为请求发到一个地址、界面显示另一个，且都不报错。
  *
- * <ol>
- *   <li><b>{@link Providers} 那张预设表</b> —— 我们写的、一处，是权威；
- *   <li><b>他自己那条密钥记录里的 {@code baseUrl}</b> —— 给**自定义 provider** 留的位置。
- * </ol>
- *
- * <p>分开写的话，两处对"哪个优先"的判断迟早会不一样，而那种不一致的表现是
- * **请求发到其中一个地址、界面显示另一个**，且两边都不报错。
- *
- * <p>预设优先于记录：预设那几家的地址由我们定（记录里那一列对它们是空的），
- * 记录里那份只在"这一家不是预设"时才有意义。
- *
- * <p>解析不出来就**抛** —— 那意味着这一家既不在预设里、也没留下自己的地址，
- * 配了也用不了。认不出来恰恰是那件事本身，不能悄悄回落到一个默认地址上。
+ * <p>解析不出来就抛错，不悄悄回落到默认地址：那意味着这一家既不是预设、也没留下地址，
+ * 配了也用不了。
  */
 @Component
 public class ProviderEndpoints {
@@ -40,10 +30,13 @@ public class ProviderEndpoints {
     /**
      * 这一家的请求地址。
      *
-     * @throws IllegalStateException 两个来源都没有（认不出来的 id，且他也没填过地址）
+     * @param owner    密钥所属用户
+     * @param provider 服务商
+     * @return 预设地址或用户自定义地址
+     * @throws IllegalStateException 两个来源都没有：认不出来的 id，且用户也没填过地址
      */
     public String baseUrlOf(UserId owner, ProviderId provider) {
-        // 预设优先，见类注释。记录里那条要真读过库才拿得到，所以放在后面探
+        // 预设优先，见类注释；记录里那条要读库，所以放在后面。
         return Providers.find(provider)
                 .map(Providers.Preset::baseUrl)
                 .or(() -> fromRecord(owner, provider))

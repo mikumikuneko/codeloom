@@ -6,7 +6,9 @@
 
 ## 定了什么
 
-**直接调 `git` 可执行文件**（`GitClient`），不用 JGit。每条命令都带一串硬化的 `-c` 参数：中和 `core.hooksPath`、`core.fsmonitor`、`diff.external`、`credential.helper`，固定 `core.autocrlf=false`、`core.longpaths=true`，环境里设 `GIT_CONFIG_NOSYSTEM=1`、`LC_ALL=C`、`GIT_TERMINAL_PROMPT=0`。worktree 里的内容对 agent 可写，所以这些参数是纵深防御 —— 成本是一行，收益是"worktree 里的文件不会让 git 去执行任意命令"。
+**直接调 `git` 可执行文件**（`GitClient`），不用 JGit。每条命令都带一串硬化的 `-c` 参数：中和 `core.hooksPath`、`core.fsmonitor`、`credential.helper`，固定 `core.autocrlf=false`、`core.longpaths=true`，环境里设 `GIT_CONFIG_NOSYSTEM=1`、`LC_ALL=C`、`GIT_TERMINAL_PROMPT=0`。diff 子命令另带 `--no-ext-diff`、`--no-textconv`，关掉外部 diff 和 textconv 程序。worktree 里的内容对 agent 可写，所以这些参数是纵深防御 —— 成本是一行，收益是"worktree 里的文件不会让 git 去执行 hook、外部 diff 或 textconv 程序"。
+
+`filter.*.clean` 不在这条保证里：git 没有能一次关掉全部 filter driver 的配置项，`.gitattributes` 可以给任意 driver 名挂上本地配置里的命令。要挡住它，得在 worktree 之外再隔离 git 配置；单靠这一串参数做不到。
 
 **提交身份每次显式传**：`-c user.name=… -c user.email=…`，不设仓库级身份。身份只出现在**会产生提交的那几个入口**（`runAs` / `runAsOrThrow`），读命令一律不带 —— 否则"这次提交是谁写的"就看不出来了。
 

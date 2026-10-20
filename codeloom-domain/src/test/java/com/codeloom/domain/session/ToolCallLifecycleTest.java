@@ -22,11 +22,10 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 钉住"哪些事件算一次调用的哪一步" —— 它是**全仓唯一**一处这么说的。
+ * 钉住哪些事件算一次调用的哪一步；全仓只有这一处这么说。
  *
- * <p>为什么值得单独钉：几个地方（投影、崩溃恢复）都靠它回答"这次调用结束了没有"，
- * 而它们问的**不是同一个问题** —— 同一件事在两边含义相反。所以这里钉的是**分类本身**
- * （哪一步是哪一步），不是谁拿它做什么。
+ * <p>投影、崩溃恢复与压缩都靠它回答“这次调用结束了没有”，但问的不是同一个问题，同一件
+ * 事在各处含义相反。这里钉的是分类本身，不是谁拿它做什么。
  */
 class ToolCallLifecycleTest {
 
@@ -77,7 +76,7 @@ class ToolCallLifecycleTest {
     @DisplayName("**批准不算终局** —— 那条调用接下来还要跑")
     void approvalIsNotAnEnding() {
         assertThat(ToolCallLifecycle.closedBy(new ToolApprovalResolved("c1", true, LI, null))).isEmpty();
-        // 拒了才算：它从此没有下文
+        // 拒绝的答复本身也不是终局：随后补上的 ToolRejected 才收尾
         assertThat(ToolCallLifecycle.closedBy(new ToolApprovalResolved("c1", false, LI, null))).isEmpty();
     }
 

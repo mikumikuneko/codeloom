@@ -28,21 +28,12 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * BYOK 密钥的真 HTTP 测试。**密钥按"哪一家"各存一把**。
+ * BYOK 密钥的真 HTTP 测试，密钥按服务商各存一把。
  *
- * <h2>这里最该看的两条</h2>
- * <ol>
- *   <li><b>库里存的是密文</b> —— 别的断言验的是接口行为，只有这条验的是
- *       "这件事本身有没有做对"，而它是那种做错了没有任何症状的错：接口全对、功能全通，
- *       只是所有人的密钥在数据库里躺着明文。
- *   <li><b>配了 A 家的 key 不等于配了 B 家</b> —— 这条盯的是一个安全问题，
- *       不是不方便：只看用户不看"哪一家"的话，一个只配了 DeepSeek key 的人把模型切成 Kimi，
- *       DeepSeek 的凭据就会被发到 moonshot 的服务器上。
- * </ol>
+ * <p>重点只有两处：库里存的是密文（接口全对、功能全通时唯一能抓住的断言）；
+ * 配了 A 家的 key 不等于配了 B 家 —— 后者是安全问题，否则一家的凭据会被发到另一家。
  *
- * <h2>测试里用的密钥都是编的</h2>
- * {@link #DEEPSEEK_KEY} 之类只为了有"一长串"可掩码。**真密钥只在界面上配**，
- * 从不进仓库；这里连一把真密钥都不需要。
+ * <p>测试密钥全是编的，只为了有“一长串”可掩码；真密钥从不进仓库。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isDatabaseReachable")
@@ -50,7 +41,7 @@ class ApiKeyApiTest {
 
     /** 预设里的一家：地址由服务端给，请求里不带。 */
     private static final String DEEPSEEK = "deepseek";
-    /** 不被预设认识的一家（自定义 provider）：**必须连地址一起给**。 */
+    /** 不被预设认识的一家（自定义 provider）：必须连地址一起给。 */
     private static final String MOONSHOT = "moonshot";
     private static final String MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1";
 
@@ -104,13 +95,11 @@ class ApiKeyApiTest {
         alice.put("/api/auth/api-key", presetBody(DEEPSEEK, DEEPSEEK_KEY));
         alice.put("/api/auth/api-key", customBody(MOONSHOT, MOONSHOT_BASE_URL, MOONSHOT_KEY));
 
-        // **第二条没有把第一条覆盖掉** —— 只按用户存的话这里只会剩一条
+        // 第二条没有覆盖第一条 —— 只按用户存的话这里只会剩一条。
         assertThat(listKeys(alice)).extracting(node -> node.get("provider").asText())
                 .containsExactly("deepseek", "moonshot");
 
-        // 各自的掩码来自各自的密钥，没有串。
-        // 尾巴**从常量算出来**，不写字面量：写死的话，换一次假密钥就要改一次测试，
-        // 而且改漏的那一半会以"期望值不对"的样子出现，看着像功能坏了
+        // 掩码的尾巴从常量算出来，不写字面量：换假密钥或改位数时不用同步改期望值。
         assertThat(listKeys(alice)).anySatisfy(key -> {
             assertThat(key.get("provider").asText()).isEqualTo("deepseek");
             assertThat(key.get("hint").asText()).endsWith(tailOf(DEEPSEEK_KEY));
@@ -132,8 +121,7 @@ class ApiKeyApiTest {
         alice.put("/api/auth/api-key", presetBody(DEEPSEEK, DEEPSEEK_KEY));
         var me = users.findByUsername(alice.username()).orElseThrow();
 
-        // 这条断言盯的**不是不方便，是安全问题**：要是按用户存一把 key，
-        // 下面这个 Kimi 模型会被发上 DeepSeek 的密钥 —— 把一家的凭据交给另一家
+        // 盯的是安全问题：按用户存一把 key 时，Kimi 模型会被发上 DeepSeek 的密钥。
         assertThat(clients.findClient(me.id(), model(DEEPSEEK))).isPresent();
         assertThat(clients.findClient(me.id(), model(MOONSHOT))).isEmpty();
 
@@ -150,8 +138,8 @@ class ApiKeyApiTest {
         alice.put("/api/auth/api-key", customBody(DEEPSEEK, "https://evil.example.com", DEEPSEEK_KEY));
 
         var me = users.findByUsername(alice.username()).orElseThrow();
-        // 客户端建出来了（有 key），但用的是**预设里的地址** —— 从外面看不出来，
-        // 所以这条断言的落点在下一条：库里那一列对预设是空的，也就是"地址没有第二处来源"
+        // 客户端能建出来，但地址是否被采纳从外部看不出来；
+        // 真正可断言的是库里那一列对预设为空，即“地址没有第二处来源”。
         assertThat(clients.findClient(me.id(), model(DEEPSEEK))).isPresent();
         assertThat(jdbc.queryForObject(
                 "SELECT base_url FROM user_api_key WHERE user_id = ?",
@@ -214,7 +202,7 @@ class ApiKeyApiTest {
 
         assertThat(stored).isNotBlank().isNotEqualTo(DEEPSEEK_KEY);
         assertThat(stored).doesNotContain(DEEPSEEK_KEY);
-        // 连明文里的片段都不该出现 —— 只试整串是不够的
+        // 只试整串不够：明文里的一段也不该出现。
         assertThat(stored).doesNotContain(DEEPSEEK_KEY.substring(3, 20));
     }
 
@@ -227,13 +215,10 @@ class ApiKeyApiTest {
         HttpResponse<String> response = alice.get("/api/auth/api-key");
 
         assertThat(response.statusCode()).isEqualTo(200);
-        // 头八尾四、中间固定五个星：够人认出"那是我换上去的那把"，不足以还原。
-        // 期望值**从常量算出来**，不抄一个示例字面量 —— 换了假密钥、或者服务端改了位数，
-        // 抄来的那份就会以"功能坏了"的样子报错，而实际只是抄的那份过期了
+        // 期望值从常量算出来，不抄示例字面量：换假密钥或改位数时不会假红。
         String hint = DEEPSEEK_KEY.substring(0, 8) + "*****" + tailOf(DEEPSEEK_KEY);
         assertThat(response.body()).contains(hint);
-        // **整串不能出现在响应里的任何地方** —— 把密钥回传的收益是零，
-        // 风险是每响应一次多一次泄漏机会
+        // 整串不能出现在响应任何地方。
         assertThat(response.body()).doesNotContain(DEEPSEEK_KEY);
     }
 
@@ -244,8 +229,7 @@ class ApiKeyApiTest {
         TestBrowser bob = register();
         alice.put("/api/auth/api-key", presetBody(DEEPSEEK, DEEPSEEK_KEY));
 
-        // 接口里没有"按用户查"这回事 —— 拿到的永远是自己的那些。
-        // 这不是"权限没做"，是**根本没有那个入口**（见 ApiKeyStore 的类注释）
+        // 接口里没有“按用户查”这回事，拿到的永远是自己的那些。
         assertThat(listKeys(bob)).isEmpty();
     }
 
@@ -254,8 +238,8 @@ class ApiKeyApiTest {
     void blankInputsAreRejected() throws Exception {
         TestBrowser alice = register();
 
-        // **状态码也要断言**：只查文案的话，一个 500（校验抛的异常被兜成服务端错误）
-        // 只要消息里带上字段名就能通过 —— 而"是客户端传错了"正是这条测试要说的事
+        // 也要断言状态码：只查文案的话，500 只要消息里带字段名就能通过，
+        // 而“是客户端传错了”正是这条测试要说的事。
         HttpResponse<String> noProvider = alice.put("/api/auth/api-key", presetBody("", DEEPSEEK_KEY));
         assertThat(noProvider.statusCode()).isEqualTo(400);
         assertThat(noProvider.body()).contains("provider");
@@ -298,7 +282,7 @@ class ApiKeyApiTest {
         return browser;
     }
 
-    /** 这个浏览器配过哪几家（掩码形式）。**没有任何接口会把原文读回来。** */
+    /** 这个浏览器配过哪几家（掩码形式）。没有任何接口会把原文读回来。 */
     private List<JsonNode> listKeys(TestBrowser browser) throws Exception {
         HttpResponse<String> response = browser.get("/api/auth/api-key");
         assertThat(response.statusCode()).isEqualTo(200);

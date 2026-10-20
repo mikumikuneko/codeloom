@@ -13,37 +13,26 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 在互联网上搜网页，把命中的**来源列表**交给模型：标题、链接、短摘要、日期。
+ * 在互联网上搜索网页，返回来源列表：标题、链接、短摘要、日期。
  *
- * <h2>它刻意不带两样东西</h2>
- * <ul>
- *   <li><b>正文</b>：一条正文就是一个网页。要正文就用 {@link WebFetchTool} 打开那一条。</li>
- *   <li><b>服务商的长摘要</b>（{@code summary}）：文档说"通常 600～800 字符"，实测
- *       一次十条里出现过 3,628 和 5,060 字符的，整条结果 13,882 字符。它长到能直接
- *       编答案时，模型就没有理由再去读原文 —— 于是答案里全是无法核对的说法。
- *       所以这里只给短摘要（{@code snippet}，100～200 字符）：**搜到的是"去哪儿看"，
- *       不是"看到了什么"**。</li>
- * </ul>
+ * <p>不返回正文（用 {@link WebFetchTool} 打开），也不返回服务商的长摘要；长摘要会让模型
+ * 跳过原文直接作答。搜索回答的是“去哪儿看”。
  *
- * <h2>一次可以问几条</h2>
- * 查询是数组（最多 {@value #MAX_QUERIES} 条），结果按名次轮流合并、按 URL 去重，
- * 总数封顶 {@value #MAX_SOURCES} 条。模型想换个说法再搜时，一次给出来比来回两轮便宜；
- * 而条数上限由**工具**定，不由模型定 —— 它多要只会把上下文撑大。
+ * <p>最多 {@value #MAX_QUERIES} 条查询，结果按名次轮流合并、按 URL 去重，总数封顶
+ * {@value #MAX_SOURCES} 条；条数由工具控制，不由模型决定。
  */
 public final class WebSearchTool implements Tool {
 
     private static final int MAX_QUERIES = 4;
 
-    /** 每条查询向服务商要几条。合并之后还会再封顶，见 {@link #MAX_SOURCES}。 */
+    /** 每条查询向服务商请求的条数；合并后还会再封顶。 */
     private static final int PER_QUERY_COUNT = 5;
 
     /** 合并去重之后最多交给模型几条来源。 */
     private static final int MAX_SOURCES = 8;
 
-    /** 每条来源的短摘要最多留这么长；它本来就 100～200 字符，只防个别超长的。 */
+    /** 每条来源的短摘要上限。 */
     private static final int MAX_SNIPPET_CHARS = 200;
-
-    /** 只用来拼界面那份结构化结果；配置一次之后是线程安全的。 */
 
     @Override
     public String name() {
@@ -109,23 +98,20 @@ public final class WebSearchTool implements Tool {
     }
 
     /**
-     * 界面要的那份结构化结果。
+     * 界面所需的结构化结果。不能从给模型的文本反解，那份文本有损；模型看不到这份 JSON。
      *
-     * <p>为什么不从 {@link #format} 的文本里反解：那份文本是有损的（标题、域名、摘要
-     * 压进普通的行里），反解不出来就该是"猜" —— 而猜错的表现是卡片上显示别的东西。
-     * 这份 JSON 是同一份事实的忠实形状，模型看不到它。
+     * @param merged 合并后的来源
+     * @return JSON 文本
      */
     private static String presentation(Merged merged) {
         ObjectNode root = ToolJson.MAPPER.createObjectNode();
         root.put("kind", "web_search");
-        // 不写 truncated：工具砍掉多少条是写给模型的（"想看更多就缩小查询范围"），
-        // 界面上折叠成"展开其余 N 条"已经够了
+        // 不传截断标记：界面折叠展示即可，提示写给模型。
         ArrayNode sources = root.putArray("sources");
         for (WebAccess.Hit hit : merged.hits()) {
             ObjectNode source = sources.addObject();
             source.put("url", text(hit.url(), ""));
-            // 和给模型的那份**同一个长度**：这两份讲的是同一件事，
-            // 而原文整段存进事件既撑大事件流，卡片上也放不下
+            // 与给模型的那份使用同一长度上限，避免事件流膨胀。
             putIfPresent(source, "title", brief(hit.title(), MAX_SNIPPET_CHARS, null));
             putIfPresent(source, "snippet", brief(hit.snippet(), MAX_SNIPPET_CHARS, null));
             putIfPresent(source, "siteName", hit.siteName());
@@ -143,9 +129,10 @@ public final class WebSearchTool implements Tool {
     // ------------------------------------------------------------------
 
     /**
-     * 取出查询：去空白、丢掉空串、**按原顺序去重**。
+     * 取出查询：去空白、丢弃空串、按原顺序去重。相同的查询重复发送只会增加费用。
      *
-     * <p>去重放在调用之前：一模一样的查询发两次，除了多花一次钱不会有新结果。
+     * @param arguments 调用参数
+     * @return 去重后的查询
      */
     private static List<String> queries(JsonNode arguments) {
         Set<String> unique = new LinkedHashSet<>();
@@ -158,11 +145,10 @@ public final class WebSearchTool implements Tool {
     }
 
     /**
-     * 合并多组结果：**按名次轮流取**（每组的第一条、然后每组的第二条……），
-     * 按 URL 去重，总数封顶。
+     * 合并多组结果：按名次轮流取、按 URL 去重、总数封顶。轮流取让每条查询的头名先出现。
      *
-     * <p>轮流而不是"一组接一组"：每组的第一条都是各自查询里最相关的，
-     * 先取这一圈，模型看到的头几条才是每条查询各自的头名。
+     * @param perQuery 每条查询的结果
+     * @return 合并结果
      */
     private static Merged merge(List<List<WebAccess.Hit>> perQuery) {
         List<WebAccess.Hit> merged = new ArrayList<>();
@@ -210,12 +196,12 @@ public final class WebSearchTool implements Tool {
             out.append("\n（只列了前 ").append(MAX_SOURCES)
                     .append(" 条来源；想看更多就缩小查询范围）\n");
         }
-        // 常驻指令：没有它，答案里就会出现"据某媒体报道"这种无从核对的说法
+        // 常驻指令：要求引用 URL，避免无法核对的来源。
         out.append("\n回答里用到上面哪条来源，就把那条 URL 作为 markdown 链接写出来。");
         return out.toString();
     }
 
-    /** 站点和发布时间，有哪个写哪个 —— 模型靠它判断来源与时效。 */
+    /** 站点与发布时间，有哪个写哪个，供模型判断来源与时效。 */
     private static String source(WebAccess.Hit hit) {
         String site = text(hit.siteName(), "");
         String date = text(hit.date(), "");
@@ -230,10 +216,12 @@ public final class WebSearchTool implements Tool {
     }
 
     /**
-     * 压成一行、截到上限。
+     * 压成一行并截到上限；换行会让界面折叠后只剩第一行。
      *
-     * <p>换行必须压掉：一条来源自带换行时能占几十行，界面折叠之后只剩第一行 ——
-     * 人看不见它到底读了什么。
+     * @param value    原文
+     * @param limit    字符上限
+     * @param fallback 空值时的替代文本
+     * @return 单行文本
      */
     private static String brief(String value, int limit, String fallback) {
         if (value == null || value.isBlank()) {

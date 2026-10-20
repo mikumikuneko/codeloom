@@ -28,12 +28,11 @@ import static org.mockito.Mockito.when;
 /**
  * 浏览工作区的规则。
  *
- * <p><strong>不连库、不连 Redis</strong> —— 这个服务只依赖 {@code WorkspaceManager} 一个端口，
- * 工作区就是一个真目录（{@code @TempDir}）。所以这些断言在任何机器上都跑，
- * 而且验的是"文件系统上真实的规矩"，不是桩出来的。
+ * <p>不连库、不连 Redis：服务只依赖 {@code WorkspaceManager} 一个端口，工作区是
+ * {@code @TempDir} 下的真目录，所以断言验的是文件系统上真实的规矩，不是桩出来的。
  *
- * <p>入参是**所有者 + 项目**，不是会话：树挂在「人 + 项目」上，"看哪个目录"和有没有会话
- * 无关（见 {@code WorkspaceId}）。测试里那个 {@code Session} 只用来取这两半。
+ * <p>入参是所有者加项目，不是会话：树挂在“人 + 项目”上，看哪个目录与有没有会话无关。
+ * 测试里的 {@code Session} 只用来取这两半。
  */
 class WorkspaceFilesServiceTest {
 
@@ -157,8 +156,8 @@ class WorkspaceFilesServiceTest {
     void symlinkPointingOutsideIsRejectedOnRead() throws IOException {
         Path outside = tempDir.resolve("outside.txt");
         Files.writeString(outside, "不该被读到");
-        // assumeTrue 而不是 return —— 后者会让"没断言"也算通过，
-        // 于是这条安全规则到底验没验过，从报告上看不出来
+        // 用 assumeTrue 而不是 return：后者会让“没断言”也算通过，
+        // 这条安全规则到底验没验过从报告上看不出来。
         Assumptions.assumeTrue(createSymlink(projectRoot.resolve("link.txt"), outside),
                 "这个平台不让建符号链接（Windows 上要开发者模式）");
 

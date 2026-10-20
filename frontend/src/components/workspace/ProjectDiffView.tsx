@@ -8,18 +8,15 @@ import { parseUnifiedDiff } from '@/lib/unifiedDiff'
 import { useAsync } from '@/lib/useAsync'
 
 /**
- * 工作区中栏：看**某一轮**对某个文件做了什么。
+ * 工作区中栏：看某一轮对某个文件做了什么。
  *
- * <h2>它和"看一个文件"是两件事</h2>
- * {@link CodeView} 给的是这个文件**现在**的样子。这个给的是**那一轮对它做了什么** ——
- * 两者在同一栏里出现，所以顶上要说清是哪一种；光看正文是分不出来的。
+ * 它和"看一个文件"是两件事：{@link CodeView} 给这个文件现在的样子，这个给那一轮
+ * 对它做了什么。两者在同一栏出现，所以顶上要说清是哪一种；光看正文分不出来。
+ * 回滚之后后者才显出用处：文件已不是那个样子，只有按提交取的这一段还看得见。
  *
- * <p>后者在**回滚之后**才显出用处：退回去之后，文件已经不是那个样子了，
- * 只有按提交取的这一段还看得见。
- *
- * <h2>为什么正文是去问来的，而不是跟着流过来的</h2>
- * 事件里只有"改了哪些文件、各多少行"。正文按需取 —— 它每次收尾都会追加，
- * 而把它塞进事件等于让每一处读事件的地方都为它买单。见后端那条决策。
+ * 正文按需问，不跟着流过来：事件里只有改了哪些文件、各多少行。正文每次收尾都会
+ * 追加，塞进事件等于让每一处读事件的地方都为它买单。见
+ * `docs/decisions/feature/2026-10-10-file-diff-is-fetched-on-demand.md`。
  */
 export function ProjectDiffView({
   projectId,
@@ -30,11 +27,10 @@ export function ProjectDiffView({
   projectId: string
   commitSha: string
   path: string
-  /** 关掉它 —— 关完落回"{@link CodeView}"，看这个文件现在的样子 */
+  /** 关掉它，落回 {@link CodeView} 看这个文件现在的样子 */
   onClose: () => void
 }) {
-  // 拉一段改动 = 标准的三件事（加载 / 出错 / 取消），见 useAsync。
-  // 从前这里手写了一遍，行为和 useAsync 一模一样
+  // 拉一段改动 = 标准三件事（加载 / 出错 / 取消），见 useAsync。
   const { data, error, loading } = useAsync(
     () => projects.diff(projectId, commitSha, path),
     [projectId, commitSha, path],
@@ -46,14 +42,14 @@ export function ProjectDiffView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 和中栏左右那两栏的标签同高 —— 三条顶边落在一条线上，见 index.css 里的 .pane-head */}
+      {/* 和中栏左右两栏的标签同高：三条顶边落在一条线上，见 index.css 的 .pane-head */}
       <header className="pane-head gap-3 px-4">
         <span className="truncate font-mono text-xs text-muted-foreground">{path}</span>
         <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-loom-faint">
-          {/* 顶上必须说这是哪一种 —— 同一栏里"文件的内容"和"这一轮的改动"长得像 */}
+          {/* 顶上必须说这是哪一种：同一栏里"文件的内容"和"这一轮的改动"长得像 */}
           <span>这一轮的改动</span>
           {data?.truncated === true && <span>只显示了前面一段</span>}
-          {/* 表头那三样都是字，只有这一个不是 —— 所以它得让人看出来是能按的 */}
+          {/* 表头三样里只有它不是字，所以得让人看出来能按 */}
           <button
             type="button"
             title="关掉，看它现在的样子"

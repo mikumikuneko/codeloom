@@ -33,10 +33,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 换模型时**必须从租约之后的状态出发**，不能用控制器送来的请求快照。
+ * 换模型必须从拿到租约后重读的状态出发，不能使用控制器送来的请求快照。
  *
- * <p>这是那些"整行 upsert"最容易漏掉的一条：等锁期间另一轮可能已经跑完并推进了
- * {@code turn_index}/状态，而 {@code Session.withModel} 会把旧值一起写回去。
+ * <p>整行 upsert 最容易漏掉这一点：等锁期间另一轮可能已跑完并推进 {@code turn_index}
+ * 与状态，而 {@code Session.withModel} 会把旧值一起写回。
  */
 class SessionServiceSwitchModelTest {
 
@@ -81,7 +81,7 @@ class SessionServiceSwitchModelTest {
         Session result = service.switchModel(stale, expected.provider(), expected.modelId());
 
         assertThat(result).isEqualTo(fresh.withModel(expected));
-        // 这一条是这次修复的核心：传给写入层的是**重读之后**的会话
+        // 核心断言：写入层拿到的是重读之后的会话
         verify(writer).changeModel(eq(fresh), any(ModelConfig.class), eq(token));
     }
 }

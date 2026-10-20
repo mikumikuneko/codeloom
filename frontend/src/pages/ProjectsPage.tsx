@@ -12,29 +12,26 @@ import { useAuth } from '@/stores/auth'
 /**
  * 我的项目。
  *
- * <h2>一行一张卡片，而每一行要有**一个看得见的锚点**</h2>
- * 从前这一行只有两段字（项目名 + 成员名）靠间距排开，于是它读起来像一张没做完的表 ——
- * 左边空落落的，眼睛没有落脚的地方。现在每行左边有一个文件夹图标（**和文件树里同一个**，
- * 钢蓝色、只有图标上色），名字在它右边，成员降成第二行的小字。
+ * 一行一张卡片，每行左边有一个看得见的锚点：文件夹图标和文件树里同一个（钢蓝色、
+ * 只有图标上色），名字在右边，成员降成第二行小字。只有两段字靠间距排开读起来像
+ * 一张没做完的表。
  *
- * <p>形状是 deepseek-harness 那份圆角规范里说的"独立内容卡片"档（R20 + 卡片底色 + 发丝描边）——
- * 账号、余额、模型提供商那些卡片用的是同一套材质，所以一整站看下来是同一个东西。
+ * 材质是"独立内容卡片"：圆角 + 卡片底色 + 发丝描边，和账号、供应商那些卡片同一套。
  *
- * <h2>还是一列，不是网格</h2>
- * 一张卡片适合"内容互不相干、形状差不多"的东西；而这里的每一行仍然只说两件事：
- * **它叫什么**、**有谁在**。所以是一列卡片，不是一格一格的方块 —— 那样连同"一共有几个
- * 项目"都变得难数。
+ * 还是列而不是网格：每行只说两件事——它叫什么、有谁在；一格一格的方块会让"一共
+ * 有几个项目"都难数。
  */
 export function ProjectsPage() {
   const { data: mine, error, loading, reload } = useAsync(() => projects.mine(), [])
   const [open, setOpen] = useState(false)
 
   /**
-   * 这一页也**安静地**自己刷：成员名是"谁在这个项目里"，对方刚通过邀请链接加入时，
-   * 这里的卡片也应该跟上（和 {@code WorkspacePage} 的轮询是同一个理由）。
+   * 这一页也安静地自己刷：成员名是"谁在这个项目里"，对方刚通过邀请链接加入时，
+   * 卡片也该跟上。理由见
+   * `docs/decisions/feature/2026-10-18-live-lists-poll-while-visible.md`。
    *
-   * <p>用 `quiet` 重拉：这一页的 loading 会在列表上面挂一句"正在读取…" ——
-   * 每 5 秒闪一次比不刷新更糟。
+   * 用 quiet 重拉：这一页的 loading 会在列表上面挂"正在读取…"，每 5 秒闪一次比
+   * 不刷新更糟。
    */
   const liveReload = useRef(reload)
   useEffect(() => {
@@ -61,14 +58,13 @@ export function ProjectsPage() {
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <h1 className="text-xl font-medium">我的项目</h1>
-          {/* 一句话说清这一页是什么。**没有它，顶部就只有四个字加一个按钮，
-              下面一大片空** —— 那句话是拿来把"空"接住的 */}
+          {/* 一句话说清这一页是什么：没有它，顶部只有四个字加一个按钮，下面一大片空 */}
           <p className="text-sm text-muted-foreground">
             每个项目两个人，各自一个 agent，共用同一棵代码树。
           </p>
         </div>
-        {/* 一个页面只挂**一个**弹窗。两个入口、两个实例的话，空项目时
-            两份遮罩和两份表单会同时出现（它们共享同一个 open） */}
+        {/* 一个页面只挂一个弹窗：两个入口、两个实例的话，空项目时两份遮罩和两份
+            表单会同时出现（它们共享同一个 open） */}
         <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
           新建项目
         </Button>
@@ -78,11 +74,9 @@ export function ProjectsPage() {
       {error && <Note tone="error">{error}</Note>}
 
       {mine && mine.length === 0 && (
-        // 空状态是**一次邀请**，不是一句"暂无数据"：它该告诉人"从这里开始会怎样"。
-        //
-        // 而且它**落在视线中间**：一个人还没有项目的时候，这一页上只有这一件事 ——
-        // 把它按在左上角，剩下整屏空白就变成"这页面坏了/还没做完"。
-        // 居中说的是"这里本来就只有一件事要做"，而那句话下面得有个按钮
+        // 空状态是一次邀请，不是一句"暂无数据"：它该告诉人"从这里开始会怎样"，
+        // 而且落在视线中间——还没有项目时这一页只有这一件事，按在左上角会让整屏
+        // 空白变成"页面坏了/还没做完"。下面得有一个按钮。
         <div className="flex min-h-[50vh] flex-col items-center justify-center gap-4">
           <p className="max-w-xs text-center text-sm leading-6 text-muted-foreground">
             还没有项目。建一个 —— 建完把链接发给对方，他点开就能进来。
@@ -94,9 +88,8 @@ export function ProjectsPage() {
       {mine && mine.length > 0 && (
         <ul className="flex flex-col gap-2">
           {mine.map((project) => (
-            // 「退出」放在链接**外面**、和它并排：它是这一行上的另一个动作，
-            // 不是"进项目"的一部分。放进链接里就成了一个嵌在链接里的按钮，
-            // 点哪一半取决于鼠标落在哪个像素上
+            // 「退出」放在链接外面、和它并排：它是这一行上的另一个动作，不是"进
+            // 项目"的一部分。放进链接里，点哪一半取决于鼠标落在哪个像素上。
             <li
               key={project.id}
               className="flex items-center rounded-xl border border-border bg-card pr-2 transition-colors hover:border-input"
@@ -108,8 +101,8 @@ export function ProjectsPage() {
                 <Folder className="size-4 shrink-0 text-loom-folder" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-medium">{project.name}</span>
-                  {/* 成员降成第二行的小字，**代替"每个项目最多两个人"那句说明** ——
-                      看得见的两个名字，比一句关于数量的规则有用 */}
+                  {/* 成员降成第二行小字，代替"每个项目最多两个人"那句说明：
+                      看得见的两个名字比一句数量规则有用 */}
                   <span className="block truncate text-xs text-muted-foreground">
                     {project.members.map((m) => m.displayName).join('、')}
                   </span>
@@ -121,8 +114,7 @@ export function ProjectsPage() {
         </ul>
       )}
 
-      {/* 弹窗**只挂这一个**：页头和空状态各放一个触发按钮，但表单、遮罩、
-          以及那些输入状态都只有一份（见上面那段注释） */}
+      {/* 弹窗只挂这一个：页头和空状态各放触发按钮，但表单、遮罩和输入状态只有一份 */}
       <CreateProjectDialog open={open} onOpenChange={setOpen} onCreated={reload} />
     </div>
   )
@@ -137,8 +129,7 @@ function CreateProjectDialog({
   onOpenChange: (open: boolean) => void
   onCreated: () => void
 }) {
-  // 关掉就卸载：名字和错误跟着一起清掉。表单本身**和文件树的命名框共用一份**
-  // （见 NameInputDialog）—— 一个输入框加一句就地错误，不该有两套状态机
+  // 关掉就卸载：名字和错误跟着清掉。表单与文件树的命名框共用 NameInputDialog。
   if (!open) {
     return null
   }
@@ -167,20 +158,14 @@ function CreateProjectDialog({
 /**
  * 退出项目。
  *
- * <h2>同一句"退出"，对不同的人意味着不同的事 —— 所以按钮前面那一段必须说清是哪一种</h2>
- * 三种情形，三种后果：
- * <ul>
- *   <li><b>还是房主、项目里还有别人</b> → 房主转给对方，项目继续开着</li>
- *   <li><b>最后一个成员</b> → 项目本身没了：仓库、聊天记录、对话</li>
- *   <li><b>普通成员</b> → 只带走自己的那份，对方和聊天记录不受影响</li>
- * </ul>
+ * 同一句"退出"对不同的人意味着不同的事，所以文案必须说清是哪一种：还是房主且项目
+ * 里还有别人 → 房主转给对方，项目继续；最后一个成员 → 项目本身没了（仓库、聊天
+ * 记录、对话）；普通成员 → 只带走自己的那份，对方和聊天记录不受影响。
  *
- * <p>这三句话**由服务端的 {@code ownerId} 推出来**，不是客户端自己定的规矩；
- * 真正干活的权限判断也全在服务端。这里只是把它说出来。
- *
- * <h2>为什么没有"删除项目"</h2>
- * 因为一个动作**不该把对方脚下的地抽走**。要把项目彻底消掉，得两个人各自退出 ——
- * 所以这里只说"你退出会怎样"，不承诺任何关于对方的事。
+ * 这三句话由服务端的 `ownerId` 推出来，真正干活的权限判断也全在服务端；这里只是
+ * 说出来。没有"删除项目"：一个动作不该把对方还在用的项目一起删掉——要彻底消掉，
+ * 得两个人各自退出。见
+ * `docs/decisions/architecture/2026-10-20-leaving-takes-your-tree-with-you.md`。
  */
 function LeaveDialog({ project, onLeft }: { project: Project; onLeft: () => void }) {
   const me = useAuth((s) => s.user)
@@ -192,9 +177,8 @@ function LeaveDialog({ project, onLeft }: { project: Project; onLeft: () => void
 
   return (
     <>
-      {/* 平时只是极淡的两个字，指上去才变红 —— 它是个破坏性动作，
-          但不该比"进哪个项目"更响。用素按钮而不是 Button：列表里
-          不需要一个带悬停底色的方框 */}
+      {/* 平时只是极淡的两个字，指上去才变红：破坏性动作不该比"进哪个项目"更响。
+          用素按钮而不是 Button，列表里不需要带悬停底色的方框 */}
       <button
         type="button"
         onClick={() => setOpen(true)}
@@ -203,8 +187,8 @@ function LeaveDialog({ project, onLeft }: { project: Project; onLeft: () => void
         退出
       </button>
 
-      {/* 危险操作的确认框**只有一份实现**（见 ConfirmDialog）：
-          状态、错误、两个按钮的语义都在那儿，这里只提供文案和那件要做的事 */}
+      {/* 危险操作的确认框只有一份实现（ConfirmDialog）：状态、错误、按钮语义
+          都在那儿，这里只提供文案和要做的事 */}
       {open && (
         <ConfirmDialog
           title={`退出「${project.name}」`}
@@ -233,7 +217,7 @@ function LeaveDialog({ project, onLeft }: { project: Project; onLeft: () => void
   )
 }
 
-/** 一句提示。**没有框、没有底色** —— 它只是一句话，不该比它描述的东西更响。 */
+/** 一句提示。没有框、没有底色：它只是一句话，不该比它描述的东西更响。 */
 function Note({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {
   return (
     <p

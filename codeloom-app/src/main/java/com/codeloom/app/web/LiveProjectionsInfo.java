@@ -8,14 +8,12 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 
 /**
- * 把"常驻了多少条会话投影"放进 {@code /actuator/info}。
+ * 把常驻会话投影的规模放进 {@code /actuator/info}。
  *
- * <h2>为什么这件事要有个读点</h2>
- * 那张表按"这个进程跑过一轮的会话数"增长，而它在**越界之前是看不见的** ——
- * 压测也压不出来（假模型的对话太短）。{@code codeloom.live-projections} 和它那条字节上限
- * 要凭一个数来调，这个数就是它。
+ * <p>投影表按进程跑过一轮的会话数增长，越界前不可见，压测也压不出来（假模型对话太短）；
+ * {@code codeloom.live-projections} 及字节上限要靠这个数来调整。
  *
- * <p>报的只有条数与大致字节，**没有会话 id、没有内容** —— 那是个放行的端点，谁都能问。
+ * <p>只报条数和大致字节，不含会话 id 和内容：该端点放行，任何人都能问。
  */
 @Component
 public class LiveProjectionsInfo implements InfoContributor {
@@ -26,6 +24,9 @@ public class LiveProjectionsInfo implements InfoContributor {
         this.projections = projections;
     }
 
+    /**
+     * @param builder actuator info 构建器
+     */
     @Override
     public void contribute(Info.Builder builder) {
         SessionProjections.LiveReport report = projections.liveReport();

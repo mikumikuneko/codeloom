@@ -20,20 +20,14 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * 邀请链接。
+ * 邀请链接接口。
  *
- * <h2>两组端点，权限完全不同</h2>
- * <ul>
- *   <li>{@code /api/projects/{id}/invitations} —— 生成、列出、撤销。**要项目成员**，
- *       因为这三件事都是在动"谁能进来"。
- *   <li>{@code /api/invitations/{token}} —— 预览和接受。**拿着链接的人就能做**，
- *       而预览那条连登录都不要（见 {@code InvitationService.preview} 的注释）。
- * </ul>
+ * <p>两组端点权限不同：{@code /api/projects/{id}/invitations} 的生成、列出、撤销需要
+ * 项目成员，因为它们决定谁能进来；{@code /api/invitations/{token}} 的预览和接受
+ * 只要拿着链接即可，预览连登录都不要求（见 {@code InvitationService.preview}）。
  *
- * <h2>返回的是 token 而不是完整链接</h2>
- * 完整链接要拼上前端自己的地址，而**服务端不知道它在外面叫什么**（反向代理、
- * 换域名、本地开发是 localhost:5173……猜错就是把一张指向错误地址的链接发出去）。
- * 客户端拿 token 拼 {@code /invite/<token>} 是它本来就知道的事。
+ * <p>返回 token 而不是完整链接：服务端不知道前端对外是什么地址（反向代理、换域名、
+ * 本地开发），猜错就会发出指向错误地址的链接。客户端拿 token 拼 {@code /invite/TOKEN}。
  */
 @RestController
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -58,6 +52,11 @@ public class InvitationController {
     // 项目这一侧：生成 / 列出 / 撤销（要成员）
     // ------------------------------------------------------------------
 
+    /**
+     * 生成一张邀请；已有的有效邀请会同时作废。
+     *
+     * @return 新邀请的 token 与时间
+     */
     @PostMapping("/api/projects/{projectId}/invitations")
     @ResponseStatus(HttpStatus.CREATED)
     public InvitationView issue(Principal principal, @PathVariable String projectId) {
@@ -67,10 +66,10 @@ public class InvitationController {
     }
 
     /**
-     * 这个项目**现在还能用**的邀请 —— 界面上那张凭据清单就是它。
+     * 这个项目现在还能用的邀请，即界面上的凭据清单；作废的不在其中。
+     * 理由见 {@link InvitationService#pending}。
      *
-     * <p>作废的（用过、撤过、过期）不在里面：它们不是凭据了。理由见
-     * {@code InvitationService.pending}。
+     * @return 有效邀请
      */
     @GetMapping("/api/projects/{projectId}/invitations")
     public List<InvitationView> pending(Principal principal, @PathVariable String projectId) {
@@ -80,11 +79,9 @@ public class InvitationController {
     }
 
     /**
-     * 撤销一张。
+     * 撤销一张邀请；已撤销时幂等返回 204。
      *
-     * <p>token 放在路径里而不是查询参数：它只用 base64url 的字符集，没有
-     * {@code .} 那种会让人担心被截断的字符（那是 host 走查询参数的原因，见
-     * {@code ApiKeyController.remove}）。
+     * <p>token 放在路径里：它只使用 base64url 字符集，没有会被误认为截断的字符。
      */
     @DeleteMapping("/api/projects/{projectId}/invitations/{token}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -101,15 +98,12 @@ public class InvitationController {
     // ------------------------------------------------------------------
 
     /**
-     * 点开链接先看到的东西：谁邀请你加入哪个项目。
+     * 点开链接先看到的预览：谁邀请你加入哪个项目。
      *
-     * <p><strong>登录是可选的</strong>：还没注册的人点开链接也该看得见自己在被邀请去哪，
-     * 否则他无从判断该不该费劲注册（理由写在 {@code InvitationService.preview} 的注释里）。
-     * 所以这里拿 {@code Principal} 但**不 require** —— 没人登录时它是 null，
-     * 那正是"匿名访客"这一态。
+     * <p>登录可选，因此这里拿 {@code Principal} 但不 require —— 未登录时为 null，
+     * 即匿名访客。登录者额外拿到自己相对链接的身份，界面据此给「加入项目」或「打开项目」。
      *
-     * <p>登录着的人额外拿到一句"他自己处在哪一态"（还没加入 / 已经在里面 / 就是他发的），
-     * 界面靠它决定给「加入项目」还是「打开项目」。
+     * @return 邀请预览；不可用时带原因
      */
     @GetMapping("/api/invitations/{token}")
     public InvitationService.InvitationPreview preview(Principal principal,
@@ -118,7 +112,7 @@ public class InvitationController {
         return invitations.preview(token, me == null ? null : me.id());
     }
 
-    /** 真正加入。**这一步要登录** —— 成员身份得挂在某个人身上。 */
+    /** 真正加入；这一步要求登录，成员身份必须挂在某个人身上。 */
     @PostMapping("/api/invitations/{token}/accept")
     public ProjectView accept(Principal principal, @PathVariable String token) {
         User me = currentUser.require(principal);
@@ -128,16 +122,14 @@ public class InvitationController {
     // ------------------------------------------------------------------
 
     /**
-     * 一张邀请长什么样。
+     * 一张有效邀请。
      *
-     * <p>只有这三个字段：**这个视图里出现的，都是此刻还能用的**（作废的不进这个视图 ——
-     * 见 {@code InvitationService.pending} 和 {@code issue}）。所以没有"能不能用"和
-     * "为什么不能用"这两栏 —— 它们要么恒为真、要么恒为空，那种字段只会让人以为还有别的状态。
+     * <p>视图里出现的都是此刻还能用的，因此没有"是否可用"和"原因"字段；那些信息在
+     * {@code /api/invitations/{token}} 返回的 {@code InvitationPreview} 里。
      *
-     * <p>不能用时的原因在**另一条路**上：拿着链接的人打开 {@code /api/invitations/{token}}
-     * 会拿到 {@code InvitationPreview}，那里有 {@code usable} 和 {@code reason}。
-     *
-     * @param token 客户端拿它拼 {@code /invite/<token>}。**服务端不拼完整链接**，见类注释
+     * @param token     客户端拿它拼 {@code /invite/TOKEN}；服务端不拼完整链接（见类注释）
+     * @param createdAt 生成时间
+     * @param expiresAt 失效时间
      */
     public record InvitationView(String token, Instant createdAt, Instant expiresAt) {
 

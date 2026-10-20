@@ -19,19 +19,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@code session} 表的真库测试。
  *
- * <p>和 {@code SessionRowTest} 的分工：那边测「行 ↔ 领域对象」的转换（纯函数，不碰库），
- * 这里测**被 MySQL 和 MyBatis 真实执行之后**的结果。有几件事只有跑真库才能验证：
+ * <p>与 {@code SessionRowTest} 分工：那边测行与领域对象的转换（纯函数），这里测 MySQL
+ * 和 MyBatis 真实执行后的结果 —— upsert 的“存在就更新”分支真的走到，以及 record
+ * 结果类型能按列别名正确装配（record 没有 {@code getId()}，这是纸面上最不确定的一点）。
  *
- * <ul>
- *   <li>{@code INSERT ... ON DUPLICATE KEY UPDATE ... AS new} 的写法真能跑，且
- *       「存在就更新」那一支真的走到
- *   <li>把 record 当结果类型，MyBatis 能不能按列别名把这 10 个值正确装配出来 ——
- *       纸面上最不确定的一点，因为 record 没有 {@code getId()}
- * </ul>
- *
- * <h2>这张表上已经没有 fencing_token 了</h2>
- * 那一列连同它的安全约束（普通写入绝不能把它写回旧值）搬到了 {@code workspace} 表 ——
- * 锁锁的是**一棵树**，号的键必须和锁的键是同一个。那两条断言现在住在
+ * <p>{@code fencing_token} 已不在本表：它随锁搬到 {@code workspace}，那两条断言住在
  * {@code WorkspacePersistenceTest}。
  */
 class SessionPersistenceTest extends AbstractPersistenceTest {

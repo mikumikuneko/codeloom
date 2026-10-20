@@ -1,22 +1,14 @@
 package com.codeloom.domain.event;
 
 /**
- * 用户拒绝了这次调用：它**没有执行**，而且不会再有结果了。
+ * 用户拒绝了这次调用：它没有执行，也不会再有结果。
  *
- * <h2>它和 {@link ToolApprovalResolved} 是两个事实，别合并</h2>
- * 那条记的是"**谁做了这个决定、为什么**"—— 一份审批记录，事后要查得到是谁点的头。
- * 这条记的是"**这次调用到此为止**"。
- *
- * <p>分开是必要的，因为两条命不一样：批准之后那次调用还会真的跑、还会产出
- * {@link ToolResult}；而拒绝之后**什么都不会再来了**。
- *
- * <h2>为什么必须有一条这样的记录</h2>
- * 缺了它，界面上那条调用会永远停在"正在跑"的样子 —— 实际用出来的症状就是
- * "拒绝了之后那行一直闪"，因为它的判据正是"没有结果、也没有'没跑成'"。
- * 哪些事件算终局，由域层那一处说 —— 见 {@link com.codeloom.domain.session.ToolCallLifecycle}。
- *
- * <p>**不带理由**：理由是那个"决定"的一部分，已经在
- * {@link ToolApprovalResolved#reason()} 里了。这条只管一件事 —— 它结束了。
+ * <p>它和 {@link ToolApprovalResolved} 是两个事实：那条记"谁做了决定、为什么"，这条记"这次调用
+ * 到此为止"。批准之后还会真的跑并产出 {@link ToolResult}，拒绝之后什么都不会再来。缺少它，
+ * 界面上的调用会一直停在"正在跑"。终局判据见
+ * {@link com.codeloom.domain.session.ToolCallLifecycle}；理由在
+ * {@link ToolApprovalResolved#reason()}。见
+ * {@code docs/decisions/bug-fix/2026-10-05-a-rejected-call-gets-its-own-event}。
  *
  * @param callId 哪一次调用
  */

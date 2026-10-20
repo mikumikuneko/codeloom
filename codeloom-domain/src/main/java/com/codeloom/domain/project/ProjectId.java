@@ -11,10 +11,21 @@ public record ProjectId(String value) {
         }
     }
 
+    /**
+     * 从文本构造；空白值会被拒绝。
+     *
+     * @param value 项目标识文本
+     * @return 项目标识
+     */
     public static ProjectId of(String value) {
         return new ProjectId(value);
     }
 
+    /**
+     * 新项目标识。
+     *
+     * @return 随机 UUID 文本形式的项目标识
+     */
     public static ProjectId generate() {
         return new ProjectId(UUID.randomUUID().toString());
     }

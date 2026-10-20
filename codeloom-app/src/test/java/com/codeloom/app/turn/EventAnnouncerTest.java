@@ -21,14 +21,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
- * {@link EventAnnouncer} 的时机契约：**提交之前一条都不发，提交之后按落库顺序发**。
+ * {@link EventAnnouncer} 的时机契约：提交前一条都不发，提交后按落库顺序发。
  *
- * <h2>为什么这一条是不起 Spring 上下文的单测</h2>
- * 要验的是"提交那一刻才发"，而**连库的测试里那个提交只可能发生在测试方法跑完之后**
- * （方法自己的事务是回滚的）。所以这里直接驱动 Spring 那本同步登记簿：
- * {@code initSynchronization()} 摆出"有事务在跑"的样子，收尾时自己调 {@code afterCommit}。
- * 真落库 + 真总线那一版在 {@code SessionWriterAnnouncementTest} 里 —— 两条一起才盖住
- * "机制对"和"那条路真的走了这个机制"。
+ * <p>这里不起 Spring 上下文：连库的测试中提交只可能发生在测试方法之后（方法事务回滚），
+ * 所以直接驱动 Spring 的同步登记簿：{@code initSynchronization()} 模拟事务进行中，
+ * 再手动调用 {@code afterCommit}。真落库加真总线的版本在
+ * {@code SessionWriterAnnouncementTest}，两者合起来覆盖"机制正确"和"该路径真的走了它"。
  */
 class EventAnnouncerTest {
 
@@ -64,8 +62,8 @@ class EventAnnouncerTest {
         announcer.announce(List.of(event(1)));
         announcer.announce(List.of(event(2)));
 
-        // 顺序反的话，订阅端已经见过 seq=2，会把 seq=1 当成"重连时重复的那一条"直接丢掉 ——
-        // 而那一条就永远不会再来了（判据在 SessionStreamService.deliver）
+        // 顺序反了，订阅端已见过 seq=2，会把 seq=1 当作重连时的重复直接丢弃，而它不会再出现
+        //（判据见 SessionStreamService.deliver）
         commit();
         assertThat(bus.published).extracting(StoredEvent::seq).containsExactly(1L, 2L);
     }

@@ -11,20 +11,22 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 /**
- * 把一个项目导出成 zip —— 界面上那个"下载"。
+ * 把一个项目的主干导出成 zip，即界面上的"下载"。
  *
- * <h2>导的是主干</h2>
- * "下载这个项目"要的是**它现在是什么样**，那是主干。各人树上的东西是半成品，
- * 而且每个人一份 —— 按钮上写清"主干"，语义就只有一个。
+ * <p>导出的是主干而不是某个人的工作区：后者是半成品，而且每人一份。先让 git 写临时文件
+ * 再流式发出，因为 {@code git archive} 输出二进制，而子进程读取会按字符集解码。
  *
- * <h2>为什么先落临时文件再发</h2>
- * {@code git archive} 吐的是二进制，而子进程读取那条路会按字符集解码（见 {@code ProcessRunner}）——
- * 二进制过一趟字符集就坏了。所以让 git 自己写文件，再把文件流出去，发完删掉。
+ * <p>下载语义见 {@code docs/decisions/feature/2026-10-08-download-the-project-as-zip.md}。
  */
 @Service
 public class ProjectArchive {
 
-    /** 一个已经导出好的包。**用完必须 {@link #discard}** —— 它是个临时目录，没有别人会替我们清。 */
+    /**
+     * 一个已经导出好的包。用完必须 {@link #discard}：它位于临时目录，没有别人会清理。
+     *
+     * @param file         临时 zip 文件
+     * @param downloadName 下载时显示的文件名
+     */
     public record Archived(Path file, String downloadName) {
     }
 
@@ -34,13 +36,20 @@ public class ProjectArchive {
         this.workspaces = workspaces;
     }
 
+    /**
+     * 把主干导出成临时 zip。
+     *
+     * @param project 要导出的项目
+     * @return 临时文件及下载名；调用方负责 {@link #discard}
+     * @throws UncheckedIOException 临时文件创建或导出失败
+     */
     public Archived of(Project project) {
         String stem = safeStem(project.name());
         try {
-            // 系统临时目录 + 随机名字：导出物里没有秘密，但也没有理由落在可预测的位置上
+            // 系统临时目录 + 随机名字：内容没有秘密，但也没有理由放在可预测的位置
             Path staging = Files.createTempDirectory("codeloom-archive-");
             Path zip = staging.resolve(stem + ".zip");
-            // 只导项目根那棵子树 —— 仓库里还有 untitled 这一层，而"下载这个项目"不该多出它
+            // 只导项目根子树：仓库里还有 untitled 这一层，"下载这个项目"不该多出它
             workspaces.archive(Path.of(project.repoPath()),
                     WorkspaceManager.MAIN_BRANCH + ":" + ProjectLayout.DIRECTORY, zip);
             return new Archived(zip, stem + "-main.zip");
@@ -49,7 +58,11 @@ public class ProjectArchive {
         }
     }
 
-    /** 删掉整个暂存目录（不是只删那个 zip —— 目录是我们建的，就该我们收）。 */
+    /**
+     * 删掉整个暂存目录，而不只是 zip：目录是本类建的，由本类清理。
+     *
+     * @param archived 要清理的导出物；可重复调用
+     */
     public void discard(Archived archived) {
         Path staging = archived.file().getParent();
         if (staging != null) {

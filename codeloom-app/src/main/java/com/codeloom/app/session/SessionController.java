@@ -38,15 +38,11 @@ import java.security.Principal;
 import java.util.List;
 
 /**
- * 会话接口：建、查、列、发消息。
+ * 会话接口：建、查、列、发消息、中断、换模型、审批、留言、读事件、丢弃、回滚。
  *
- * <h2>{@code POST /messages} 是**阻塞**的</h2>
- * 它一直等到这一轮跑完才返回 —— 不为它引入任务队列，而"跑一轮"本来就有天然的超时
- *（模型调用和工具执行都有上限）。
- *
- * <p>代价是客户端可能等几十秒，所以进度**不从这个响应里看**：同时挂着
- * {@code GET /api/sessions/{id}/stream} 那条 SSE，模型打的字、跑的每个工具
- * 都在那儿实时出来；这个响应只负责最后给个结论。
+ * <p>{@code POST /messages} 是阻塞的，等到这一轮跑完才返回；模型调用和工具执行本身都有
+ * 超时，因此不引入任务队列。进度不从该响应看：同时挂着的 SSE
+ * {@code GET /api/sessions/{id}/stream} 实时输出，这个响应只给最终结论。
  */
 @RestController
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -82,22 +78,29 @@ public class SessionController {
 
     // ------------------------------------------------------------------
 
+    /**
+     * 建一条会话。
+     *
+     * @param request 供应商与模型；两者都必须存在
+     * @return 新会话视图
+     */
     @PostMapping("/api/projects/{projectId}/sessions")
     @ResponseStatus(HttpStatus.CREATED)
     public SessionView create(Principal principal,
                               @PathVariable String projectId,
                               @RequestBody CreateSessionRequest request) {
         User me = currentUser.require(principal);
-        // 是成员就能建 —— 每个成员一条自己的会话，这正是"两个人各跑各的"那个模型
+        // 是成员就能建：每个成员一条自己的会话，这是"两个人各跑各的"的模型
         Project project = access.requireMember(me.id(), ProjectId.of(projectId));
         return sessions.view(sessions.create(me, project, request.toModelConfig()));
     }
 
     /**
-     * 项目下的会话，**分页**。理由和「我的项目」一样：这个列表没有上限。
+     * 项目下的会话，分页。
      *
      * @param offset 跳过多少条；负数按 0 处理（MySQL 的 {@code OFFSET} 不接受负数）
-     * @param limit  这一页最多多少条
+     * @param limit  这一页最多多少条；夹在 1 到 {@link PageLimits#MAX} 之间
+     * @return 这一页会话
      */
     @GetMapping("/api/projects/{projectId}/sessions")
     public List<SessionView> list(Principal principal,
@@ -109,19 +112,25 @@ public class SessionController {
         return sessions.listFor(project, Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
     }
 
+    /**
+     * 单条会话；队友的会话也可见，这是实时观战的前提。
+     *
+     * @return 会话视图
+     */
     @GetMapping("/api/sessions/{sessionId}")
     public SessionView one(Principal principal, @PathVariable String sessionId) {
         User me = currentUser.require(principal);
-        // 看得见就行：队友的会话要能看到（那是"实时观战"的前提）
         return sessions.view(access.requireVisible(me.id(), SessionId.of(sessionId)));
     }
 
     /**
      * 发一句话，让它跑一轮。
      *
-     * <p>用的是 {@code requireDriver} 而不是 {@code requireVisible}：
-     * **看得见不等于能驱动**。允许成员驱动别人的会话，等于让 A 用自己的提示词
-     * 去改 B 的工作区，而且审计流里再也说不清"这轮是谁让它跑的"。
+     * <p>要求驱动权而不是可见权：看得见不等于能驱动。允许成员驱动别人的会话，等于让 A
+     * 用自己的提示词改 B 的工作区，审计里也说不清这一轮是谁让它跑的。
+     *
+     * @param request 消息正文与可选的幂等键
+     * @return 最终结论；排队时为 202 加排队位置
      */
     @PostMapping("/api/sessions/{sessionId}/messages")
     public ResponseEntity<?> send(Principal principal,
@@ -132,18 +141,16 @@ public class SessionController {
 
         TurnResult result = executor.send(session.id(), request.text(), request.clientMessageId());
 
-        // 密封的类型在这里必须被穷尽处理 —— 新增一种结果时这个方法编译不过。
-        // 而下面这几个码是有讲究的：都不是"服务器错了"，客户端该做的是**换个时机重试**
+        // sealed 类型必须穷尽处理，新增结果时编译不过。下面几个码都不是"服务器错了"，
+        // 客户端该做的是换个时机重试
         return switch (result) {
             case TurnResult.Completed completed -> ResponseEntity.ok(TurnView.of(completed.outcome()));
-            // ★ **202，不是 409。** 这句话被受理了，只是还轮不到它 ——
-            //   客户端该做的是把它显示成"排队中"，而不是报错、更不是让用户重试
+            // 202 而不是 409：消息已被受理，只是还没轮到它，客户端应显示"排队中"
             case TurnResult.Queued queued -> ResponseEntity.accepted()
                     .body(new QueuedView(queued.ahead()));
             case TurnResult.Busy busy -> throw new ResponseStatusException(
                     HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完");
-            // Busy 说"等会儿再来"，这个说"别再来了" —— 两者的 409 文案必须不一样，
-            // 否则客户端会把去重当成一次普通的忙而反复重试
+            // Duplicate 的 409 文案必须与 Busy 不同，否则客户端会把去重当成普通的忙而反复重试
             case TurnResult.Duplicate duplicate -> throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
                     "这个请求之前已经处理过了（同一个 clientMessageId）。别再重试，"
@@ -152,8 +159,8 @@ public class SessionController {
                     HttpStatus.CONFLICT, "执行权已被另一实例接管，请稍后重试");
             case TurnResult.Failed failed -> throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR, failed.reason());
-            // ★ **200，不是 5xx。** 用户按 Esc 把这一轮停下了 —— 那不是服务器出错，
-            //   也不是"换个时机重试"。会话照常回到等用户指示，事件里记的是谁停了它
+            // 200 而不是 5xx：用户主动停下这一轮，不是服务器错误，也不该重试；
+            // 会话回到等用户指示，事件里记着是谁停的
             case TurnResult.Interrupted interrupted -> ResponseEntity.ok().build();
         };
     }
@@ -161,8 +168,7 @@ public class SessionController {
     /**
      * 一句话排上队了。
      *
-     * @param ahead 它前面还排着几句（不含自己）。0 表示下一个就是它 ——
-     *              界面上据此说"前面还有 N 句"，而不是干巴巴一句"已收下"
+     * @param ahead 前面还排着几句（不含自己）；0 表示下一个就是它
      */
     public record QueuedView(int ahead) {
     }
@@ -170,12 +176,9 @@ public class SessionController {
     /**
      * 打断正在跑的那一轮。
      *
-     * <p>返回 **202** 而不是 200：中断是一个**信号**，不是一条命令。取消的检查点在
-     * 工具边界上（每一轮模型调用前、每个工具调用前），所以"信号发出去了"和
-     * "它停了"之间隔着一段不确定的时间 —— 而且这一轮也可能已经刚好跑完了。
-     * 声称 200 会让客户端以为已经停了。
-     *
-     * <p>只要**驱动权**：能驱动一轮的人才能打断它。
+     * <p>返回 202 而不是 200：中断是信号，不是命令。取消检查点在模型调用前和工具调用前，
+     * 信号发出与真正停下之间有一段不确定时间，这一轮也可能刚好跑完；200 会让客户端以为
+     * 已经停了。只有能驱动这一轮的人才能打断。
      */
     @PostMapping("/api/sessions/{sessionId}/interrupt")
     @ResponseStatus(HttpStatus.ACCEPTED)
@@ -188,13 +191,12 @@ public class SessionController {
     // ------------------------------------------------------------------
 
     /**
-     * 换这条会话用的模型。
+     * 换这条会话用的模型，下一轮生效。
      *
-     * <p>要**驱动权**：它影响这条会话**往后所有轮次**，和"发消息驱动一轮"是同一个级别。
+     * <p>要驱动权：它影响往后所有轮次，与发消息驱动一轮同级。正在跑的那一轮已经拿到配置
+     * 快照，不会中途换；因此会话正忙时返回 409，而不是排队等一个不确定的时机。
      *
-     * <p>**下一轮生效**：当前正在跑的那一轮已经拿到配置快照了，不会中途改靶 ——
-     * 否则"这一轮用的是哪个模型"就说不清了。所以这个接口**在会话正忙时会返回 409**，
-     * 而不是排队等 —— 等到了也是个不确定的时机，不如让用户看到"现在不行"。
+     * <p>不默认任何供应商或模型：猜错会让用户在下一次提问时才发现用的还是旧的。
      */
     @PutMapping("/api/sessions/{sessionId}/model")
     public SessionView changeModel(Principal principal,
@@ -203,11 +205,10 @@ public class SessionController {
         User me = currentUser.require(principal);
         Session session = access.requireDriver(me.id(), SessionId.of(sessionId));
         if (request.modelId() == null || request.modelId().isBlank()) {
-            // 不默认任何模型：猜错的话，用户会在下一次提问时才发现"怎么用的还是上一个"
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "必须给出要换成哪个模型");
         }
         if (request.provider() == null || request.provider().isBlank()) {
-            // 同理不默认任何一家：留着旧的那家会变成"名字换了，请求还发到原来那家"
+            // 不默认沿用旧的供应商：那会变成"名字换了，请求还发到原来那家"
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "必须给出要换成哪一家");
         }
         return sessions.view(
@@ -215,13 +216,12 @@ public class SessionController {
     }
 
     /**
-     * 批或者拒一次挂起的工具调用，然后让这条会话接着跑。
+     * 批或拒一次挂起的工具调用，然后让会话接着跑。
      *
-     * <p>要**驱动权**，也就是**只有会话所有者**能批。这不是保守 —— 是"平等协作"的直接
-     * 推论：B 用自己的 key、自己的提示词驱动自己的 agent，A 既不知道它在干什么、
-     * 也不知道为什么，让 A 来点这个"同意"等于让 A 替 B 的选择负责。
+     * <p>要驱动权，即只有会话所有者能批：B 用自己的密钥和提示词驱动自己的 agent，A 不知道
+     * 它在做什么，替它点"同意"等于替 B 的选择负责。
      *
-     * <p>返回 **202**：答复记下了，而那一轮**还没跑完** —— 它随后会被续跑。
+     * <p>返回 202：答复已记下，但那一轮还没跑完，随后会被续跑。
      */
     @PostMapping("/api/sessions/{sessionId}/approvals/{callId}")
     @ResponseStatus(HttpStatus.ACCEPTED)
@@ -232,27 +232,24 @@ public class SessionController {
         User me = currentUser.require(principal);
         Session session = access.requireDriver(me.id(), SessionId.of(sessionId));
         if (request.approved() == null) {
-            // 不默认任何一边：默认"批"是放行一个本来要人点头的操作，
-            // 默认"拒"是替用户拒绝掉他可能想批准的事 —— 两样都不该猜
+            // 不默认任何一边：默认批是放行一个本要人点头的操作，默认拒是替用户拒绝；
+            // 两者都不该猜
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "必须明确说批还是不批（approved 为 true 或 false）");
         }
-        // 记的是 **id** 不是用户名：审批记录要能回答"这个危险操作是谁放行的"，
-        // 而用户名会变（唯一不等于它是身份，见 ToolApprovalResolved）。名字由界面按 id 现查
+        // 记 id 而不是用户名：审批记录要回答"谁放行了这个危险操作"，而用户名会变；
+        // 名字由界面按 id 现查（见 ToolApprovalResolved）
         approvals.resolve(session.id(), callId, request.approved(), me.id(),
                 request.reason());
     }
 
     /**
-     * 这条会话上**还排着队、没投递出去**的留言。
+     * 这条会话上还排着队、尚未投递的留言，用来回答"我发的留言到哪了"。
      *
-     * <p>存在的理由只有一个：让人答得出「我发的留言到哪了」。
-     * 发出去时拿到的是 202（"收到了"），但从"收到"到"投递给 agent"之间隔着
-     * 一条队列 —— 没有这个接口的话，那段等待是**完全不可见**的。
+     * <p>发送时拿到的是 202，从"收到"到"投递给 agent"之间隔着一条队列；没有这个接口，
+     * 那段等待完全不可见。
      *
-     * <p>**界面目前还没有"主动发留言"的入口**（agent 自己新建文件时那条提醒走的是
-     * 同一条队列，由 {@code TurnExecutor} 直接塞）。这一对接口是给那个入口留的，
-     * 在它做出来之前只有 API 调用方会用到。
+     * @return 排队中的留言
      */
     @GetMapping("/api/sessions/{sessionId}/notes")
     public List<NoteView> pendingNotes(Principal principal, @PathVariable String sessionId) {
@@ -262,8 +259,8 @@ public class SessionController {
     }
 
     /**
-     * 捎一句话到对方的会话里。**202 不是 200**：这句话先进队列，
-     * 对方的 agent 下一轮才看得到 —— 这一轮已经在跑的那些不受影响。
+     * 捎一句话到对方的会话。返回 202：留言先进队列，对方的 agent 下一轮才看得到，
+     * 已经在跑的这一轮不受影响。
      */
     @PostMapping("/api/sessions/{sessionId}/notes")
     @ResponseStatus(HttpStatus.ACCEPTED)
@@ -271,27 +268,28 @@ public class SessionController {
                          @PathVariable String sessionId,
                          @RequestBody SendNoteRequest request) {
         User me = currentUser.require(principal);
-        // 发起方必须**是你自己的会话**：留言会以"某某的 agent"的身份出现在对方的
-        // 上下文里，所以不能借别人的会话名义说话
+        // 发起方必须是你自己的会话：留言会以"某某的 agent"的身份进入对方上下文，
+        // 不能借别人的会话名义说话
         Session from = access.requireDriver(me.id(), SessionId.of(request.fromSessionId()));
-        // 收件方只要看得见 —— 捎句话是协作，不是"让别人的 agent 替我干活"
-        // （那是 /messages 要驱动权的原因）
+        // 收件方只要看得见：捎句话是协作，不是让别人的 agent 替我干活
+        //（后者是 /messages 要求驱动权的原因）
         Session to = access.requireVisible(me.id(), SessionId.of(sessionId));
 
         notes.enqueue(to.id(), new AgentNoteDelivered(from.id(), me.id(), request.text()));
     }
 
     /**
-     * 这条会话的事件流，按 seq 升序 —— **一次性的 REST 快照**。
+     * 这条会话的事件流，按 seq 升序，是一次性的 REST 快照。
      *
-     * <p>界面不用它：SSE 那条通道连上时会自己补历史（见 {@code SessionStreamService.replay}），
-     * 断线重连也靠 {@code Last-Event-ID} 接着补。这里保留给"要一份静态事件列表"的调用方
-     * （导出、调试、测试），所以分页参数和 SSE 那条不是一回事。
+     * <p>界面不用它：SSE 连接时会自己补历史，断线重连靠 {@code Last-Event-ID} 接着补。
+     * 这里留给需要静态事件列表的调用方（导出、调试、测试），分页参数与 SSE 不同。
      *
-     * <p>返回的每一条就是 {@code EventEnvelopeCodec} 编出来的那个 JSON ——
-     * 和 SSE 帧的 {@code data:}、以及 Redis Pub/Sub 的消息体**是同一份格式**。
-     * 让三条路径共用一份，是因为"同一个事件在两处长得不一样"这种问题
-     * 只会在多实例联调时才冒出来，而那时候谁也不会先怀疑格式。
+     * <p>每一条与 SSE 帧的 {@code data:}、Redis Pub/Sub 的消息体使用同一份
+     * {@code EventEnvelopeCodec} 输出格式；否则同一事件在多实例联调时会出现两种形状。
+     *
+     * @param afterSeq 只返回这个 seq 之后的事件
+     * @param limit    最多返回多少条；夹在 1 到 {@link PageLimits#MAX} 之间
+     * @return 事件 JSON 列表
      */
     @GetMapping("/api/sessions/{sessionId}/events")
     public List<JsonNode> events(Principal principal,
@@ -300,9 +298,8 @@ public class SessionController {
                                  @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
         Session session = access.requireVisible(me.id(), SessionId.of(sessionId));
-        // 上限是保护服务端的：一个客户端不该能要求一次拉回无限多的事件。
-        // 下限也是：limit=0 会让调用方以为"没有事件"，而那是另一回事。
-        // **和别的列表用同一套上限**（PageLimits）：同一个 ?limit= 在哪个端点上都该是同一个意思
+        // 上限保护服务端，防止一次拉回无限多；下限也保护语义：limit=0 会被误读成"没有事件"。
+        // 与别的列表共用 PageLimits，同一个 ?limit= 在各端点含义一致
         int bounded = Math.clamp(limit, 1, PageLimits.MAX);
         return eventStore.readAfter(session.id(), afterSeq, bounded).stream()
                 .map(stored -> envelopeJson(EventEnvelope.of(stored)))
@@ -310,22 +307,13 @@ public class SessionController {
     }
 
     /**
-     * 丢弃这条会话：**对话没了，代码留着**。
+     * 丢弃这条会话：对话没了，代码留着。
      *
-     * <h2>为什么这里不是"删掉那么暴力"</h2>
-     * 工作区属于「人 + 项目」而不是某条会话（见 {@code WorkspaceId}），所以丢掉一段对话
-     * 不会让上一轮的改动消失 —— 新开一条会话就从原地继续。这正是这个动作存在的理由：
-     * 收拾对话列表，不必拿代码陪葬。
+     * <p>工作区属于「人 + 项目」而不是会话（见 {@code WorkspaceId}），所以新开一条会话会从
+     * 原地继续。事件流是真删，它打过的 checkpoint 一并消失，代码仍在树的分支上；
+     * 队友引用过的 {@code anchorEventSeq} 会成为悬空引用。
      *
-     * <h2>代价说清楚</h2>
-     * 事件流是**真删**，于是它打过的 checkpoint 也一并没了（事后没法再按它回滚，
-     * 但代码在树的分支上，一点没少），队友引用过的那条事件也成了悬空引用。
-     *
-     * <h2>权限与时机</h2>
-     * 要**驱动权**：只能丢自己的对话（别人的能看、不能删）。正在跑的时候是 409 ——
-     * 一边删一边写会得到一个谁也说不清的结果。
-     *
-     * <p>返回 204：没有内容可回，客户端照着删掉本地那一条就行。
+     * <p>要驱动权，只能丢自己的对话；会话正在跑时返回 409。返回 204，客户端删掉本地那一条。
      */
     @DeleteMapping("/api/sessions/{sessionId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -338,11 +326,12 @@ public class SessionController {
     /**
      * 回滚到一个 checkpoint。
      *
-     * <p>要**驱动权**而不是可见权：回滚会改工作区里的代码，
-     * 和"发消息驱动一轮"是同一个级别的权限。
+     * <p>要驱动权而不是可见权：回滚会改工作区里的代码，与驱动一轮同级。它只动自己那棵树，
+     * 不碰主干和别人的树，因此除"会话正在执行中"（409）外没有别的拒绝理由；
+     * 目标不是这条会话的 checkpoint 时为 400。
      *
-     * <p>它只动**自己那棵树**，不碰主干也不碰别人 —— 所以除了"会话正在执行中"（409），
-     * 没有别的拒绝理由。目标不是这条会话自己打过的一条 checkpoint 则是 400。
+     * @param request 目标 checkpoint 的事件序号
+     * @return 回滚后的会话
      */
     @PostMapping("/api/sessions/{sessionId}/rewind")
     public SessionView rewind(Principal principal,
@@ -351,38 +340,36 @@ public class SessionController {
         User me = currentUser.require(principal);
         Session session = access.requireDriver(me.id(), SessionId.of(sessionId));
         if (request.toCheckpointSeq() == null) {
-            // 用包装类型 + 显式检查，而不是 `long`：字段缺了会被读成 0，
-            // 那是个"看着像真值"的位置，而它并不是任何一条 checkpoint（见 SessionRewound）
+            // 用包装类型并显式检查，而不是 long：字段缺失会被读成 0，
+            // 那看起来像真值，却不是任何一条 checkpoint
             throw new IllegalArgumentException("要回滚到哪一条 checkpoint：请求里缺 toCheckpointSeq");
         }
-        // 传的是 **id**：事后要查得出是谁下的手，而用户名会变（见 SessionRewound）。
-        // 名字由界面按 id 现查
+        // 传 id：事后要查得出是谁下的手，而用户名会变；名字由界面按 id 现查
         return sessions.view(sessions.rewind(session, request.toCheckpointSeq(), me.id()));
     }
 
     private JsonNode envelopeJson(EventEnvelope envelope) {
-        // 直接拿对象树（而不是"编成字符串再解析回来"）—— 一次拉上千条事件时，
-        // 那一来一回的转换是白花的。嵌进响应里仍然是一个**对象**，
-        // 而不是一串被转义过反斜杠的字符串，排查时能直接 jq 剥开
+        // 直接取对象树，避免"编码成字符串再解析回来"的开销；嵌进响应后仍是对象，
+        // 不是带转义反斜杠的字符串，可直接用 jq 查看
         return envelopeCodec.writeToNode(envelope);
     }
 
     // ------------------------------------------------------------------
 
     /**
-     * 建会话要带的东西：**只有"哪一家、哪个模型"**。
+     * 建会话只需要"哪一家、哪个模型"。
      *
-     * <p>temperature、maxTokens、systemPrompt 三项都不收，因为**没有一项是用户该给的**：
-     * 温度我们不发送（见 {@code ModelConfig}），输出上限是模型的属性，
-     * 系统提示词是平台定的那一段（服务层面把它整个覆盖掉，收了等于没收）。
+     * <p>temperature、maxTokens、systemPrompt 都不收：温度不发送（见 {@code ModelConfig}），
+     * 输出上限是模型的属性，系统提示词由平台整体覆盖。收了却忽略比不收更坏，
+     * 会让"用户能配这个"看起来像个功能（见 {@code SystemPrompt}）。
      *
-     * <p>收了但忽略比不收更坏 —— 它让"用户能配这个"看起来像个功能，见 {@code SystemPrompt}
-     * 的类注释。
+     * @param provider 供应商 id
+     * @param modelId  模型 id
      */
     public record CreateSessionRequest(String provider, String modelId) {
 
         ModelConfig toModelConfig() {
-            // 系统提示词先留空：平台那一段由 SessionService 在建会话时写进去
+            // 系统提示词先留空，由 SessionService 在建会话时写入平台那一段
             return new ModelConfig(ProviderId.of(provider), modelId, null);
         }
     }
@@ -390,10 +377,9 @@ public class SessionController {
     /**
      * 发一句话让它跑一轮。
      *
-     * @param clientMessageId 客户端生成的请求标识，用来挡重复。
-     *                        **重试时必须复用同一个值** —— 每次重试都新生成一个的话，
-     *                        这层保护等于不存在。不传（null）则跳过检查，那是给
-     *                        "不介意重复"的调用方留的口子
+     * @param text            消息正文
+     * @param clientMessageId 客户端生成的请求标识，用于去重；重试时必须复用同一个值，
+     *                        每次新生成会让这层保护失效。null 表示跳过检查
      */
     public record SendMessageRequest(String text, String clientMessageId) {
     }
@@ -401,24 +387,19 @@ public class SessionController {
     /**
      * 换这条会话用的模型。
      *
-     * <p>供应商和模型名一起给 —— 界面上那两个下拉本来就是一体的：模型列表是问某一家
-     * 要来的，换家必然连模型一起换。
+     * <p>供应商和模型一起给：模型列表是向某一家要来的，换供应商必然连模型一起换。
+     * 未配置密钥的供应商由 {@link SessionService#switchModel} 当场挡掉。
      *
-     * <p>要防的是**换成一家没配过密钥的** —— 那个由
-     * {@link SessionService#switchModel} 当场挡掉，而不是靠不给这个字段。
-     *
-     * @param provider 换成哪一家（决定用哪把密钥、走哪个端点）
-     * @param modelId  比如 {@code deepseek-chat}
+     * @param provider 换成哪一家，决定用哪把密钥、走哪个端点
+     * @param modelId  模型 id，例如 {@code deepseek-chat}
      */
     public record ChangeModelRequest(String provider, String modelId) {
     }
 
     /**
-     * @param toCheckpointSeq 回滚到**哪一条** checkpoint —— 它在事件流里的 seq。
-     *                        调用方从 {@code GET /api/sessions/{id}/events} 那条流里拿到
-     *                        （回滚面板本来就在读那条流）。**不是那个 commit sha**：
-     *                        一轮什么都没改时两条 checkpoint 会同 sha，用它定不了位，
-     *                        见 {@code CheckpointCreated} 的类注释
+     * @param toCheckpointSeq 目标 checkpoint 在事件流里的 seq，从
+     *                        {@code GET /api/sessions/{id}/events} 获取；不是 commit sha，
+     *                        一轮没有改动时两条 checkpoint 会共用 sha，无法定位
      */
     public record RewindRequest(Long toCheckpointSeq) {
     }
@@ -426,17 +407,19 @@ public class SessionController {
     /**
      * 给这条会话捎一句话。
      *
-     * <p>{@code fromSessionId} 必填，而且必须是**发起者自己的**会话 ——
-     * 留言会以"某某的 agent"的身份进入对方的上下文，不能借别人的会话名义说话。
+     * @param fromSessionId 发起者的会话，必须属于发起者本人；留言会以
+     *                      "某某的 agent"的身份进入对方上下文
+     * @param text          留言正文
      */
     public record SendNoteRequest(String fromSessionId, String text) {
     }
 
     /**
-     * 排队中的一条留言。**没有投递时间** —— 它还没投递。
+     * 排队中的一条留言；没有投递时间，因为它还没有投递。
      *
-     * <p>{@code fromUserId} 是 **id**，和事件里那条规则一致（见 {@code AgentNoteDelivered}）：
-     * 用户名由读的那一侧按 id 现查。
+     * @param fromSessionId 发起会话 id
+     * @param fromUserId    发起者 id，不是用户名；名字由读取方按 id 现查
+     * @param text          留言正文
      */
     public record NoteView(String fromSessionId, String fromUserId, String text) {
 
@@ -448,9 +431,8 @@ public class SessionController {
     /**
      * 对一次挂起调用的答复。
      *
-     * @param approved 用包装类型而不是 {@code boolean}：漏传这个字段时应该是
-     *                 "你没说要怎么办"，而不是被静默当成 {@code false}（拒绝）
-     * @param reason   拒绝的理由。批准时可以为空；拒绝时它是模型唯一的线索
+     * @param approved 用包装类型：漏传时表示"没有说明怎么办"，而不是静默按 false（拒绝）处理
+     * @param reason   拒绝理由；批准时可以为空，拒绝时是模型唯一的线索
      */
     public record ApprovalRequest(Boolean approved, String reason) {
     }

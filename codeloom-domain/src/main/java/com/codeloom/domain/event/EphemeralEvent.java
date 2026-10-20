@@ -3,19 +3,14 @@ package com.codeloom.domain.event;
 /**
  * 不落库的事件，只走实时通道。
  *
- * <p>目前的两个成员都是流式增量：{@link AssistantDelta}（正文）和 {@link ReasoningDelta}
- * （思考过程）。一条回复会产生成百上千个片段，落库毫无意义 ——
- * 而回放需要的信息已经被一轮结束时的 {@code AssistantMessage}（完整正文 + 完整思考）覆盖了。
+ * <p>成员是流式增量（{@link AssistantDelta}、{@link ReasoningDelta}）：一条回复会产生成百上千个
+ * 片段，落库没有意义，回放所需的信息已由一轮结束时的 {@link AssistantMessage} 覆盖。它经
+ * Redis Pub/Sub 扇出到各实例再推 SSE，不保证送达、不补发；断线期间正在生成的片段会丢，重连后
+ * 按 {@code Last-Event-ID} 补齐的是已落库的事件。
  *
- * <h2>不补发</h2>
- * 它**只走实时通道**（Redis Pub/Sub 扇出到各实例，再由那里推给 SSE），
- * <strong>不保证送达、也不补发</strong>。断线期间正在生成的那半截会丢，
- * 重连后能补齐的是已经落库的那些（{@code Last-Event-ID} 的语义）；
- * 那种"打字过程"的丢失是可接受的 —— 这一轮的完整内容随后会落库，
- * 重连时它就会作为历史被拉回来。
- *
- * <p>刻意把它做成一个独立的 sealed 接口：{@code EventStore.append(...)} 的形参类型是
- * {@link PersistentEvent}，所以**把 delta 传给存储层是编译错误**，不需要靠代码评审或注释去拦。
+ * <p>独立成 sealed 接口，是为了让 {@code EventStore.append(...)} 的形参类型是
+ * {@link PersistentEvent}：把易失事件传给存储层会编译失败。见
+ * {@code docs/decisions/architecture/2026-09-24-events-split-persistent-and-ephemeral}。
  */
 public sealed interface EphemeralEvent extends Event permits AssistantDelta, ReasoningDelta {
 }

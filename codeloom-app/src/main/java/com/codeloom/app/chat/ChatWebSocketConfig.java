@@ -9,15 +9,10 @@ import org.springframework.web.socket.config.annotation.WebSocketHandlerRegistry
 /**
  * 聊天室的端点注册。
  *
- * <h2>刻意没有 {@code setAllowedOrigins("*")}</h2>
- * 开发时用 WebSocket 连另一个端口的页面很常见，顺手放开跨源也是很常见的做法。
- * 但跨源是**安全决定**，它属于 Security 那一步 —— 那时候才知道前端从哪来、
- * 该不该带凭据。在这里放开等于用一个"先让它跑起来"的默认值，
- * 替后面那次真正的决定把答案定死了。默认的同源限制在这里是**安全的选择**，不是遗漏。
- *
- * <p>而这一条**不需要为前端开发破例**：dev server 会把 {@code /ws/project-chat}
- * 代理到后端（要开 {@code ws: true}），浏览器看到的仍然是**同源**。
- * 也就是说"开发时怎么办"这个问题已经由代理解决了，不必动这里的默认值。
+ * <p>刻意没有 {@code setAllowedOrigins("*")}：跨源是安全决定，属于 Security 那一步，
+ * 在那里才知道前端从哪来、该不该带凭据。默认的同源限制是安全的选择，不是遗漏。
+ * 前端开发也不需要破例：dev server 把 {@code /ws/project-chat} 代理到后端
+ * （需开启 {@code ws: true}），浏览器看到的仍是同源。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableWebSocket

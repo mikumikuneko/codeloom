@@ -37,11 +37,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 自动验证 + 自修循环：平台自己跑验证、把结论落成事件、失败让模型自修但有次数上限、用尽就如实报"没通过"。
- *
- * <p>面试里问"AI 写的代码你怎么敢信"，答案全在这个类的断言里：
- * 平台**自己**跑验证、把结论落成事件、失败了让模型自修但**次数有上限**、
- * 用尽了就诚实地说"没通过"而不是假装成功。
+ * 自动验证与自修循环：平台自行运行验证、把结论落成事件、允许有限次数自修，
+ * 用尽后如实报告未通过。
  */
 class VerificationLoopTest {
 
@@ -61,12 +58,8 @@ class VerificationLoopTest {
     void seed() {
         history.add(new StoredEvent(sessionId, 1, Instant.parse("2026-09-25T10:00:00Z"),
                 new UserMessage("把 x 改成 2")));
-        // 这条会话在更早的时候读过 A.java。**这一笔是必须的**：edit_file 要求
-        // "改之前观测过"（见 ReadLedger）—— 真实会话里模型也是读了才改。
-        //
-        // 用历史（而不是让脚本先读一次）是有意的：投影里只有路径、**没有版本**，
-        // 于是账上记的是"版本未知"那一种，正好也把那一条路走了一遍。
-        // 这几条测试验的是**验证循环**，不该被"改之前要读过"那条规则搅进来
+        // 预先在历史里读取 A.java，满足 edit_file 的观测要求，让本组测试聚焦验证循环。
+        // 走历史而非脚本读取，也使账上记录为“版本未知”，覆盖该路径。
         history.add(new StoredEvent(sessionId, 2, Instant.parse("2026-09-25T10:00:01Z"),
                 new ToolCallRequested("c0", "read_file", "{\"path\":\"A.java\"}")));
         history.add(new StoredEvent(sessionId, 3, Instant.parse("2026-09-25T10:00:02Z"),
@@ -94,7 +87,7 @@ class VerificationLoopTest {
         assertThat(evidence.command()).isEqualTo("mvn -q test");
         assertThat(evidence.exitCode()).isZero();
         assertThat(evidence.summary()).contains("Failures: 0");
-        // 平台发起的验证用可辨认的 id，和模型的 call_xxx 区分开
+        // 平台验证使用可辨认的 verify- 前缀 id。
         assertThat(evidence.callId()).startsWith("verify-");
     }
 
@@ -139,12 +132,8 @@ class VerificationLoopTest {
         assertThat(evidence.get(0).passed()).isFalse();
         assertThat(evidence.get(1).passed()).isTrue();
 
-        // 失败被注入成一条【事件】（不是临时拼接的提示词）—— 不落库的话，
-        // 崩溃重放时组装出的上下文和当时不一致，证据链就对不上了。
-        //
-        // 而且它必须是 PlatformInstruction【不是 UserMessage】：
-        // 混用会让审计流里分不清"用户说的"和"平台说的"，
-        // 而回滚恰恰是按 turn 对齐代码与对话的。
+        // 失败必须落成事件，崩溃重放才能复现同一上下文；使用 PlatformInstruction
+        // 而不是 UserMessage，以区分平台与用户发言。
         assertThat(outcome.newEvents()).noneMatch(e -> e instanceof UserMessage);
         assertThat(outcome.newEvents())
                 .filteredOn(e -> e instanceof PlatformInstruction)
@@ -155,8 +144,7 @@ class VerificationLoopTest {
                         .contains("Failures: 1")
                         .contains("不要只是重跑一次验证"));
 
-        // 模型确实看到了失败内容。
-        // 请求 4 次：①改文件 ②说改好了(验证#1失败) ③再改 ④再说改好了(验证#2通过)
+        // 模型确实看到了失败内容：共 4 次请求（改、答、再改、再答）。
         assertThat(client.requests()).hasSize(4);
         assertThat(client.requests().get(2).messages())
                 .anySatisfy(m -> assertThat(m.content()).contains("Failures: 1"));
@@ -165,7 +153,7 @@ class VerificationLoopTest {
     @Test
     @DisplayName("【上限】连续 3 次自修都不过 → 停在 VERIFICATION_FAILED，不假装成功")
     void givesUpAfterThreeAttempts() {
-        // 先改一次文件（让 mutated 为真），之后就一直是"改好了" —— 验证永远失败
+        // 先改一次文件使 mutated 为真，之后一直回答完成，验证持续失败。
         ScriptedLlm client = ScriptedLlm.repeating(
                 ScriptedLlm.toolCall("c1", "edit_file",
                         "{\"path\":\"A.java\",\"old_string\":\"int x = 1;\",\"new_string\":\"int x = 2;\"}"),
@@ -175,7 +163,7 @@ class VerificationLoopTest {
         TurnOutcome outcome = new AgentTurn().run(input(client, executor));
 
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.VERIFICATION_FAILED);
-        // 3 次，不多不少
+        // 恰好 3 次。
         assertThat(executor.calls()).isEqualTo(3);
         assertThat(allVerifications(outcome)).hasSize(3)
                 .allSatisfy(v -> assertThat(v.passed()).isFalse());
@@ -184,8 +172,7 @@ class VerificationLoopTest {
     @Test
     @DisplayName("验证命令本身跑不起来时，如实说是命令的问题，别让模型去修不存在的 bug")
     void executorFailureIsNotReportedAsACodeProblem() {
-        // 验证命令一直跑不起来（这台机器上没有 shell），所以会走到自修上限，
-        // 模型脚本要能一直供得上
+        // 验证命令始终无法启动，会走到自修上限；模型脚本需持续供结果。
         ScriptedLlm client = ScriptedLlm.repeating(
                 ScriptedLlm.toolCall("c1", "edit_file",
                         "{\"path\":\"A.java\",\"old_string\":\"int x = 1;\",\"new_string\":\"int x = 2;\"}"),
@@ -198,7 +185,7 @@ class VerificationLoopTest {
 
         VerificationResult evidence = lastVerification(outcome);
         assertThat(evidence.passed()).isFalse();
-        // exitCode 是 null —— 它压根没跑起来，这是"验证没跑成"和"验证没过"的分界
+        // exitCode 为 null 表示命令未运行，是“没验成”与“验证未通过”的分界。
         assertThat(evidence.exitCode()).isNull();
         assertThat(evidence.summary())
                 .contains("验证命令未能执行")
@@ -208,8 +195,7 @@ class VerificationLoopTest {
     @Test
     @DisplayName("【漏洞回归】命令【失败】但可能已改文件 → 仍然要触发强制验证")
     void failedCommandStillTriggersVerification() {
-        // 退出码非零的命令完全可能改了文件（格式化器修完报错退出、编译中途产物）。
-        // 早期实现用 `success() && mutatesWorkspace()` 判断，这些改动会逃过验证。
+        // 非零退出码的命令也可能已改文件；不能按 success 决定是否验证。
         ScriptedLlm client = ScriptedLlm.repeating(
                 ScriptedLlm.toolCall("c1", "run_command", "{\"command\":\"mvn -q fmt:apply\"}"),
                 ScriptedLlm.answer("好了"));
@@ -217,8 +203,7 @@ class VerificationLoopTest {
 
         TurnOutcome outcome = new AgentTurn().run(input(client, executor));
 
-        // 执行器被调用 4 次 = 模型那 1 次 run_command + 平台 3 次验证。
-        // 关键是 > 1：证明即便工具**失败**，强制验证照样跑了。
+        // 执行器共 4 次：模型 1 次 run_command 加平台 3 次验证，证明工具失败仍触发验证。
         assertThat(executor.calls()).isEqualTo(4);
         assertThat(allVerifications(outcome)).isNotEmpty();
         assertThat(outcome.status()).isEqualTo(TurnOutcome.Status.VERIFICATION_FAILED);
@@ -228,7 +213,7 @@ class VerificationLoopTest {
     // 辅助
     // ------------------------------------------------------------------
 
-    /** 这条会话的投影：从测试那份事件流建一条活的（生产里它跨轮活着）。 */
+    /** 从测试事件流建立投影；生产中的投影跨轮存活。 */
     private ContextAssembler.Projection projection() {
         ContextAssembler.Projection projection =
                 new ContextAssembler(userId -> null).projection(MODEL.systemPrompt());
@@ -262,7 +247,7 @@ class VerificationLoopTest {
         }
     }
 
-    /** 按脚本依次返回验证结果的执行器。 */
+    /** 按脚本返回验证结果的执行器。 */
     private static final class ScriptedExecutor implements CommandExecutor {
 
         private final Deque<CommandResult> script;

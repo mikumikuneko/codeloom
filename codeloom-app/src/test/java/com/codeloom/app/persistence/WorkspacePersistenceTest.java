@@ -17,13 +17,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@code workspace} 表的真库测试。
  *
- * <h2>为什么这些列在这张表上</h2>
- * 分支、worktree 路径、HEAD 和 {@code fencing_token} 都跟着树走，理由只有一条：
- * **锁锁的是一棵树**，而号的键必须和锁的键是同一个 —— 否则同一个人的两条会话
- * 可以同时拿到"各自的"锁去写同一份目录。见 {@code WorkspaceFence} 的类注释里那个反例。
+ * <p>分支、worktree 路径、HEAD 和 {@code fencing_token} 都跟着树走：锁锁的是一棵树，
+ * 号的键必须和锁的键相同，否则同一个人的两条会话能同时拿到“各自的”锁写同一份目录
+ * （反例见 {@code WorkspaceFence}）。
  *
- * <p>这里接着的是从前 {@code SessionPersistenceTest} 上那两条断言：
- * 复合主键真的能按两半查、{@code fencing_token} 走完一轮 {@code save} 之后没被动过。
+ * <p>这里也接着从 {@code SessionPersistenceTest} 搬来的两条断言：复合主键能按两半查、
+ * {@code fencing_token} 走完一轮 {@code save} 不会被动过。
  */
 class WorkspacePersistenceTest extends AbstractPersistenceTest {
 
@@ -42,8 +41,8 @@ class WorkspacePersistenceTest extends AbstractPersistenceTest {
         worktrees.save(tree);
 
         assertThat(worktrees.find(tree.workspaceId())).contains(tree);
-        // 查的是**复合**主键，所以只给一半必须查不到 —— 少了这半边，
-        // "这个人在别项目里的树"会被当成这一棵
+        // 查的是复合主键，只给一半必须查不到；少了这半边，这个人在别项目里的树
+        // 会被当成这一棵。
         assertThat(worktrees.find(WorkspaceId.of(OWNER, ProjectId.generate()))).isEmpty();
     }
 
@@ -74,9 +73,8 @@ class WorkspacePersistenceTest extends AbstractPersistenceTest {
     @Test
     @DisplayName("【安全约束】save 走完一轮，fencing_token 一动没动")
     void saveNeverClobbersTheFencingToken() {
-        // 这是整个 WorkspaceRow 设计成立与否的那一条：
-        // 如果有人「顺手」把 fencing_token 加进 save 语句，它就会被写回旧值，
-        // 于是持有过期租约的僵尸写入者又能落数据 —— 而且不会有任何报错。
+        // 这条决定 WorkspaceRow 的设计能否成立：若有人顺手把 fencing_token 加进
+        // save 语句，它会被写回旧值，持有过期租约的写入者又能落数据，且不报错。
         Workspace tree = treeOf(OWNER, "c0ffee1");
         worktrees.save(tree);
         WorkspaceId id = tree.workspaceId();

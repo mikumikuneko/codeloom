@@ -1,29 +1,23 @@
 /**
- * 行级 diff。**纯函数，不依赖任何库。**
+ * 行级 diff。纯函数，不依赖任何库。
  *
- * <h2>它为什么可以不要后端</h2>
- * {@code edit_file} 的参数里就有 {@code old_string} 和 {@code new_string} ——
- * 逐字符给出被替换的那一段。所以"改了什么"这件事，前端手里本来就有，
- * 不必等工具结果里回一段 patch。
+ * 不需要后端：`edit_file` 的参数里就有 `old_string` 和 `new_string`，逐字符给出
+ * 被替换的那一段，所以"改了什么"前端手里本来就有。
  *
- * <h2>为什么不用整棵树比</h2>
- * 比的是**模型给的这一段**，不是整个文件：{@code old_string} 已经是它挑出来的
- * 上下文，前后各带上几行。整棵树比要先拿到改动前后的两份全文 —— 那要麻烦后端，
- * 而且这里也读不出更多东西。
+ * 比的是模型给的这一段，不是整棵树：`old_string` 已是它挑出的上下文，前后各带几行。
+ * 整棵树比要先拿到改动前后的两份全文，那要麻烦后端，而且这里也读不出更多东西。
  *
- * <h2>为什么自己写而不是引一个包</h2>
- * 输入是两个通常只有几行到几十行的小块。这种情况下一个最朴素的
- * 最长公共子序列就够了 —— 引一个通用 diff 库，换来的是一个我们这边几乎不会走到的
- * 代码路径（大文件、二进制、词级合并）和一份管不着的依赖。
- * 规模一旦超出预期（长块），下面直接退化成"整段替换"：**不做对齐，但一行不丢**。
+ * 自己写而不引包：输入通常是几行到几十行的小块，最朴素的最长公共子序列就够了。
+ * 通用 diff 库换来的是几乎走不到的代码路径（大文件、二进制、词级合并）和一份
+ * 管不着的依赖。规模超出预期时直接退化成"整段替换"：不对齐，但一行不丢。
  */
 
 /**
- * diff 里的一行。`gap` 是"这里省略了 N 行" —— 它没有文字内容。
+ * diff 里的一行。`gap` 表示这里省略了 N 行，没有文字内容。
  *
- * <p>`line` 是**显示用的那个行号**：删除的行用旧文件的行号（它在新文件里已经没有了），
- * 其余用新文件的。来自统一 diff 的行自带它（{@code parseUnifiedDiff} 手上有 `@@`）；
- * 会话里那段改动不走统一 diff，改由后端给的起始行号（{@code DiffView} 的 `startLine`）现场数。
+ * `line` 是显示用的行号：删除的行用旧文件行号（它在新文件里已经没有了），其余用
+ * 新文件的。来自统一 diff 的行自带它（`parseUnifiedDiff` 手上有 `@@`）；会话里
+ * 那段改动不走统一 diff，改由后端给的起始行号（`DiffView` 的 `startLine`）现场数。
  */
 export type DiffRow =
   | { kind: 'context'; text: string; line?: number }
@@ -32,21 +26,20 @@ export type DiffRow =
   | { kind: 'gap'; hidden: number }
 
 /**
- * 每个改动块前后保留几行上下文。**3 行**是读 diff 的人刚好能认出
- * "这段在文件的什么位置"的量 —— 再多就只是把没改的部分也铺出来。
+ * 每个改动块前后保留几行上下文。3 行刚好能认出这段在文件里的位置，
+ * 再多只是把没改的部分也铺出来。
  */
 const CONTEXT = 3
 
 /**
  * 子序列搜索的规模上限（旧行数 × 新行数）。
  *
- * <p>超过它就不再找对齐，直接"全删 + 全加"。这一步是**故意**的：
- * 两个各一千行的块，光是那张表就要一百万格，而人看那份 diff 的收益并不会跟着涨。
- * 退化之后结果仍然是对的，只是不再标出哪些行其实没变。
+ * 超过就不再找对齐，直接全删 + 全加。两个各一千行的块光表就要一百万格，而人看
+ * 那份 diff 的收益不会跟着涨。退化后结果仍然正确，只是不再标出哪些行没变。
  */
 const MAX_CELLS = 250_000
 
-/** 切行。**末尾那个换行不算一行**，否则每个以换行结尾的文件都会多出一个空行。 */
+/** 切行。末尾换行不算一行，否则每个以换行结尾的文件都会多出一个空行。 */
 function splitLines(text: string): string[] {
   if (text === '') {
     return []
@@ -63,7 +56,7 @@ function splitLines(text: string): string[] {
  *
  * @param before 改动前的那一段（`old_string`）
  * @param after 改动后的那一段（`new_string`）
- * @param context 每个改动块前后保留几行。传 {@code Infinity} 表示不裁
+ * @param context 每个改动块前后保留几行；传 `Infinity` 表示不裁
  */
 export function diffLines(before: string, after: string, context = CONTEXT): DiffRow[] {
   return withContext(rawDiff(splitLines(before), splitLines(after)), context)
@@ -81,7 +74,7 @@ function rawDiff(a: string[], b: string[]): DiffRow[] {
     ]
   }
 
-  // dp[i][j] = a[i..] 和 b[j..] 的最长公共子序列长度。从右下往左上填
+  // dp[i][j] = a[i..] 与 b[j..] 的最长公共子序列长度，从右下往左上填。
   const width = m + 1
   const dp = new Uint32Array((n + 1) * width)
   for (let i = n - 1; i >= 0; i--) {
@@ -122,15 +115,13 @@ function rawDiff(a: string[], b: string[]): DiffRow[] {
 /**
  * 把离改动太远的上下文行收成一条 `gap`。
  *
- * <p>模型给的 {@code old_string} 有时会带上一大段没动的上下文（它要保证唯一性，
- * 而那是对的）。原样铺出来的话，真正改的那两行会淹在三十行灰字里 ——
- * diff 就白给了。
+ * 模型给的 `old_string` 有时会带上一大段没动的上下文（为了保证唯一性，那是对的）。
+ * 原样铺出来，真正改的那两行会淹在三十行灰字里。
  */
 function withContext(rows: DiffRow[], context: number): DiffRow[] {
-  // 没有改动时**一行都不裁**：裁的话整段会变成一条"省略了 N 行"，
-  // 而人看到的就只剩下"什么都没显示"。两边一样本来就不该走到这里
-  //（edit_file 会拒绝 old_string 和 new_string 相同的调用），但那是别人的保证，
-  // 这一层不该依赖它
+  // 没有改动时一行都不裁：裁的话整段变成一条"省略了 N 行"，人只看到"什么都没
+  // 显示"。两边一样本来不该走到这里（edit_file 会拒绝 old_string 与 new_string
+  // 相同的调用），但那是别人的保证，这一层不依赖它。
   if (!Number.isFinite(context) || !rows.some((row) => row.kind !== 'context')) {
     return rows
   }
@@ -166,10 +157,10 @@ function withContext(rows: DiffRow[], context: number): DiffRow[] {
 }
 
 /**
- * 一行里的一小段。{@code changed} 的那些段是**这一对行之间真的换了**的部分。
+ * 一行里的一小段。`changed` 的段是这一对行之间真的换了的部分。
  *
- * <p>只在一对「删掉的行 / 加上的行」之间成立：一行整个是新增或整个是删除时
- * 没有"哪里变了"可谈，那种行不会有分段。
+ * 只在一对「删掉的行 / 加上的行」之间成立：整行新增或整行删除时没有"哪里变了"
+ * 可谈，那种行不会有分段。
  */
 export interface DiffSegment {
   text: string
@@ -185,25 +176,24 @@ export interface WordDiff {
 /**
  * 词级对齐的规模上限（旧词数 × 新词数）。
  *
- * <p>它比行级那个上限小得多：一行里出现几千个词只可能是紧凑格式的压缩产物，
- * 那种行整行标出来反而好读。超过就退化成"整行都算换了"（返回 null）。
+ * 比行级上限小得多：一行出现几千个词只可能是紧凑格式的压缩产物，整行标出来反而
+ * 好读。超过就退化成整行都算换了（返回 null）。
  */
 const WORD_MAX_CELLS = 20_000
 
 /**
  * 改动超过这个比例就不做词级标记。
  *
- * <p>两行几乎全不一样时，逐词标出来等于把整行都涂深 —— 那样和"整行换了"
- * 说的是同一件事，却多出几十个切换点，读起来更碎。Claude Code 用的也是这个阈值。
+ * 两行几乎全不一样时，逐词标出来等于整行涂深，和"整行换了"说的是同一件事，
+ * 却多出几十个切换点，读起来更碎。
  */
 const WORD_CHANGE_LIMIT = 0.4
 
 /**
  * 切成"词 / 空白 / 单个标点"。
  *
- * <p>把空白单独成词是必要的：不然 `a = 1` 和 `a=1` 的差别会粘在 `a` 那个词里，
- * 标出来的是半个词。单个标点各自成词，则让 `>` 和 `>=`、`(` 和 `[` 这类
- * 一位差别也能单独标出来。
+ * 空白单独成词是必要的：否则 `a = 1` 和 `a=1` 的差别会粘在 `a` 那个词里，标出
+ * 半个词。单个标点各自成词，让 `>` 和 `>=`、`(` 和 `[` 这类一位差别也能单独标出。
  */
 function tokenize(text: string): string[] {
   const tokens: string[] = []
@@ -221,7 +211,7 @@ function tokenize(text: string): string[] {
       tokens.push(text.slice(at, end))
       at = end
     } else {
-      // 代理对算一个词：切成两半的话，标出来的颜色会落在半个字上
+      // 代理对算一个词：切成两半会让标出的颜色落在半个字上。
       const code = text.codePointAt(at)!
       const length = code > 0xffff ? 2 : 1
       tokens.push(text.slice(at, at + length))
@@ -232,10 +222,10 @@ function tokenize(text: string): string[] {
 }
 
 /**
- * 两行之间哪几个词换了。**没有可标的就返回 null** —— 调用方退回普通渲染。
+ * 两行之间哪几个词换了。没有可标的返回 null，调用方退回普通渲染。
  *
- * <p>算法和行级那个一样（最短公共子序列），只是单位从"行"换成了"词"：
- * 对得上的词保持原样，对不上的两边都标成 changed，相邻的同类再并成一段。
+ * 算法与行级相同（最长公共子序列），单位从行换成词：对得上的保持原样，对不上的
+ * 两边都标成 changed，相邻同类并成一段。
  */
 export function wordDiff(before: string, after: string): WordDiff | null {
   const a = tokenize(before)
@@ -300,10 +290,10 @@ function segmentsOf(tokens: string[], same: boolean[]): DiffSegment[] {
 }
 
 /**
- * 给整段 diff 配词级差异。返回的数组和 {@code rows} **等长**，没配上的位置是 null。
+ * 给整段 diff 配词级差异。返回数组与 `rows` 等长，没配上的位置是 null。
  *
- * <p>配对规则照 Claude Code：一段连续的删行后面紧跟一段连续的加行时，第 k 行对第 k 行；
- * 多出来的行没有对象，保持整行标注。中间隔着上下文的不配对 —— 那说明它们不是同一处改动。
+ * 配对规则：一段连续删行后紧跟一段连续加行时，第 k 行对第 k 行；多出来的行没有
+ * 对象，保持整行标注。中间隔着上下文的不配对，那说明它们不是同一处改动。
  */
 export function wordDiffs(rows: DiffRow[]): (WordDiff | null)[] {
   const out = new Array<WordDiff | null>(rows.length).fill(null)

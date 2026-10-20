@@ -14,24 +14,15 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 这条对话里 {@code read_file} 读过哪些文件（工作区相对路径）。
+ * 这条对话里 {@code read_file} 读过哪些文件（工作区相对路径），以及每条路径最早被读到的 seq。
  *
- * <h2>它拿什么用</h2>
- * "读过才许覆盖"那条规则就是拿它重建的：一个文件的改动权限来自**这条对话里它被读过**，
- * 而那是历史里的既成事实。
- *
- * <h2>为什么记的是"最早读到它的那个序号"，而不是一个集合</h2>
- * 因为回滚要按序号砍：一条路径只在切点**之后**才读到过时，它才算没读过。
- * 而同一个文件读两次、切点落在两次之间时，那条路径仍然算读过（前一次读到的内容还在）——
- * 于是每条路径留**最小**那个序号就够，不必把每次读都记下来。
- *
- * <p>为什么按切点砍、而不是回滚就整体清空：回滚把**代码**也退回去了（同一棵树），
- * 所以切点之前读到的内容今天依然成立，切点之后看到的那份代码**已经不存在了** ——
- * 该作废的正是那一段，不是整本账。切点判据与其它 {@link Derived} 一样（见 {@link Derived#cutOf}）。
+ * <p>它是“读过才许覆盖”那道门的输入。记最早 seq 而不是集合，是因为回滚按 seq 砍：
+ * 切点之后才读到的路径作废，切点前读过的仍算读过；同一文件读两次、切点落在中间时保留前一次。
+ * 回滚退的是同一棵树上的代码，所以切点之前读到的内容仍成立，只作废切点之后那一段。
  */
 final class ReadPathTracker implements Derived {
 
-    /** 路径 → 最早读到它的那条事件的序号。 */
+    /** 路径 → 最早读到它的 seq。 */
     private final Map<String, Long> earliestRead = new LinkedHashMap<>();
 
     @Override
@@ -41,7 +32,7 @@ final class ReadPathTracker implements Derived {
             earliestRead.values().removeIf(seq -> seq > cut);
             return;
         }
-        // 解构只拿走用得到的两个：调用的 id 是 PendingCallTracker 的事
+        // 调用 id 由 PendingCallTracker 负责，这里只关心工具名和参数。
         if (stored.event() instanceof ToolCallRequested requested
                 && ToolNames.READ_FILE.equals(requested.toolName())) {
             readPathOf(requested.argumentsJson())
@@ -49,7 +40,7 @@ final class ReadPathTracker implements Derived {
         }
     }
 
-    /** 这条对话里读过的文件。 */
+    /** 这条对话里读过的文件；返回快照。 */
     Set<String> paths() {
         return Set.copyOf(earliestRead.keySet());
     }
@@ -60,12 +51,11 @@ final class ReadPathTracker implements Derived {
     }
 
     /**
-     * 一次调用的参数里它读的是哪个文件 —— 取不到就当这次没读过（不是跳过整本账：
-     * 模型偶尔写出不合法的参数，那一次本来就没读成）。
+     * 一次调用参数里的文件路径；参数不合法或没有 path 时当作这次没读过。
+     * 键名与工具 schema 共用 {@link ToolNames#PATH_ARG}，避免改名后静默漏记。
      *
-     * <p>{@code path} 这个键名和读文件那个工具的 schema 共用一份常量
-     * （{@code ToolNames.PATH_ARG}）—— 从前这里写的是字面值，那边改名的话
-     * 这笔账会静默地不再记。
+     * @param argumentsJson 工具调用的原始参数
+     * @return 工作区相对路径；取不到就是空
      */
     private static Optional<String> readPathOf(String argumentsJson) {
         try {

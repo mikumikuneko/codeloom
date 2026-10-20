@@ -35,18 +35,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 会话的用例：建、查、列、丢。
+ * 会话的用例：建、查、列、丢、回滚、换模型。
  *
- * <h2>「建会话」也要抢一次租约</h2>
- * 建会话要往事件流写第 0 条（{@code SessionStarted}），而 {@code EventStore.append}
- * 要求一个 {@code LeaseToken} —— fencing 的落点。这里没有例外：**事实来源上不存在
- * "这条不用记账"** —— 只要有一条路径能不带 token 写事件，fencing 就不再是
- * "所有写入都受租约保护"，而那正是它有效的全部理由。代价是建会话多两次 Redis 往返。
+ * <p>建会话也要抢租约：写第一条 {@code SessionStarted} 时 {@code EventStore.append}
+ * 要求 {@code LeaseToken}。事实来源上不存在"这条不用记账"的写入，否则 fencing 就不再覆盖
+ * 所有写入。代价是建会话多两次 Redis 往返。
  *
- * <h2>「建会话」不等于「建一棵树」</h2>
- * 树挂在「用户 × 项目」上（见 {@link WorkspaceId}），所以同一个人在同一项目里的第二条
- * 会话**复用**第一条建出来的树 —— 换一段对话不该让上一轮的改动消失。
- * 见 {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}。
+ * <p>建会话不等于建树：树挂在「用户 × 项目」上（见 {@link WorkspaceId}），同一人在同一项目
+ * 的第二条会话复用第一条的树，换对话不会让上一轮的改动消失（见
+ * {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}）。
  */
 @Service
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -95,20 +92,27 @@ public class SessionService {
         this.pending = pending;
     }
 
+    /**
+     * 建一条会话；创建者的树必须已经存在，这里只取用。
+     *
+     * <p>先确认该供应商配过密钥再建：密钥按供应商独立，选中没配密钥的模型是最常见的误操作；
+     * 不在这里拦住，用户会在模型调用时才收到 401，而事件流和租约已经动过。
+     * 系统提示词由平台决定，一律覆盖为 {@link SystemPrompt#TEXT}。
+     *
+     * @param owner   会话所有者
+     * @param project 项目
+     * @param model   用户选择的供应商与模型
+     * @return 新会话；{@code SessionStarted} 已写入事件流
+     * @throws ResponseStatusException 400，该供应商没有配置密钥
+     */
     public Session create(User owner, Project project, ModelConfig model) {
-        // **先确认这个端点上配过密钥，再动手建。**
-        // 每家密钥独立，选中一个没配过密钥的模型是最常见的误操作。不在这里拦住，
-        // 用户会先建出会话、发出第一句话，直到模型调用才收到 401 ——
-        // 那时事件流和租约都已经动过了
         requireConfiguredKey(owner.id(), model, "所以选不了它上面的模型。先去「供应商」页把它配上");
 
-        // **系统提示词由平台定，用户不参与**：用户选的是端点和模型，这里一律用平台上那一段，
-        // 不看请求带了什么。见 SystemPrompt 的类注释。
+        // 系统提示词由平台定：用户选的只有端点和模型，请求里带的提示词一律覆盖
         ModelConfig effective = model.withSystemPrompt(SystemPrompt.TEXT);
 
         Session session = Session.create(SessionId.generate(), project.id(), owner.id(), effective);
-        // 树在"这个人拿到项目访问权"时就已建好（建项目 / 接受邀请，见 WorkspaceProvisioner），
-        // 这里只取用，不再新建
+        // 树在拿到项目访问权时已建好（建项目 / 接受邀请），这里只取用，不新建
         Workspace workspace = provisioner.ensure(owner.id(), project);
 
         sessions.save(session);
@@ -116,15 +120,20 @@ public class SessionService {
         return session;
     }
 
-    /** 找第一句话时最多往前看多少条事件 —— 它在头几条里（建会话那几条 + 用户开口那句）。 */
+    /** 找第一句话时最多往前看多少条事件；它在建会话那几条加用户开口那句之内。 */
     private static final int FIRST_MESSAGE_SCAN = 50;
 
-    /** 列表那一行装不下更长的：更长的正文进了列表也是被 CSS 截掉，白传几 KB。 */
+    /** 列表一行装不下更长的正文，更长的部分进了列表也会被截掉。 */
     private static final int FIRST_MESSAGE_CHARS = 80;
 
-    /** 项目下的会话。**分页是仓储层的事** —— 见 {@code SessionRepository.findByProject}。 */
+    /**
+     * @param project 项目
+     * @param limit   这一页最多多少条
+     * @param offset  跳过多少条
+     * @return 项目下的会话；分页由仓储层完成，见 {@code SessionRepository.findByProject}
+     */
     public List<SessionView> listFor(Project project, int limit, int offset) {
-        // 一次取回本项目下所有工作区再按 id 索引。逐个查是 N+1，而 N 的上限是成员数（≤2）
+        // 一次取回本项目所有工作区再按 id 索引，避免逐个查；N 的上限是成员数（≤2）
         Map<WorkspaceId, Workspace> trees = new HashMap<>();
         for (Workspace tree : stored.findByProject(project.id())) {
             trees.put(tree.workspaceId(), tree);
@@ -134,15 +143,19 @@ public class SessionService {
                 .toList();
     }
 
+    /**
+     * @param session 会话
+     * @return 会话视图
+     */
     public SessionView view(Session session) {
         return SessionView.of(session, workspaceOf(session), firstMessage(session));
     }
 
     /**
-     * 这条会话里**用户说的第一句话** —— 历史列表拿它区分"这是哪一条"。
+     * 这条会话里用户说的第一句话，历史列表用它区分"这是哪一条"。
      *
-     * <p>用第一句话而不是"谁在说"：同一栏里列的是同一个人的会话，说话人区分不了它们，
-     * 而**开头那句**正是人自己记得住的。还没人说过话（或者那些事件已经读不到）就返回 null。
+     * <p>同一栏列的是同一个人的会话，"谁在说"区分不了它们，而开头那句正是人记得住的。
+     * 还没人说过话，或那些事件已经读不到时返回 null。
      */
     private String firstMessage(Session session) {
         for (StoredEvent stored : events.readAfter(session.id(), 0, FIRST_MESSAGE_SCAN)) {
@@ -157,45 +170,25 @@ public class SessionService {
     }
 
     /**
-     * 回滚到某个 checkpoint：整棵树 reset + 对话截断 + 留痕，三件事一起。
+     * 回滚到某个 checkpoint：整棵树 reset、对话截断、留痕，三件事一起。
      *
-     * <h2>目标是「哪一条 checkpoint」，不是「哪个 commit」</h2>
-     * 调用方送的是那条 checkpoint 在事件流里的**序号**。同一轮什么都没改时，
-     * 两条 checkpoint 会同 sha —— 拿 sha 去反推只能猜，而猜错的方向恰好是退过头
-     * （见 {@code SessionCheckpoints} 的类注释）。
+     * <p>定位用 checkpoint 的事件序号而不是 commit：一轮什么都没改时两条 checkpoint 同 sha，
+     * 拿 sha 反推会退过头，甚至把整段对话清空。回滚的是整棵树，包括本人另一条会话之后
+     * 提交的内容和同步带进来的内容；它们仍留在主干和对方那棵树里，下次同步会拿回来。
      *
-     * <h2>为什么退的是整棵树</h2>
-     * 一棵树属于**一个人**（见 {@code WorkspaceId}），回滚在他自己那条分支上做 ——
-     * 主干、对方的工作区都不在这条路径上。所以对他自己来说，**"撤销"就该整块撤销**：
-     * 包括他另一条会话在那之后提交的东西，也包括同步把主干合进来的那一段。
+     * <p>必须先拿到租约：既挡住正在跑的轮次同时改工作区，也会推进 fencing token，
+     * 使僵尸写入者的后续写入被拒。因此除"会话正在执行中"外没有其他拒绝理由。
      *
-     * <p>（参考实现 Claude Code 按会话只回滚它动过的文件，不是更对，是它**没有分支可用**：
-     * 一个目录上所有会话共用一份文件，只能按文件圈范围。我们有每个人的分支，
-     * 所以"我这棵树回到那一刻"表达得出来，也更好懂。）
+     * <p>理由见 {@code docs/decisions/architecture/2026-09-29-rewind-the-whole-tree.md}。
      *
-     * <h2>为什么必须先拿到租约</h2>
-     * 两重作用。一是**挡住"正在跑的时候回滚"** —— 那会让 agent 和回滚同时改同一份工作区，
-     * 结果是一堆谁也说不清的半成品文件。二是拿到租约会把 fencing token 往前推，
-     * 于是**即便真有一个正在跑的轮次，它接下来的写入也会被拒** ——
-     * 那是比"别让它跑"更硬的保证，因为它不依赖对方配合。
-     *
-     * <h2>它不碰任何人，所以无需检查"会不会吃掉别人的代码"</h2>
-     * 把主干同步进来确实会在这棵树上带一批别人的提交，但把它们从我的分支上退掉，
-     * 它们在主干里、在自己那棵树里都一点没少，我下次同步就拿回来了。
-     * 曾经的 409 检查（目标之后有别人的提交就拒绝）守的是这个不存在的伤害，
-     * 代价却是**同步过一次之后再也回不到同步前** —— 已删除。
-     *
-     * @param byUserId 谁下的手。**是 id 不是用户名** —— 事后要查得出是谁，而用户名会变
-     *                 （唯一不等于它是身份，见 {@link com.codeloom.domain.event.SessionRewound SessionRewound}）；名字由读的那一侧现查
+     * @param targetCheckpointSeq 目标 checkpoint 在事件流里的 seq
+     * @param byUserId            发起者的 id，不是用户名；事后要查得出是谁，而用户名会变
+     * @return 回滚后的会话
+     * @throws ResponseStatusException 409，会话正在执行中
+     * @throws IllegalArgumentException 目标序号不是这条会话的 checkpoint；调用方映射为 400
      */
     public Session rewind(Session session, long targetCheckpointSeq, UserId byUserId) {
-        // 只允许回到**这条会话真的打过**的点，规则与"合到某个点"共用一份
-        //（见 SessionCheckpoints 的类注释）。
-        //
-        // 键是**序号**而不是 sha：回滚要的是一个对话位置，而"这一轮什么都没改"
-        // 会让它和上一条 checkpoint 同 sha（见 CheckpointCreated 的类注释）。
-        // 用 sha 反推"第一条"会把回滚退到会话刚建好的一刻 —— 用户选的是
-        // "退到第三句之前"，看到的却是整个对话被清空
+        // 只允许回到这条会话真的打过的点，规则与"合到某个点"共用
         SessionCheckpoints.Pinned target = sessionCheckpoints.requireAt(session, targetCheckpointSeq);
         CheckpointCreated checkpoint = target.checkpoint();
 
@@ -205,8 +198,8 @@ public class SessionService {
                 HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完再回滚"));
         try {
             workspaces.resetTo(workspace, checkpoint.commitSha());
-            // 同 switchModel：请求开头那份会话可能已经过期（比如等锁期间跑完了一轮）。
-            // 回滚只该改 turn_index 和位置，不该把旧的 state/model 一起写回去。
+            // 请求开头那份会话可能已过期（等锁期间可能跑完了一轮）；回滚只改 turn_index 和位置，
+            // 不能把旧的 state/model 写回去
             return writer.rewind(requireSession(session.id()), checkpoint.commitSha(),
                     checkpoint.turnIndex(), target.seq(), byUserId, token).session();
         } finally {
@@ -215,18 +208,21 @@ public class SessionService {
     }
 
     /**
-     * 换这条会话用的模型。
+     * 换这条会话用的模型，下一轮生效。
      *
-     * <p>要**抢一次租约**，两个理由：写事件需要它（fencing 保护，见 {@code EventStore}），
-     * 而且**正在跑的时候不该换** —— 那一轮已经拿到配置快照了，中途改靶会让
-     * "这一轮到底用的哪个模型"说不清。
+     * <p>要抢租约：写事件需要它，而且正在跑的那一轮已经拿到配置快照，中途换会让
+     * "这一轮用的哪个模型"说不清。供应商与模型一起换，供应商决定密钥和请求地址；
+     * 系统提示词原样保留，它是会话创建时平台写入的那一段。
      *
-     * <h2>换供应商也走这里</h2>
-     * 界面上"这一轮交给谁"是一个下拉，换家必然连地址一起换，所以地址也收。
-     * 系统提示词原样保留 —— 它是这条会话出生时平台给的那一段，换模型不该换掉它。
+     * <p>与 {@link #create} 一样，换成没有配置密钥的供应商必须当场拦住，否则报错会等到
+     * 下一轮模型调用才出现。
      *
-     * <p>和 {@link #create} 走同一条路径：换成一家没配过密钥的必须当场拦住，
-     * 否则这条会话会被改成下一轮根本跑不动的配置，而报错离用户点的那一下已经很远。
+     * <p>理由见 {@code docs/decisions/architecture/2026-09-28-switching-model-is-an-event.md}。
+     *
+     * @param provider 换成哪家供应商
+     * @param modelId  模型 id
+     * @return 换模型后的会话
+     * @throws ResponseStatusException 400 该供应商没有配置密钥；409 会话正在执行中
      */
     public Session switchModel(Session session, ProviderId provider, String modelId) {
         ModelConfig current = session.model();
@@ -237,9 +233,8 @@ public class SessionService {
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new ResponseStatusException(
                 HttpStatus.CONFLICT, "这条会话正在执行中，等它跑完再换模型"));
         try {
-            // 控制器送来的是请求开始时的快照；等锁期间另一轮可能已经推进了
-            // state/turn_index。{@code withModel} 会把这些字段一起写回去，所以必须
-            // 从锁之后的新状态出发，否则一次换模型会把已完成的一轮"退回去"。
+            // 请求开头的会话快照可能已过期：等锁期间另一轮可能推进了 state/turn_index。
+            // changeModel 会把这些字段一起写回，所以必须从锁后的新状态出发
             return writer.changeModel(requireSession(session.id()), next, token).session();
         } finally {
             leases.release(token);
@@ -247,12 +242,12 @@ public class SessionService {
     }
 
     /**
-     * 这个端点上配过密钥没有 —— **建会话和换模型问的是同一个事实**，话也只写一份。
+     * 这个供应商配过密钥没有；建会话和换模型问的是同一个事实。
      *
-     * <p>不在这里拦的话，用户会先建出会话（或换过去），直到模型调用才收到 401 ——
-     * 那时事件流和租约都已经动过了。两种入口都回 400：用户要去做的事是一样的。
+     * <p>不在这里拦，用户会到模型调用时才收到 401，而那时事件流和租约已经动过。
+     * 两个入口都回 400：用户要做的是同一件事。
      *
-     * @param action 这个动作自己的那半句（"所以选不了它上面的模型…"）
+     * @param action 当前动作自己的那半句话
      */
     private void requireConfiguredKey(UserId owner, ModelConfig model, String action) {
         if (clients.findClient(owner, model).isEmpty()) {
@@ -264,30 +259,21 @@ public class SessionService {
     }
 
     /**
-     * 丢弃这条会话：**对话没了，代码留着**。
+     * 丢弃这条会话：对话没了，代码留着。
      *
-     * <h2>为什么"删对话"和"删树"是两件事</h2>
-     * 树属于「人 + 项目」而不是某条会话（见 {@link WorkspaceId}）—— 所以丢掉一段对话
-     * 不会让上一轮的改动消失，新开一条会话就从**原地**继续。反过来说，代码在树的分支上，
-     * 所以**这次丢弃不动 git 一根毫毛**。
+     * <p>树属于「人 + 项目」而不是会话（见 {@link WorkspaceId}），所以丢弃不会让上一轮的改动
+     * 消失，新会话从原地继续，也不动 git。事件流是真删（见
+     * {@link com.codeloom.domain.port.EventDiscard}），因此它打过的 checkpoint 一起消失，
+     * 队友引用过的 {@code anchorEventSeq} 会指向不存在的 seq；服务端不解析锚点，前端会显示
+     * "引用的内容已经不存在了"。
      *
-     * <h2>真删，而且代价要说清楚</h2>
-     * 事件流是**真删**（见 {@link com.codeloom.domain.port.EventDiscard} 里那份理由），
-     * 于是两件事跟着没了：
-     * <ul>
-     *   <li>它打过的 checkpoint —— 事后没法再按这条会话回滚了。代码不会丢，
-     *       丢的是"退回到某一天的状态"这个能力；
-     *   <li>队友如果引用过它的某条事件（聊天室的 {@code anchorEventSeq}），
-     *       那个引用会指向一个不存在的 seq。服务端不解析锚点，所以不会报错 ——
-     *       前端会显示成"引用的内容已经不存在了"，而那是诚实的。
-     * </ul>
+     * <p>必须抢租约：正在跑的一轮结束时 {@code SessionWriter} 会 upsert 会话行，行没了会被
+     * 重新插回来，得到没有历史的空壳；持有租约则跑着的时候删不了，并推进 fencing token。
      *
-     * <h2>为什么必须抢一次租约</h2>
-     * 两个理由，第二个是硬的：别让**正在跑的一轮**被删 —— 一边删、一边在写，谁也说不清结果；
-     * 更具体地说，那一轮结束时 {@code SessionWriter} 会 {@code sessions.save(...)}，
-     * 而那是 upsert —— 行没了它就把这条会话**重新插回来**，于是一次"丢弃"得到一个
-     * 没有历史的空壳会话。拿着租约就堵住了这条路：跑着的时候根本删不了。
-     * 抢租约还会把 fencing token 往前推，所以即便真有个僵尸写入者，它接下来的写入也会被拒。
+     * <p>理由见 {@code docs/decisions/architecture/2026-09-30-discard-really-deletes.md}。
+     *
+     * @param session 要丢弃的会话
+     * @throws ResponseStatusException 409，会话正在执行中
      */
     public void discard(Session session) {
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new ResponseStatusException(
@@ -297,21 +283,18 @@ public class SessionService {
         } finally {
             leases.release(token);
         }
-        // 留言队列放在事务**之后**清：事务失败时它们还在，用户再点一次就行；
-        // 反过来先清队列的话，一次失败会连那些还没投递的留言一起丢掉，
-        // 而那次失败从外面完全看不出来
+        // 内存队列在事务之后清：事务失败时它们还在，用户再点一次即可；先清则会连未投递的
+        // 留言一起丢掉，而那次失败从外面看不出来
         notes.discard(session.id());
-        // 内存里那条投影也一起放下：会话都没了，留着它就是把一段已经删掉的对话
-        // 继续搁在内存里。**不清理也不会错**（有上限、迟早被挤掉），但没必要留着
+        // 投影放下即可；不清理也不会错（有上限，会被挤掉），但没必要留着已删除对话
         projections.forget(session.id());
-        // 排队中的留言同理，而且**它们等不到任何一轮** —— 会话没了，没人会来取。
-        // 放在事务之后（和上面 notes.discard 同一个理由）：失败时它们还在，再点一次就行
+        // 排队留言同理，而且会话没了，它们等不到任何一轮
         pending.forget(session.id());
     }
 
     private void appendStarted(Session session, Workspace workspace) {
-        // 此刻这棵树必然空着（会话刚建、谁也还没见过这个 id）。拿不到租约就直接炸：
-        // 那意味着它已经被人占着，继续往下走会在一条不属于我们的会话上留痕
+        // 新建的会话所在这棵树必然空着。拿不到租约直接失败：说明树已被占用，
+        // 继续写入会在一条不属于我们的会话上留痕
         LeaseToken token = leases.tryAcquire(session).orElseThrow(() -> new IllegalStateException(
                 "刚创建的会话所在这棵树不该已经有人持有租约：" + session.workspaceId()));
         try {
@@ -324,12 +307,12 @@ public class SessionService {
     /**
      * 这条会话所在的那棵树。
      *
-     * <p>建会话时就已经建好了（见 {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}），所以找不到意味着
-     * 服务端状态不对 —— 500，不是 400。
+     * <p>建会话时已经建好（见 {@link com.codeloom.app.workspace.WorkspaceProvisioner#ensure}），
+     * 找不到意味着服务端状态错误，是 500 而不是 400。
      */
     private Workspace workspaceOf(Session session) {
-        // 和别处查库的入口**共用 WorkspaceRepository.require** 的判据与那句话：
-        // "找不到"永远是 500，且理由只有一个 —— 建会话时写好的那一行被删过
+        // 与别处查库共用 WorkspaceRepository.require 的判据与文案：
+        // "找不到"永远是 500，原因是建会话时写好的那一行被删过
         return stored.require(session.workspaceId());
     }
 

@@ -1,15 +1,8 @@
 package com.codeloom.agent.tool;
 
 /**
- * 工具名与它们约定俗成的参数键。
- *
- * <h2>为什么它存在</h2>
- * 工具类当然知道自己的名字，但**别处也会引用它**：压缩的可清名单、读文件记账、
- * 提示词里告诉模型"用哪个工具"。那些地方从前各写一份字符串 ——
- * 工具改名时编译器不会报错，症状只是"压缩不清理了""读过记账失效了"，
- * 而它们看起来都不像 bug。
- *
- * <p>这里是**唯一一份**：工具类自己也返回这里的常量。
+ * 工具名与约定参数键的集中定义。压缩、读文件记账和工具实现按名字匹配时引用这里，
+ * 避免工具改名后字符串静默失配；给模型看的提示文本仍直接写名字，改名时要一起搜。
  */
 public final class ToolNames {
 
@@ -24,10 +17,8 @@ public final class ToolNames {
     public static final String WEB_FETCH = "web_fetch";
 
     /**
-     * 文件类工具用来指定"哪一个文件"的参数键。
-     *
-     * <p>它不是所有工具通用的：`grep` 的主语是 pattern、`run_command` 的是 command。
-     * 放在这里是因为读文件记账要知道"这个工具是不是按路径读的"（见 {@code ReadPathTracker}）。
+     * 文件类工具指定文件路径的参数键；不是所有工具通用。
+     * 读文件记账据此判断是否按路径读取（见 {@code ReadPathTracker}）。
      */
     public static final String PATH_ARG = "path";
 

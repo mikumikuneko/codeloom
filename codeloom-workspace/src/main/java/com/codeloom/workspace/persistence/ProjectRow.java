@@ -9,9 +9,7 @@ import java.util.Set;
 /**
  * {@code project} 表的一行。
  *
- * <p>成员不在这一行里 —— 它是另一张表。所以转换方向是不对称的：
- * 写出时只取 {@code Project} 的标量字段，读回时成员得由调用方另外查出来传进来。
- * 这不对称是表的形状决定的，不在这一层硬拗成对称的。
+ * <p>成员在另一张表，因此转换不对称：写出时只取标量字段，读回时成员由调用方查好传入。
  */
 public record ProjectRow(String id, String ownerId, String name, String repoPath) {
 
@@ -23,12 +21,14 @@ public record ProjectRow(String id, String ownerId, String name, String repoPath
     }
 
     /**
-     * @param members 从 {@code project_member} 查出来的成员，必须非空
+     * @param members 从 {@code project_member} 查出的成员，必须非空
+     * @return 领域项目
+     * @throws IllegalArgumentException 成员为空，或房主不在成员中，由 {@link Project} 的
+     *                                  构造器抛出
      */
     Project toDomain(Set<UserId> members) {
-        // 成员为空会让 Project 的紧凑构造器抛「项目至少要有一名成员」。
-        // 这是对的：一个有成员行的项目却查不出成员，说明写入路径漏了，不该被静默容忍。
-        // 房主不在成员里同样会抛 —— 那是一个谁也接不了手的死结
+        // 成员为空或房主不在成员里都由 Project 的构造器拒绝：前者说明写入路径漏了，
+        // 后者是无人能接手的项目
         return new Project(ProjectId.of(id), UserId.of(ownerId), name, repoPath, members);
     }
 }

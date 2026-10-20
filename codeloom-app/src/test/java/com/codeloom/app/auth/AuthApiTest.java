@@ -36,16 +36,13 @@ import static com.codeloom.app.support.TestBrowser.registerBody;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 认证接口的真 HTTP 测试。
+ * 认证接口的真 HTTP 测试：起真容器、发真请求，用 {@link TestBrowser} 的 cookie 罐
+ * 当浏览器。会话 cookie 只有在真 HTTP 往返里才验得了，mock 掉这一层等于把要验的东西
+ * 验没了。
  *
- * <p>起真容器、发真请求、用 {@link TestBrowser} 的 cookie 罐当"浏览器" ——
- * 会话 cookie 这套东西**只有在真 HTTP 往返里才验得了**：它依赖浏览器自动带 cookie，
- * mock 掉这一层等于把要验的东西验没了。
- *
- * <h2>为什么不加 {@code @Transactional}</h2>
- * 请求跑在容器的线程上，用的是另一条数据库连接 —— 测试事务里那些没提交的行它看不见。
- * 所以本类的数据是**真提交**的，代价是收尾要自己清（见 {@link #cleanUp()}）。
- * 账号一律随机，这样"清漏了"也不会让下一次测试莫名地红。
+ * <p>不加 {@code @Transactional}：请求跑在容器线程、用另一条连接，测试事务里未提交的行
+ * 它看不见。所以数据是真提交的，收尾要自己清（见 {@link #cleanUp()}）；账号一律随机，
+ * 清漏了也不会让下一次测试莫名地红。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -83,12 +80,11 @@ class AuthApiTest {
 
     @AfterEach
     void cleanUp() {
-        // 真提交的东西得自己收。外键在项目里是刻意不建的，所以删除顺序不重要
+        // 真提交的东西自己收。项目里刻意不建外键，删除顺序不重要。
         for (SessionId sessionId : createdSessions) {
             jdbc.update("DELETE FROM `event` WHERE session_id = ?", sessionId.value());
-            // 那棵树也要收：**新起的会话会复用同一个 (owner, project) 的那一行**，
-            // 而库里留着上一轮的行，下一轮就会连它的 fencing_token 一起继承过来。
-            // 会话行删掉之后就反查不到它属于哪棵树了，所以这条必须先跑
+            // 树也要收：新会话会复用同一个 (owner, project) 的行，留着会把 fencing_token
+            // 一起继承过去。会话行删掉后就反查不到树了，所以这条必须先跑。
             jdbc.update("""
                     DELETE w FROM workspace w
                     JOIN session s ON s.owner_id = w.owner_id AND s.project_id = w.project_id
@@ -103,8 +99,8 @@ class AuthApiTest {
         for (String username : registeredUsernames) {
             jdbc.update("DELETE FROM `user` WHERE username = ?", username);
         }
-        // 只删本次测试新造出来的那些会话键 —— 全按前缀删会把别人（比如手工登录的）
-        // 也一起踢掉，而这里是共享的开发用 Redis
+        // 只删本次新造的会话键；按前缀全删会把别人（比如手工登录的）也踢掉，
+        // 而这里是共享的开发用 Redis。
         if (!newSessionKeys.isEmpty()) {
             redis.delete(newSessionKeys);
         }
@@ -119,7 +115,7 @@ class AuthApiTest {
     }
 
     /**
-     * 注册一个新账号，返回一个**已经带着它的会话 cookie** 的浏览器。
+     * 注册一个新账号，返回一个已经带着会话 cookie 的浏览器。
      *
      * <p>账号从 {@link TestBrowser#username()} 拿；它同时被登记进收尾清单。
      */
@@ -142,10 +138,9 @@ class AuthApiTest {
     void protectedEndpointsRequireAuthentication() throws Exception {
         HttpResponse<String> response = TestBrowser.at(port).get("/api/auth/me");
 
-        // 401 而不是 302：重定向是给传统页面应用用的，API 客户端拿到它只会一头雾水
+        // 401 而不是 302：重定向是给传统页面应用用的，API 客户端拿到它只会困惑。
         assertThat(response.statusCode()).isEqualTo(401);
-        // **身体里得有人话**：这一支走的是 Security 的过滤器链，到不了 ApiExceptionHandler，
-        // 而前端把 detail 直接显示出来 —— 空着时用户看到的是"请求失败（HTTP 401）"
+        // 身体里得有人话：这一支到不了 ApiExceptionHandler，而前端直接显示 detail。
         assertThat(response.body()).contains("请先登录");
     }
 
@@ -176,9 +171,9 @@ class AuthApiTest {
         TestBrowser wrong = TestBrowser.at(port);
         HttpResponse<String> rejected = wrong.login(username, WRONG_PASSWORD);
         assertThat(rejected.statusCode()).isEqualTo(401);
-        // 那句话是给用户看的，而且**刻意不说是账号还是密码**（见 AuthController）
+        // 那句话刻意不说是账号还是密码（见 AuthController）。
         assertThat(rejected.body()).contains("账号或密码不对");
-        // 失败的登录**不该**留下一个已认证的会话
+        // 失败的登录不该留下已认证的会话。
         assertThat(wrong.get("/api/auth/me").statusCode()).isEqualTo(401);
     }
 
@@ -207,8 +202,7 @@ class AuthApiTest {
     void duplicateDisplayNamesAreRejected() throws Exception {
         TestBrowser owner = newAccount();
 
-        // 换个账号（不然先撞上的是账号那一条 —— 它排在前头），用户名照抄。
-        // 新账号的用户名默认就是它自己的账号（见 TestBrowser.register）
+        // 换账号、照抄用户名：账号查重排在前头，不换账号就撞不到用户名那一条。
         HttpResponse<String> again = TestBrowser.at(port).post("/api/auth/register",
                 registerBody("user-" + UUID.randomUUID(), "另一个密码", owner.username()));
 
@@ -242,8 +236,8 @@ class AuthApiTest {
 
         TestBrowser browser = newAccount();
 
-        // 会话真的写了一笔到共享存储里 —— 这是"实例 A 登录、实例 B 认得"的全部前提。
-        // 留在 Tomcat 堆里的话，这一条会红
+        // 会话必须写进共享存储，这是“实例 A 登录、实例 B 认得”的前提；
+        // 留在 Tomcat 堆里的话这一条会红。
         Set<String> created = new HashSet<>(sessionKeys());
         created.removeAll(before);
         newSessionKeys.addAll(created);
@@ -268,21 +262,20 @@ class AuthApiTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("注册响应里没有会话 cookie"));
 
-        // SameSite=Lax 是 SecurityConfig 里关掉 CSRF 校验的**唯一依据**，所以它必须在。
-        // 哪天有人把它改成 none、或者删掉那一行配置，CSRF 的论证就当场失效 ——
-        // 而那不会表现为任何功能故障，只会表现为一个无人察觉的漏洞
+        // SameSite=Lax 是关掉 CSRF 校验的唯一依据；改成 none 或删掉那行配置，
+        // CSRF 的论证当场失效，而且不会表现为任何功能故障。
         assertThat(cookie).contains("HttpOnly").contains("SameSite=Lax");
     }
 
     // ------------------------------------------------------------------
-    // 把之前够不到的端点解锁
+    // 实时事件流
     // ------------------------------------------------------------------
 
     @Test
     @DisplayName("【解锁】SSE 端点：未登录 401；登录之后 200、是 text/event-stream，而且立刻收到开流注释帧")
     void theSessionStreamIsReachableOnceAuthenticated() throws Exception {
-        // 未登录：401，而且**挡在控制器之前**（Security 那一步）。
-        // 用一条不存在的会话 id 就够了 —— 它连授权那一步都到不了
+        // 未登录返回 401，而且挡在控制器之前；用不存在的会话 id 就够，
+        // 它连授权那一步都到不了。
         String notMine = "/api/sessions/" + SessionId.generate().value() + "/stream";
         assertThat(TestBrowser.at(port).get(notMine).statusCode()).isEqualTo(401);
 
@@ -297,9 +290,8 @@ class AuthApiTest {
             assertThat(streaming.headers().firstValue("content-type"))
                     .contains("text/event-stream");
 
-            // **这一帧就是"顶开连接"的那一步**：它是开流时同步写出去的第一个字节。
-            // 少了它，响应头要等到第一条事件才出去 —— 而一条安静的会话可能很久都没有事件，
-            // 客户端就一直停在"连接中"。所以"连上就能读到东西"这件事本身是要验的
+            // 这是开流时同步写出的第一个字节：少了它，响应头要等第一条事件才出去，
+            // 安静的会话会让客户端一直停在“连接中”。
             assertThat(readBounded(body, 64)).startsWith(":codeloom stream open");
         }
     }
@@ -313,25 +305,18 @@ class AuthApiTest {
         // 另一个人：认证没问题，但他不在那个项目里
         TestBrowser outsider = newAccount();
 
-        // 404 而不是 403：这个项目对"不是我的东西"一律**装作不存在**，
-        // 免得拿一批 id 挨个试就能把系统里有哪些会话枚举出来（见 ProjectAccess 的类注释）
-        //
-        // 这条是那个洞的回归测试：从前这条通道只看"登录了吗"，
-        // 于是任何登录用户只要知道 id 就能订阅别人的事件流
+        // 404 而不是 403：对“不是我的东西”一律装作不存在，免得拿一批 id 枚举出会话。
+        // 少了这一道，任何登录用户只要知道 id 就能订阅别人的事件流。
         assertThat(outsider.get("/api/sessions/" + session.id().value() + "/stream").statusCode())
                 .isEqualTo(404);
     }
 
     /**
-     * 给这个浏览器的人造一个项目 + 一条他自己的会话，返回那条会话。
+     * 给这个浏览器的人造一个项目和他自己的会话，返回那条会话。
      *
-     * <h2>为什么走 jdbc 而不是走接口建</h2>
-     * 走接口建会话要先配这个端点的 API Key（见 {@code SessionService.create} 里那道检查），
-     * 而本类起的是**没有桩模型**的上下文 —— 为了验一条流去准备模型凭据，
-     * 会把这条测试和一件完全无关的事绑在一起。
-     *
-     * <p>而"这个人是那个项目的成员"这条**必须是真的**：SSE 通道现在过
-     * {@code ProjectAccess.requireVisible}，光有一个随机 uuid 是连不上的。
+     * <p>走 jdbc 而不是接口：接口建会话要求先配 API Key，而本类没有桩模型，
+     * 为验一条流去准备模型凭据会把测试绑到无关的事上。成员关系必须是真的 ——
+     * SSE 通道要过 {@code ProjectAccess.requireVisible}，随机 uuid 连不上。
      */
     private Session sessionOf(TestBrowser browser) {
         String userId = jdbc.queryForObject(
@@ -352,10 +337,10 @@ class AuthApiTest {
     }
 
     /**
-     * 从一个**永不结束**的流上读一小段。
+     * 从永不结束的流上读一小段。
      *
-     * <p>必须有超时：帧要是没发出来，裸的 {@code read} 会挂在那儿，而这个测试的文件里
-     * 没有任何断言失败 —— 表现出来是整轮测试卡死，排查方向会完全跑偏。
+     * <p>必须有超时：帧没发出来时裸 {@code read} 会一直挂着，表现为整轮测试卡死，
+     * 而不是任何断言失败。
      */
     private static String readBounded(InputStream body, int maxBytes) throws Exception {
         try (var pool = Executors.newVirtualThreadPerTaskExecutor()) {

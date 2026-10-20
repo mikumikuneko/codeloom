@@ -5,9 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * 名单比对的规则：**去掉目录、去掉扩展名**、**自己带了目录的词一律不算**。
- */
+/** 名单比对规则：去掉目录和扩展名；自带目录的词一律不算。 */
 class CommandPolicyTest {
 
     @Test
@@ -28,8 +26,7 @@ class CommandPolicyTest {
         assertThat(CommandPolicy.bareExecutableName("mvn.exe")).isEqualTo("mvn");
         assertThat(CommandPolicy.bareExecutableName("run.bat")).isEqualTo("run");
         assertThat(CommandPolicy.bareExecutableName("node")).isEqualTo("node");
-        // 认后缀时不能看大小写，但**回给调用方的名字要保持原样**（大小写不敏感的文件系统上无所谓，
-        // 可 Linux 上有所谓）
+        // 识别后缀不区分大小写，但返回的名字保持原样（Linux 上大小写有意义）
         assertThat(CommandPolicy.bareExecutableName("NPM.CMD")).isEqualTo("NPM");
     }
 
@@ -47,8 +44,8 @@ class CommandPolicyTest {
     @Test
     @DisplayName("【收整串之后跑的】带了目录的词一律不算 —— /tmp/evil/mvn 不是名单里那个 mvn")
     void aWordCarryingADirectoryIsNeverAllowed() {
-        // 那一行原样交给 shell，所以带路径就真的跑那个文件 —— 它不在"PATH 上的那个程序"
-        // 这个语义里，就不该免审批，而该让人看着路径点一下
+        // 那一行原样交给 shell，带路径就会真的执行那个文件；它不在"PATH 上的程序"
+        // 这个语义里，因此需要人看着路径批准
         CommandPolicy policy = CommandPolicy.allowList("mvn", "node");
 
         assertThat(policy.isAllowed("C:\\tools\\mvn.exe")).isFalse();

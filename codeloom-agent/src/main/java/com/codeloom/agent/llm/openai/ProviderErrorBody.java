@@ -6,16 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 
 /**
- * 从 OpenAI 兼容格式的错误体里取出那句说明。
+ * 从 OpenAI 兼容格式的错误体里取出说明。模型调用和联网工具使用同一套错误格式，
+ * 收在一处避免两边的空体处理、截断和措辞逐渐分叉。
  *
- * <h2>为什么它单独一个类</h2>
- * 模型调用和联网工具（Search / Fetch）打的是**同一家、同一套错误格式**。
- * 两处各写一份的结果不是"重复几行"，而是**慢慢分叉**：一处空体返回空串、
- * 另一处返回"（服务端未返回错误说明）"；一处截断加省略号、另一处不加 ——
- * 同一个服务端故障，模型和用户看到的说法不一样。
- *
- * <p>"服务端什么都没说"要不要另外写一句话，由调用方决定：模型调用那边必须写
- * （否则报错里少一截），联网工具那边不写（外面已经有一句"搜索失败（原因）"）。
+ * <p>空体返回空串；要不要补“服务端未返回说明”由调用方决定。
  */
 public final class ProviderErrorBody {
 
@@ -25,9 +19,12 @@ public final class ProviderErrorBody {
     private ProviderErrorBody() {}
 
     /**
-     * {@code {"error":{"message":…}}} 里的那一句；取不到就原样截一段。
+     * 取 {@code {"error":{"message":…}}} 里的说明；取不到就原样截一段。
+     * 空体返回空串。
      *
-     * <p>**空体返回空串**，理由见类注释。
+     * @param body   响应体
+     * @param mapper JSON 解析器
+     * @return 错误说明；空体时为空串
      */
     public static String message(String body, ObjectMapper mapper) {
         if (body == null || body.isBlank()) {

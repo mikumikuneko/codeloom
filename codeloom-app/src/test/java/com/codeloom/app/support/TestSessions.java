@@ -16,20 +16,19 @@ import com.codeloom.workspace.LocalWorkspaceManager;
 import java.nio.file.Path;
 
 /**
- * 落一条真会话**和它那棵树**。**几乎每个连库的测试都需要先有它们**。
+ * 落一条真实会话及其工作区，几乎每个连库测试都需要先有这两者。
  *
- * <h2>为什么是两行，不是一行</h2>
- * 代码位置（分支、worktree 路径、HEAD）挂在**工作区**上，而 fencing token 也是对工作区
- * 发号的（见 {@code MyBatisWorkspaceFence#issue}）—— 所以事件必须先有号才能写。
- * 只落会话不落树的话，后面任何一次写入都会以"工作区不存在，无法发号"收场。
+ * <p>代码位置（分支、worktree 路径、HEAD）挂在工作区上，而 fencing token 也对工作区发号
+ *（见 {@code MyBatisWorkspaceFence#issue}），事件必须先有号才能写；只落会话不落树，
+ * 后续任何写入都会以"工作区不存在，无法发号"失败。
  *
- * <p>id 由调用方给：需要 workspace 路径的测试要拿它去拼目录，所以不能在方法里生成。
+ * <p>id 由调用方提供：需要 workspace 路径的测试要用它拼目录。
  */
 public final class TestSessions {
 
     /**
-     * 落库时用的默认模型配置。需要别的值（比如空提示词、另一家）的测试自己构造，
-     * 但**默认值只写这一处**（曾散在四个测试里）。
+     * 落库用的默认模型配置。需要其他值（空提示词、其他供应商）的测试自行构造，
+     * 默认值只保留这一处。
      */
     public static final ModelConfig DEFAULT_MODEL = new ModelConfig(
             ProviderId.of("deepseek"), "deepseek-chat", "你是协作开发助手。");
@@ -58,9 +57,8 @@ public final class TestSessions {
     }
 
     /**
-     * 这条会话所在的那棵树 —— 分支名走 {@link LocalWorkspaceManager#branchName}，
-     * 也就是**和真正建树时同一个函数**。在这里另写一遍字符串的话，
-     * 改名之后测试用的就不是真的那条分支了。
+     * 这条会话所在的那棵树。分支名走 {@link LocalWorkspaceManager#branchName}，
+     * 与真正建树使用同一函数；另写字符串会在改名后指向不存在的分支。
      */
     public static Workspace treeOf(Session session, String worktreePath, String baseCommit) {
         return new Workspace(session.workspaceId(), Path.of(worktreePath),
@@ -68,12 +66,11 @@ public final class TestSessions {
     }
 
     /**
-     * 造一个测试用的 {@link LeaseToken}：拿这棵树发一个真号。
+     * 造一个测试用 {@link LeaseToken}，对工作区发一个真号。
      *
-     * <p>收在这一处，是因为"token 得同时带会话和树"这件事在测试里出现过十来次 ——
-     * 每处各拼一遍的话，某处漏掉 {@code sessionId} 只会让
-     * {@code MyBatisEventStore} 那道"拿 A 的 token 写 B"的校验变得**永远不触发**，
-     * 而那不是测试失败，是那道校验在测试里被悄悄拆掉了。
+     * <p>集中一处，因为"token 必须同时带会话和树"在测试里反复出现；各处自行拼装时若漏掉
+     * {@code sessionId}，{@code MyBatisEventStore} 中"拿 A 的 token 写 B"的校验就永远不会
+     * 触发 —— 这不是测试失败，而是校验在测试里被悄悄拆掉了。
      */
     public static LeaseToken mint(Session session, WorkspaceFence fence) {
         return new LeaseToken(session.id(), session.workspaceId(),

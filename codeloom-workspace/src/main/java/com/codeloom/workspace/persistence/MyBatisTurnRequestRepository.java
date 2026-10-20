@@ -25,8 +25,8 @@ public class MyBatisTurnRequestRepository implements TurnRequestRepository {
 
     @Override
     public void discard(SessionId sessionId) {
-        // 同 MyBatisSessionRepository.discard：不看影响行数。
-        // "这条会话的幂等键一条都没有"和"清掉了三条"对调用方是同一件事
+        // 同 MyBatisSessionRepository.discard：不看影响行数，
+        // "没有幂等键"和"清掉了三条"对调用方是同一件事
         mapper.deleteBySession(sessionId.value());
     }
 

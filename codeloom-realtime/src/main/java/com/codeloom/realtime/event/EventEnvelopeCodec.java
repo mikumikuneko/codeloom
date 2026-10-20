@@ -10,30 +10,26 @@ import java.time.DateTimeException;
 import java.time.Instant;
 
 /**
- * {@link EventEnvelope} 的 JSON 编解码 —— **流上那一条**在进程之外长什么样。
+ * {@link EventEnvelope} 的 JSON 编解码，也就是事件在进程之外长什么样。
  *
- * <h2>这一层和 {@link EventCodec} 的分工</h2>
- * {@code EventCodec} 管的是「事件本体 ↔ 类型名 + payload」；这一层在外面再包一层信封，
- * 补上**这条事件属于哪条会话、序号是多少、什么时候发生的** —— 那三样都不是事件自带的
- * （它们是存储层或传输层的事，见 {@code Event} 的类注释）。
+ * <p>{@link EventCodec} 负责事件本体与类型名加 payload 的互转；这一层在外面补上会话、
+ * seq 和发生时间，这三样不属于事件本身。
  *
- * <p>它被两个地方用：Redis Pub/Sub 的消息体（跨实例扇出），和 SSE 帧的 {@code data:}。
- * **刻意用同一份格式** —— 让"本实例推给浏览器的"和"另一个实例推给它的"是同一串字节，
- * 否则同一个事件在不同实例上会长得不一样，而那种差异只会在多实例联调时才冒出来。
+ * <p>Redis Pub/Sub 的消息体和 SSE 帧的 {@code data:} 刻意共用同一份格式：同一个事件
+ * 在本实例和别的实例上必须是同一串字节，否则差异只会在多实例联调时暴露。
  *
- * <h2>格式</h2>
+ * <p>格式：
  * <pre>
  *   {
  *     "sessionId": "…",
- *     "seq": 42,                       // 流式增量没有这个键（见 EventEnvelope）
+ *     "seq": 42,
  *     "at": "2026-09-25T10:00:00.123Z",
- *     "type": "TOOL_RESULT",           // 判别字段，解码靠它
- *     "payload": { … }                 // 事件本体，内嵌成真正的 JSON 对象
+ *     "type": "TOOL_RESULT",
+ *     "payload": { … }
  *   }
  * </pre>
- *
- * <p>{@code payload} 是**内嵌对象**而不是转义过的字符串。后者（把 JSON 再序列化一次塞进字符串）
- * 写成文本能跑，但读起来是一坨反斜杠，而且排查时没法直接用 {@code jq} 剥开看。
+ * 流式增量没有 {@code seq} 键。{@code payload} 是内嵌 JSON 对象，不是转义后的字符串，
+ * 这样排查时可以直接用 {@code jq} 查看。
  */
 public final class EventEnvelopeCodec {
 
@@ -45,19 +41,24 @@ public final class EventEnvelopeCodec {
 
     private final EventCodec events = new EventCodec();
 
-    /** @return 可以直接发出去的 JSON。同一个信封产出同一串字节 —— 落款时间由信封带来，这里不另取当前时间 */
+    /**
+     * @param envelope 事件信封
+     * @return 可以直接发出去的 JSON；同一个信封产出同一串字节，发生时间来自信封，
+     *         这里不另取当前时间
+     */
     public String write(EventEnvelope envelope) {
         return writeToNode(envelope).toString();
     }
 
     /**
-     * 同一个信封，产出**对象树**而不是字符串。
+     * 同一个信封，产出对象树而不是字符串。
      *
-     * <p>给"要把它作为一个对象嵌进更大的响应里"的场合用（REST 的历史接口，一次能拉上千条事件）。
-     * 走 {@link #write} 的话会多两次转换：整份信封序列化成字符串、调用方再解析回树。
-     * 而那个接口一次能拉上千条事件。
+     * <p>给需要把信封嵌进更大响应的调用方用（例如一次拉上千条事件的 REST 历史接口），
+     * 避免先序列化成字符串再解析回树。组帧逻辑只有这一份，{@link #write} 只是它加
+     * 一个 {@code toString()}。
      *
-     * <p>组帧逻辑只有这一份，{@code write} 就是它加一个 {@code toString()}。
+     * @param envelope 事件信封
+     * @return 信封的 JSON 对象树
      */
     public ObjectNode writeToNode(EventEnvelope envelope) {
         EventCodec.EncodedEvent encoded = events.encode(envelope.event());
@@ -65,8 +66,7 @@ public final class EventEnvelopeCodec {
         ObjectNode node = EventCodec.MAPPER.createObjectNode();
         node.put(FIELD_SESSION_ID, envelope.sessionId().value());
         if (envelope.seq() != null) {
-            // 流式增量就走这一个分支的不同 —— 它没有 seq，于是线上也就没有这个键，
-            // 浏览器那边也就不会给它安一个 id（见 EventEnvelope 的类注释）
+            // 流式增量没有 seq，线上也就没有这个键，浏览器不会给它安 id。
             node.put(FIELD_SEQ, envelope.seq());
         }
         node.put(FIELD_AT, envelope.occurredAt().toString());
@@ -76,7 +76,9 @@ public final class EventEnvelopeCodec {
     }
 
     /**
-     * @throws EventCodecException 串坏了、或者里面的事件类型认不出来
+     * @param json 事件信封的 JSON
+     * @return 解析出的事件信封
+     * @throws EventCodecException 串坏了、缺少字段、时间格式不对，或者事件类型认不出来
      */
     public EventEnvelope read(String json) {
         JsonNode node = parse(json);
@@ -88,18 +90,16 @@ public final class EventEnvelopeCodec {
                     Instant.parse(require(node, FIELD_AT).asText()),
                     events.decode(type, require(node, FIELD_PAYLOAD).toString()));
         } catch (IllegalArgumentException | NullPointerException | DateTimeException e) {
-            // 上面那一串都可能因为某个键缺失或格式不对而抛。事件信封是**跨进程**的
-            // 传输格式，坏数据的来源比库里的行多得多（版本不一致的旧实例、手工改过的消息），
-            // 所以这里统一转成可辨认的异常，而不是漏一个 NullPointerException 出去。
+            // 事件信封跨进程传输，坏数据来源比库里的行多：版本不一致的旧实例、手工改过的消息。
+            // 统一转成可辨认的异常，避免漏出空指针。
             //
-            // ★ `Instant.parse` 抛的 `DateTimeParseException` **不是** `IllegalArgumentException`
-            //（它的祖上是 `DateTimeException → RuntimeException`）—— 少了这一支，
-            // 坏时间戳会成为唯一一个漏出去的形状，和这里"统一转成可辨认异常"的承诺相反
+            // Instant.parse 抛出的 DateTimeParseException 不继承 IllegalArgumentException，
+            // 所以 DateTimeException 这一支不能省；少了它，坏时间戳会以另一种异常形状漏出去。
             throw new EventCodecException("事件信封解码失败：" + json, e);
         }
     }
 
-    /** payload 是内嵌对象，拆出来直接当字符串喂给 {@link EventCodec#decode}。 */
+    /** 把内嵌的 payload 解析成对象树；{@link EventCodec#decode} 接收的是它的字符串形式。 */
     private JsonNode readTree(String payloadJson) {
         try {
             return EventCodec.MAPPER.readTree(payloadJson);

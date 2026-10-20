@@ -6,22 +6,18 @@ import { errorText, merge, type Conflicts, type MergeOutcome } from '@/lib/api'
 import { personDot, type PersonSlot } from '@/lib/people'
 
 /**
- * 冲突裁决 —— 中栏。
+ * 冲突裁决，在中栏。
  *
- * <h2>为什么它在中栏，不在右栏</h2>
- * 因为裁决要**并排看两份内容**。右栏只有 26rem，并排两份代码在那个宽度里没有意义；
- * 而中栏本来就是看代码的地方，也本来就够宽。于是这一栏有两种模式：
- * 平时看一个文件，有冲突时切成两份。
+ * 放中栏因为裁决要并排看两份内容：右栏默认只有 480px（30rem），并排两份代码没有
+ * 意义；中栏本来
+ * 就是看代码的地方，也够宽。于是这一栏有两种模式：平时看一个文件，有冲突时切成两份。
  *
- * <h2>两侧的标题是「我的」和「主干」，不是 git 的 ours/theirs</h2>
- * 后端的 `ConflictView` 已经把两侧按**语义**归好了（`sessionSide` / `mainSide`），
- * 而且**不随合并方向翻转**。这对前端很要紧：否则同一句"用我这份"在同步和合并两个
- * 方向下会指向不同的东西 —— 那是最容易写反、出错又最难发现的一处。
+ * 两侧标题是「我的」「主干」，不是 git 的 ours/theirs：后端 `ConflictView` 已按
+ * 语义归好 `sessionSide` / `mainSide`，且不随合并方向翻转。否则"用我这份"在同步
+ * 和合并两个方向下会指向不同东西。
  *
- * <h2>三种出路，不是两种</h2>
- * 取一份是最简单的，但它常常不是对的答案：两个人各往同一个文件里加了一个方法，
- * 正确的做法是**两个都留**。所以除了"用这一份"，还必须有一条"我自己写"的路 ——
- * 那是后端 `resolveConflictByContent` 存在的理由，也在这里给出口。
+ * 三种出路而不是两种：取一份常常不是对的答案（两人各往同一文件加一个方法时该两个
+ * 都留），所以还有"自己写"一路，对应后端 `resolveConflictByContent`。
  */
 export function ConflictResolver({
   sessionId,
@@ -35,14 +31,14 @@ export function ConflictResolver({
   /**
    * 这次冲突出自用户点的哪个按钮。
    *
-   * <p>方向（INTO_SESSION / INTO_MAIN）说的是"冲突落在哪一步"，而**合并会先同步** ——
-   * 点「合并」撞出的冲突方向也是 INTO_SESSION。只用方向说话，刚点了合并的人会看到
-   * "同步时撞上的"，以为点错了。点击来源比方向更接近他刚做的事。
+   * 方向（INTO_SESSION / INTO_MAIN）只说"冲突落在哪一步"，而合并会先同步：点
+   * 「合并」撞出的冲突方向也是 INTO_SESSION。只用方向说话，刚点合并的人会看到
+   * "同步时撞上的"，以为点错了。点击来源更接近他刚做的事。
    *
-   * <p>刷新之后这个值没了（那时确实分不出来），退回按方向说。
+   * 刷新之后这个值没了（那时确实分不出来），退回按方向说。
    */
   trigger?: 'SYNC' | 'MERGE' | null
-  /** 裁掉一个之后的结论。**调用方要靠它说清"下一步是什么"** —— 见下面那段 */
+  /** 裁掉一个之后的结论。调用方要靠它说清"下一步是什么"，见下面那段 */
   onResolved: (outcome: MergeOutcome) => void
   onAbort: () => void
 }) {
@@ -54,7 +50,7 @@ export function ConflictResolver({
   const current = conflicts.conflicts[0]
   const total = conflicts.conflicts.length
 
-  // 换到下一个冲突时退出编辑态 —— 否则会把上一个文件的内容带到下一个
+  // 换到下一个冲突时退出编辑态，否则会把上一个文件的内容带过来。
   useEffect(() => {
     setEditing(false)
     setError(null)
@@ -80,10 +76,10 @@ export function ConflictResolver({
         <span className="truncate font-mono text-xs text-muted-foreground">{current.path}</span>
         {total > 1 && <span className="shrink-0 text-xs text-loom-faint">还有 {total} 个</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
-          {/* 方向决定了**这次裁决收尾的是哪一步**，而它决定了"接下来还要不要点合并"：
+          {/* 方向决定这次裁决收尾的是哪一步，也决定"接下来还要不要点合并"：
               INTO_SESSION = 收尾的是同步（主干还没动），INTO_MAIN = 收尾的就是合回。
-              这个信息后端特意带出来了（见 ConflictView / MergeDirection），在这里用上 ——
-              否则用户会以为"冲突没了"就等于"合完了" */}
+              后端特意带出这个信息（见 ConflictView / MergeDirection）；否则用户会
+              以为"冲突没了"就等于"合完了" */}
           <span className="mr-1 text-xs text-loom-faint">
             {trigger === 'MERGE'
               ? '合并时撞上的'
@@ -99,7 +95,7 @@ export function ConflictResolver({
               size="sm"
               className="text-muted-foreground"
               onClick={() => {
-                // 从「我这份」开始改最自然：冲突的另一半在右边看得到，可以照着补
+                // 从「我这份」开始改最自然：冲突的另一半在右边看得到，可以照着补。
                 setDraft(current.sessionSide)
                 setEditing(true)
               }}
@@ -167,7 +163,7 @@ export function ConflictResolver({
   )
 }
 
-/** 「我」永远是 a 号色 —— 这一栏里只有"我"和"主干"，没有第二个人的位置。 */
+/** 「我」永远是 a 号色：这一栏里只有"我"和"主干"，没有第二个人的位置。 */
 const MY_SLOT: PersonSlot = 'a'
 
 function Side({
@@ -181,7 +177,7 @@ function Side({
   title: string
   /** 有圆点的是"哪个人"；主干不是人，所以没有 */
   dot?: string
-  /** 冲突文件的路径。**两份是同一个文件的两个版本**，所以两边给的是同一个值 —— 它只用来判语言 */
+  /** 冲突文件路径。两份是同一个文件的两个版本，所以两边同值；它只用来判语言 */
   path: string
   content: string
   disabled: boolean

@@ -21,18 +21,13 @@ import java.util.function.Supplier;
 /**
  * DeepSeek 的 Search / Fetch 接口（{@code /v1/tools/search}、{@code /v1/tools/fetch}）。
  *
- * <h2>两个完整路径是写死的</h2>
- * 聊天接口的地址是 {@code baseUrl + "/chat/completions"}，而这两个是
- * {@code baseUrl + "/v1/tools/..."} —— 版本段的位置不一样。这里照文档拼，
- * 不跟着聊天那条走：把两套拼法混在一起，症状是请求打到 404 上，而报错看起来像"服务商挂了"。
+ * <p>两个路径写死为 {@code baseUrl + "/v1/tools/..."}，与聊天接口的
+ * {@code baseUrl + "/chat/completions"} 版本段位置不同；混用会打到 404，看起来却像服务商故障。
  *
- * <h2>密钥每次请求现取</h2>
- * 收的是 {@code Supplier}，和 {@code OpenAiCompatibleClient} 同一条理由：
- * 中途被删掉时立刻报清楚，而不是拿着一个已经作废的值继续发。
+ * <p>密钥经 {@code Supplier} 每次请求现取：中途被删时立即报清楚，而不是拿作废的值继续发送。
  *
- * <h2>错误码要翻成模型能据此行动的话</h2>
- * "频率超限、余额不足、这个网址抓不到"是三种不同的处境：前两种该等或者去找人，
- * 最后一种该换个链接。只回一句 HTTP 状态码，模型只会把同一个请求再发一遍。
+ * <p>错误码翻译成模型能据此行动的话：频率超限、余额不足、网址抓不到是三种不同处境，
+ * 只回状态码会让模型重复发送同一请求。
  */
 public final class DeepSeekWebAccess implements WebAccess {
 
@@ -50,19 +45,23 @@ public final class DeepSeekWebAccess implements WebAccess {
         this.apiKeySupplier = Objects.requireNonNull(apiKeySupplier, "apiKeySupplier");
     }
 
+    /**
+     * @param query 搜索词
+     * @param count 最多返回多少条
+     * @return 搜索结果；不包含长摘要与正文
+     */
     @Override
     public List<Hit> search(String query, int count) {
         ObjectNode body = mapper.createObjectNode();
         body.put("query", query);
         body.put("count", count);
-        // 正文不在这里取：一次十条正文既没必要也装不下，要正文就 web_fetch 那条链接
+        // 不取正文：十条正文既没必要也装不下；需要正文时用 web_fetch 取链接
         body.put("need_content", false);
 
         JsonNode response = post("/v1/tools/search", body, "搜索");
         List<Hit> hits = new ArrayList<>();
         for (JsonNode item : response.path("results")) {
-            // 服务商还给了 summary（长摘要）和 content —— **都不取**：
-            // 长摘要会把模型喂到不需要读原文，正文只该由 web_fetch 按需取回
+            // 不取 summary 和 content：长摘要会让模型不去读原文，正文只由 web_fetch 按需取
             hits.add(new Hit(
                     text(item, "title"),
                     text(item, "url"),
@@ -73,6 +72,10 @@ public final class DeepSeekWebAccess implements WebAccess {
         return hits;
     }
 
+    /**
+     * @param url 要抓取的网页
+     * @return 标题与正文
+     */
     @Override
     public Page fetch(String url) {
         ObjectNode body = mapper.createObjectNode();
@@ -115,7 +118,7 @@ public final class DeepSeekWebAccess implements WebAccess {
 
     private WebAccessException toException(HttpResponse<String> response, String operation) {
         int status = response.statusCode();
-        // 和模型调用那边**同一份解析**：同一个服务端、同一套错误格式
+        // 与模型调用共用同一份解析：同一个服务端、同一套错误格式
         String detail = ProviderErrorBody.message(response.body(), mapper);
 
         String reason = switch (status) {

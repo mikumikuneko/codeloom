@@ -9,31 +9,33 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * 我们认识的那几家 —— 界面上"预设供应商"那一排卡片用它。
+ * 我们认识的服务商，界面上“预设服务商”那一排卡片用它。
  *
- * <h2>为什么和 {@code /api/auth/api-key} 分开</h2>
- * 它们回答的是两个问题：那个是"**我**配了什么"（每个用户一份，要登录态），
- * 这个是"**你**支持哪些家"（所有人看到的一样，是产品的一份说明）。
+ * <p>与 {@code /api/auth/api-key} 分开：那个回答“我配了什么”（按用户、要登录），
+ * 这个回答“支持哪些家”（所有人一样，是产品说明）。
  *
- * <h2>为什么没有请求地址</h2>
- * 界面只需要名字和官网（{@code officialUrl} 是给人点过去的那个网址）。
- * 发请求由服务端做，请求地址留在服务端 —— 露出来只会让人以为那是可以改的。
+ * <p>不返回请求地址：界面只需要名字和官网（{@code officialUrl} 是给人点过去的）。
+ * 发请求由服务端做，露出地址只会让人以为它可以改。
  */
 @RestController
 @RequestMapping("/api/providers")
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class ProvidersController {
 
-    /** 预设的那几家，顺序就是界面上的顺序。 */
+    /**
+     * 预设的服务商，顺序就是界面上的顺序。
+     *
+     * @return 预设列表
+     */
     @GetMapping
     public List<PresetView> list() {
         return Providers.all().stream().map(PresetView::of).toList();
     }
 
     /**
-     * @param id          标识。配置密钥、建会话、换模型时回传的就是它
+     * @param id          标识；配置密钥、建会话、换模型时回传的就是它
      * @param displayName 界面上显示的名字
-     * @param officialUrl 官网，**只用来给人点过去**
+     * @param officialUrl 官网，只用来给人点过去
      */
     public record PresetView(String id, String displayName, String officialUrl) {
 

@@ -4,9 +4,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 export interface MenuAction {
   label: string
   onSelect: () => void
-  /** 破坏性动作。平时是普通颜色，指上去才变红 —— 它该被认出来，但不该先喊 */
+  /** 破坏性动作。平时普通颜色，指上去才变红：该被认出来，但不该先喊 */
   danger?: boolean
-  /** 在它**上面**画一条分组线 */
+  /** 在它上面画一条分组线 */
   divided?: boolean
 }
 
@@ -16,18 +16,11 @@ const MARGIN = 8
 /**
  * 右键菜单。
  *
- * <h2>它摆在哪</h2>
- * **左上角就在你右键的那一点上** —— 那是右键菜单唯一自然的锚点：
- * 菜单是从你指的地方长出来的，不是从某个角落弹出来的。
+ * 左上角就在右键那一点：菜单从指的地方长出来，不是从某个角落弹出。靠窗口右下角时
+ * 会翻回窗口内，保证整张可点；翻转后不再"就在那儿"，但不翻的话那半张点不到。
  *
- * <p>只有一种情况例外：靠窗口右下角右键时，卡片会有一半在屏幕外。那时候它翻回来，
- * 保证整张都在窗口里。**这个翻转让它不再"就在那儿"**，但不翻的话那半张菜单
- * 是真的点不到。
- *
- * <h2>为什么它自己吃掉整屏的点击</h2>
- * 菜单开着的时候，点任何地方都该是"关掉它"，而不是"点到下面那个东西"。
- * 铺一层透明的全屏层是最简单也最不会漏的做法 —— 挂在 window 上监听 click
- * 要处理冒泡顺序和"重复关两次"，而这些都会在某个角落里漏掉一次。
+ * 菜单开着时点任何地方都应是关掉它，而不是点到下面的东西。铺一层透明全屏层最
+ * 简单也最不会漏；挂在 window 上监听 click 要处理冒泡顺序和重复关闭。
  */
 export function ContextMenu({
   x,
@@ -46,9 +39,8 @@ export function ContextMenu({
   const [at, setAt] = useState({ left: x, top: y })
   const [active, setActive] = useState(0)
 
-  // 先按右键那一点摆好，量出真实尺寸，再夹回窗口里。
-  // useLayoutEffect 在**浏览器绘制之前**跑，所以这个修正是看不见的 ——
-  // 用 useEffect 的话卡片会先闪一下再跳回来
+  // 先按右键那一点摆好，量出真实尺寸，再夹回窗口。useLayoutEffect 在浏览器绘制
+  // 之前跑，这个修正看不见；用 useEffect 会先闪一下再跳回来。
   useLayoutEffect(() => {
     const box = card.current?.getBoundingClientRect()
     if (!box) {
@@ -60,7 +52,7 @@ export function ContextMenu({
     })
   }, [x, y])
 
-  // 拉开就把焦点收进卡片，否则方向键没有落脚的地方
+  // 拉开就把焦点收进卡片，否则方向键没有落脚点。
   useEffect(() => {
     card.current?.focus()
   }, [])
@@ -87,7 +79,7 @@ export function ContextMenu({
       <div
         className="fixed inset-0 z-40"
         onPointerDown={onClose}
-        // 在别处再右键一次也是"关掉它"（同时挡掉浏览器那个自带的菜单）
+        // 在别处再右键一次也是关掉它，同时挡掉浏览器自带的菜单。
         onContextMenu={(event) => {
           event.preventDefault()
           onClose()
@@ -100,9 +92,8 @@ export function ContextMenu({
         aria-label={label}
         style={{ left: at.left, top: at.top }}
         onKeyDown={onKeyDown}
-        // **描边和阴影二选一**：那块浮层原来两样都有（一条 border + 一层 shadow）。
-        // 现在那条 1px 的中性描边改成阴影的**第一层** —— 看上去一模一样，
-        // 但只有一个机制在画它。两套一起上迟早会走岔（改了颜色忘了改另一边）
+        // 描边和阴影二选一：原来两样都有，现在 1px 中性描边改成阴影的第一层，
+        // 看上去一样但只有一个机制在画；两套一起上迟早走岔。
         className="fixed z-50 min-w-44 rounded-lg bg-popover py-1 shadow-float outline-none"
       >
         {actions.map((action, index) => (
@@ -115,8 +106,7 @@ export function ContextMenu({
                 action.onSelect()
                 onClose()
               }}
-              // 鼠标划过就换高亮，键盘也走同一条路 —— 两个入口一套状态，
-              // 免得"鼠标停在这、方向键选的是另一个"
+              // 鼠标划过和键盘走同一套 active 状态，免得"鼠标在这、方向键选的是另一个"。
               onPointerEnter={() => setActive(index)}
               className={`flex w-full items-center px-3 py-1.5 text-left text-sm transition-colors ${
                 index === active ? 'bg-selected' : ''

@@ -4,20 +4,15 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 一次调用的**完整**结果。流式回调之外的汇总视图。
+ * 一次调用的完整结果，是流式回调之外的汇总视图。
  *
- * <p>两种用法都支持：想要实时刷界面就挂 listener 看 {@link StreamEvent.TextDelta}；
- * 只想要最终结果就读这个。
- *
- * @param model        服务商**实际使用**的模型。不一定等于请求时传的那个 ——
- *                     旧别名会被服务商映射到新模型记录，审计要记这个值
+ * @param model        服务商实际使用的模型；可能因别名映射与请求值不同，审计记这个值
  * @param finishReason 结束原因：{@code stop} / {@code tool_calls} / {@code length}
- * @param text         拼好的完整正文
- * @param toolCalls    拼好的工具调用（参数已完整）
+ * @param text         完整正文
+ * @param toolCalls    工具调用，参数已拼完整
  * @param usage        token 用量
- * @param reasoning    这一轮的**思考过程**（推理模型才有），中性名，不用任何一家的字段名。
- *                     <strong>它同时是回传协议的一部分</strong> —— 要跟着这条消息带回去，
- *                     少带了下一次请求会被拒；具体发不发由 provider 适配层按来源模型决定
+ * @param reasoning    思考过程（推理模型才有）；它是回传协议的一部分，
+ *                     具体是否发送由适配器按来源模型决定
  */
 public record LlmResult(String model,
                         String finishReason,
@@ -32,35 +27,32 @@ public record LlmResult(String model,
         usage = usage == null ? TokenUsage.UNKNOWN : usage;
     }
 
-    /**
-     * 没有思考过程的场合（多数模型、测试）。
-     *
-     * <p>它存在的另一个理由：{@code reasoning} 是后加的，有它就不用去改每一个已有的构造点。
-     */
+    /** 没有思考过程的场合（多数模型、测试）。 */
     public LlmResult(String model, String finishReason, String text,
                      List<ToolCall> toolCalls, TokenUsage usage) {
         this(model, finishReason, text, toolCalls, usage, null);
     }
 
+    /**
+     * @return 本次是否包含工具调用
+     */
     public boolean hasToolCalls() {
         return !toolCalls.isEmpty();
     }
 
     /**
-     * 这一轮有没有思考过程。
+     * 这一轮是否有思考过程。它取决于模型能力，调用方不能假设一定存在。
      *
-     * <p>注意"有没有"是**模型能力**决定的，不是我们决定的 —— 换成不支持推理的模型，
-     * 它自然就没有。所以调用方不该假设它一定有。
+     * @return 有非空思考时为 true
      */
     public boolean hasReasoning() {
         return reasoning != null && !reasoning.isBlank();
     }
 
     /**
-     * 输出被截断了。
+     * 输出是否因长度上限被截断。调用方必须显式处理，不能当成正常结束。
      *
-     * <p>这个状态要**显式处理**：模型话说到一半被砍，如果当成正常结束，
-     * 后续推理就建立在半截内容上。正确做法是把它当一轮失败，或者按预算策略优雅收尾。
+     * @return {@code finishReason} 为 {@code length} 时为 true
      */
     public boolean isTruncated() {
         return "length".equals(finishReason);

@@ -36,11 +36,10 @@ import java.util.stream.IntStream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 「先补历史、再接上实时」这三条性质的真机测试（真 MySQL + 真 Redis）。
+ * 「先补历史、再接实时」三条性质的真实中间件测试（真 MySQL + 真 Redis）。
  *
- * <p>把 {@code replay-batch} 调到 2，是为了让补历史那一段**必然走多次循环** ——
- * 用默认的 500 的话，"分批拉到底"那个 while 在测试里永远只转一圈，
- * 而这个类里最容易写错的就是那一圈之后的边界。
+ * <p>{@code replay-batch} 调到 2，让补历史必然走多轮循环；默认 500 时"分批拉到底"的
+ * while 只会转一圈，而最容易写错的正是随后那一圈的边界。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -88,7 +87,7 @@ class SessionStreamServiceTest {
         appendMessages(5);
 
         try (EventBus.Subscription ignored = streams.stream(session.id(), null, sink::add)) {
-            // 补历史是**同步**的，所以方法一返回，队列里就该齐了
+            // 补历史是同步的，方法一返回队列里就该齐了
             assertThat(textsIn(sink)).containsExactly(
                     "第 1 条", "第 2 条", "第 3 条", "第 4 条", "第 5 条");
         }
@@ -173,7 +172,7 @@ class SessionStreamServiceTest {
         return events.append(session.id(), batch, token);
     }
 
-    /** 把队列里**当前已有**的都取出来 —— 补历史是同步的，所以这个方法对那一段是确定的。 */
+    /** 取出队列当前已有的全部内容；补历史是同步的，因此这一段是确定的。 */
     private static List<String> textsIn(BlockingQueue<EventEnvelope> queue) {
         List<String> texts = new ArrayList<>();
         for (EventEnvelope envelope = queue.poll();

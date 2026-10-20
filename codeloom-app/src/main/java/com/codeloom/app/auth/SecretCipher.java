@@ -15,28 +15,15 @@ import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * 用户密钥的加解密。**AES-GCM**。
+ * 用户 API Key 的加解密，AES-GCM。
  *
- * <h2>为什么是加密而不是哈希</h2>
- * 因为我们要把原文**还原出来**才能拿去发请求 —— 而哈希是单向的。
- * 这一点和用户密码正相反（那个只需要"验一验对不对"，所以哈希就够了）。
- * 两种凭据、两种处理，不该混为一谈。
+ * <p>必须能还原原文才能拿去发请求，所以是加密而不是哈希（用户密码相反）。
+ * GCM 是 AEAD，同时提供机密性与完整性：密文被改一个字节就解不开。
  *
- * <h2>选 GCM 而不是 CBC + 另一个哈希</h2>
- * GCM 是 AEAD：它同时给出机密性和完整性，密文被改一个字节就解不开。
- * 用 CBC 的话，得自己再拼一个 HMAC 上去，而那意味着**多一样要同步的东西** ——
- * 而"加密了但忘了校验"是这类代码里最经典的一种破法。
- *
- * <h2>主密钥从哪来，以及为什么不给默认值</h2>
- * {@code codeloom.secret-key}（base64 的 32 字节）。**没有默认值，而且刻意不自动生成**：
- * 自动生成的那个密钥会在下次重启时变成另一个，于是所有已经存进去的密钥
- * **一夜之间全都解不开** —— 那是比"启动失败"严重得多的故障。
- * 没配就报错，报错里告诉你怎么生成一个：
- *
- * <pre>openssl rand -base64 32</pre>
- *
- * <p>它保护的是**所有人**的密钥，所以它的保管级别要高于它保护的东西：
- * 生产上该放密钥管理服务或环境变量，绝不在版本库里。
+ * <p>主密钥来自 {@code codeloom.secret-key}（base64 的 32 字节），没有默认值，也不自动
+ * 生成 —— 自动生成的密钥下次重启就变了，已存的密钥会全部解不开。未配置时只在使用处
+ * 报错、不拦启动；配置了但格式或长度不对则在构造时立刻失败。见
+ * {@code docs/decisions/architecture/2026-09-28-secret-key-has-no-default.md}。
  */
 @Component
 public class SecretCipher {
@@ -53,25 +40,21 @@ public class SecretCipher {
     private final SecureRandom random = new SecureRandom();
 
     /**
-     * 主密钥。配置为空时是 {@code null} —— 见构造器里那两条时机规则。
+     * 主密钥。配置为空时是 {@code null}。
      *
-     * <p>{@code final} 而不是可变字段：它只在构造期被定下来一次，之后没有任何
-     * 换密钥的路径。写成可变的会让人以为存在这条路径。
+     * <p>{@code final}：它只在构造期被定下来一次，不存在换密钥的路径。
      */
     private final SecretKey masterKey;
 
     /**
-     * <h2>没配主密钥时**不拦启动**</h2>
-     * 配置是空的就只是"不加密用不了"，而不是"这个应用起不来"。理由很实际：
-     * 跑那些根本不碰密钥的测试，不该被这个配置卡住。
+     * 未配置主密钥不拦启动，只是加密用不了；配置了但非法（不是合法 base64、长度不对）
+     * 则在构造时立刻失败。
      *
-     * <p>但**配了却是错的**（不是合法 base64、长度不对）会立刻炸 —— 那种错当场发现最省事，
-     * 拖到某次存密钥时才炸只会让人以为是业务问题。
+     * @param base64Key base64 编码的 32 字节主密钥；空表示未配置
+     * @throws IllegalStateException 配置了但无法解析，或长度不是 32 字节
      */
     public SecretCipher(@Value("${codeloom.secret-key:}") String base64Key) {
-        // 刻意只用一个局部变量，不落成字段：它是**明文主密钥**的副本，
-        // 没有任何理由让它跟着这个单例活到进程结束 —— 那比它保护的密文活得还久，
-        // 而"明文只在两端各出现一瞬间"是这个类唯一的运行纪律
+        // 用一个局部变量，不落成字段：明文主密钥没有理由跟着单例活到进程结束。
         String configured = base64Key == null ? "" : base64Key.strip();
         this.masterKey = configured.isEmpty() ? null : parse(configured);
     }
@@ -79,8 +62,11 @@ public class SecretCipher {
     /**
      * 加密。
      *
-     * @return {@code base64(IV):base64(密文+认证标签)} —— 一列装得下，而且 IV 和密文
-     *         永远是成对读写的，拆成两列只会多一个"只更新了其中一个"的机会
+     * @param plaintext 明文
+     * @return {@code base64(IV):base64(密文+认证标签)}。IV 和密文永远成对读写，
+     *         拆成两列只会多一个“只更新了其中一个”的机会
+     * @throws ResponseStatusException 500：未配置主密钥
+     * @throws IllegalStateException   加密算法不可用
      */
     public String encrypt(String plaintext) {
         try {
@@ -102,8 +88,11 @@ public class SecretCipher {
     /**
      * 解密。
      *
-     * @throws IllegalStateException 密文被改过、或者主密钥换了 —— 两种情况都表现为解不开，
-     *                               而它们该给的提示是一样的：**那把密钥需要重新配置**
+     * @param sealed {@code base64(IV):base64(密文+认证标签)}
+     * @return 明文
+     * @throws IllegalStateException   格式不对，缺少分隔符
+     * @throws ResponseStatusException 500：密文被改过、主密钥换了，或未配置主密钥 ——
+     *                                 它们该给的提示一样：那把密钥需要重新配置
      */
     public String decrypt(String sealed) {
         int separator = sealed.indexOf(SEPARATOR);
@@ -124,7 +113,7 @@ public class SecretCipher {
         }
     }
 
-    /** 真正用到主密钥时才检查"配了没有" —— 见构造器注释。 */
+    /** 真正用到主密钥时才检查“配了没有”，见构造器注释。 */
     private SecretKey requireMasterKey() {
         if (masterKey == null) {
             throw unavailable(
@@ -138,20 +127,13 @@ public class SecretCipher {
     }
 
     /**
-     * 「服务端自己没配好」该以什么形式抛出去。
+     * 把“服务端自己没配好”以 {@link ResponseStatusException} 抛出，而不是
+     * {@code IllegalStateException}。
      *
-     * <h2>为什么不是 {@code IllegalStateException}</h2>
-     * 因为它<b>到不了界面上</b>：{@code ApiExceptionHandler} 刻意不接
-     * {@code IllegalStateException}（那可能是任何一处内部状态坏掉，把 message 漏出去等于
-     * 泄露实现细节），而 Boot 默认的 {@code include-message=never} 会让响应只剩一句
-     * {@code Internal Server Error}。于是"你少配了一个密钥"和"服务器崩了"在界面上长得一样 ——
-     * <b>而前者一句话就能修好</b>。
-     *
-     * <p>{@code ResponseStatusException} 在这个项目里的含义就是"**这句话是要给调用方看的**"
-     * （见 {@code ApiExceptionHandler.onResponseStatus}），而下面这几处的读者确实就是它：
-     * 这是个自部署的两人工具，用的人和运维的人是同一个人。
-     *
-     * <p>文案里**不要写 markdown 记号** —— 它会原样出现在界面上（那里不解析 markdown）。
+     * <p>{@code ApiExceptionHandler} 刻意不把 {@code IllegalStateException} 的消息带到
+     * 界面上，加上 Boot 默认的 {@code include-message=never}，“少配一个密钥”和“服务器崩了”
+     * 会看起来一样。{@code ResponseStatusException} 在本项目里的含义是“这句话要给调用方看”。
+     * 文案不要写 markdown 记号，界面不解析它。
      */
     private static ResponseStatusException unavailable(String reason, Throwable cause) {
         return new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, reason, cause);

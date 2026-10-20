@@ -36,19 +36,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 聊天室的真库测试。
+ * 聊天室的真库测试，连接是 Mockito 桩出来的 {@code WebSocketSession}。
  *
- * <p>用假连接（Mockito 桩出来的 {@code WebSocketSession}）而不是真握手：这里要验的是
- * **处理器**的行为 —— 身份从哪来、消息发给谁、坏消息怎么处理 —— 而不是握手那一层。
- * 握手有它自己的测试（见同包的 {@code ChatWebSocketHandshakeTest}），
- * 两件事分开验，各自失败时指向的原因才清楚。
- *
- * <p>假连接**记下所有推给它的帧**，所以断言能直接看"这人收到了什么"，
- * 而不是去数某个方法被调了几次。
+ * <p>这里验处理器：身份从哪来、消息发给谁、坏消息怎么处理。握手另由
+ * {@code ChatWebSocketHandshakeTest} 覆盖，分开验失败时指向的原因才清楚。
+ * 假连接记下所有推出的帧，断言直接看“这人收到了什么”，不数方法调用次数。
  */
-// MOCK 而不是 NONE：处理器要过 ProjectAccess，而 app 层那套服务/控制器图
-// **整体是 Web 有条件的** —— 不起 Web 上下文的话这个 bean 根本不存在。
-// MOCK 只搭一个假的 servlet 环境，不真开端口，所以这条测试仍然很轻
+// MOCK 而不是 NONE：处理器要过 ProjectAccess，而 app 层这套图整体是 Web 有条件的，
+// 不起 Web 上下文这个 bean 就不存在。MOCK 只搭假的 servlet 环境，不真开端口。
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isDatabaseReachable")
 @Transactional
@@ -74,19 +69,18 @@ class ChatWebSocketHandlerTest {
 
     private User alice;
     private User bob;
-    /** 一个**不在**项目里的人 —— 用来验"登录了不等于能进这个聊天室"。 */
+    /** 一个不在项目里的人，用来验“登录了不等于能进这个聊天室”。 */
     private User stranger;
 
     @BeforeEach
     void seedTwoUsers() {
-        // 账号和用户名都必须随机：**两条唯一键**（见 schema）——
-        // 写死成 alice 的话，将来库里真有一个 alice 时这个测试会莫名其妙地红
+        // 账号和用户名都要随机：两条唯一键，写死会让测试在库里真有同名行时莫名地红。
         alice = register("alice");
         bob = register("bob");
         stranger = register("stranger");
 
-        // 项目必须**真的存在**，而且 alice/bob 真的是它的成员 ——
-        // 建连时要过 ProjectAccess.requireMember，光有一个随机 uuid 是进不来的
+        // 项目必须真的存在、alice/bob 真的是成员：建连要过
+        // ProjectAccess.requireMember，随机 uuid 进不来。
         projects.save(new Project(projectId, alice.id(), "聊天测试项目",
                 "D:/repos/" + projectId.value(), Set.of(alice.id(), bob.id())));
     }
@@ -100,8 +94,7 @@ class ChatWebSocketHandlerTest {
 
         handler.afterConnectionEstablished(anonymous.session());
 
-        // 一条不知道"谁在说话"的聊天连接没有意义。这个假连接没有 principal（过滤器链没参与），
-        // 所以会走到这一支 —— 这是有意的：这里验的是处理器的那个防御分支
+        // 假连接没有 principal（过滤器链没参与），所以走到防御分支 —— 这里验的正是它。
         verify(anonymous.session()).close(CloseStatus.POLICY_VIOLATION);
     }
 
@@ -122,8 +115,8 @@ class ChatWebSocketHandlerTest {
     void nonMembersAreRejected() throws Exception {
         FakeClient outsider = connect(stranger, projectId);
 
-        // projectId 是**调用方写在 URL 里**的，光有它什么都证明不了。
-        // 少了这一道，任何一个登录用户随手填一个 uuid 就能读到别人的聊天记录
+        // projectId 是调用方写在 URL 里的，光有它什么都证明不了；
+        // 少了这一道，任何登录用户填一个 uuid 就能读别人的聊天记录。
         verify(outsider.session()).close(CloseStatus.POLICY_VIOLATION);
     }
 
@@ -132,8 +125,7 @@ class ChatWebSocketHandlerTest {
     void unknownProjectsLookExactlyLikeRejections() throws Exception {
         FakeClient onNothing = connect(alice, ProjectId.generate());
 
-        // "装作不存在"是这个项目对越权的一贯处理（见 ProjectAccess 的类注释）：
-        // 拿一批 id 挨个试，试不出系统里有哪些项目
+        // 对越权装作不存在：拿一批 id 挨个试，试不出系统里有哪些项目。
         verify(onNothing.session()).close(CloseStatus.POLICY_VIOLATION);
     }
 
@@ -151,13 +143,12 @@ class ChatWebSocketHandlerTest {
         assertThat(saved.text()).isEqualTo("你这段不对");
         assertThat(saved.authorId()).isEqualTo(alice.id());
         assertThat(saved.anchorEventSeq()).isEqualTo(42L);
-        // 摘要跟着消息一起存下来 —— 界面上显示"引用了 · 编辑了 OrderService.java" 靠的就是它，
-        // 而不是回头去查那条事件（那属于对方的流，而且会随会话清理而消失）
+        // 摘要随消息一起存：界面上显示“引用了 · 编辑了 OrderService.java”靠它，
+        // 而不是回头查那条事件（那属于对方的流，且会随会话清理消失）。
         assertThat(saved.anchorText()).isEqualTo("编辑了 OrderService.java");
         assertThat(saved.createdAt()).isNotNull();
 
-        // 发送者也收到自己那条：前端只有一条渲染路径（收到广播就渲染），
-        // 不给它单独的 ack —— 两条路径迟早会长得不一样
+        // 发送者也收到自己那条：前端只有一条渲染路径，不另发 ack。
         assertThat(aliceClient.received()).singleElement()
                 .satisfies(json -> assertThat(json).contains("\"text\":\"你这段不对\""));
         assertThat(bobClient.received()).singleElement()
@@ -167,8 +158,7 @@ class ChatWebSocketHandlerTest {
     @Test
     @DisplayName("【安全约束】说话的人来自连接上的身份，消息体里塞 authorId 不起作用")
     void theAuthorComesFromTheConnectionNotThePayload() throws Exception {
-        // 从消息体里取作者等于让谁都能冒充别人发言 —— 聊天室最容易出的那种问题。
-        // ChatInbound 里干脆没有 authorId 这个字段，所以上面那个键会被直接忽略
+        // 从消息体取作者等于允许冒充；ChatInbound 没有 authorId 字段，这个键会被忽略。
         FakeClient aliceClient = connect(alice);
 
         handler.handleTextMessage(aliceClient.session(), new TextMessage(
@@ -206,8 +196,8 @@ class ChatWebSocketHandlerTest {
     @Test
     @DisplayName("坏消息：不落库、连接不断，但回一个 error 帧")
     void malformedMessagesGetAnErrorFrame() throws Exception {
-        // 一条坏消息不值得把连接掐了（客户端可能只是发了个半截的），
-        // 但也不能一声不吭 —— 那样前端表现为"消息发出去了，但谁也没看见"
+        // 坏消息不值得断开连接（客户端可能只发了半截），但必须回错误帧，
+        // 否则前端表现为“消息发出去了，但谁也没看见”。
         FakeClient aliceClient = connect(alice);
 
         handler.handleTextMessage(aliceClient.session(), new TextMessage("这不是 JSON"));

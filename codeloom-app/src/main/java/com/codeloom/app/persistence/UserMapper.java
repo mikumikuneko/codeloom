@@ -7,25 +7,22 @@ import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 /**
- * {@code user} 表的读写。
- *
- * <p>表名一律加反引号 —— 图的是全表一个写法。实测（MySQL 8.0.46）：不带反引号的
- * {@code SELECT id FROM user} 和 {@code CREATE TABLE user (…)} 都能过（它不是保留字，
- * 虽然同时是个内置函数名 {@code USER()}，看起来容易误会）。
+ * {@code user} 表的读写。表名一律加反引号，全表一个写法。
  */
 @Mapper
 public interface UserMapper {
 
     /**
-     * 按 **id** 更新这一行；没有这一行时由 {@link #insert} 接手（见 {@code MyBatisUserRepository.save}）。
+     * 按 id 更新这一行；没有这一行时由 {@link #insert} 接手。
      *
-     * <p><strong>{@code created_at} 不在更新列表里</strong>：它记的是「什么时候注册的」，
-     * 不是「这一行最后一次被写是什么时候」。改名改密码不该动它。
+     * <p>{@code created_at} 不在更新列表里：它记的是什么时候注册的，改名改密码不该动它。
      *
-     * <h2>为什么不是 {@code INSERT ... ON DUPLICATE KEY UPDATE}</h2>
-     * 那张表上有**两个**唯一键（账号、用户名），而那句 SQL 撞上**任何一个**都会去更新那一行 ——
-     * 撞在别人的用户名上，它会顺手把**别人**那一行改掉（{@code username = new.username}），
-     * 而不是报错。按 id 更新就只认主键，撞名老老实实抛唯一键冲突。
+     * <p>不用 {@code INSERT ... ON DUPLICATE KEY UPDATE}：表上有两个唯一键（账号、用户名），
+     * 那句 SQL 撞上任一个都会更新那一行 —— 撞在别人的用户名上会改掉别人的行，而不是报错。
+     * 按 id 更新只认主键，撞名老老实实抛唯一键冲突。
+     *
+     * @param row 用户行
+     * @return 受影响行数；0 表示没有这一行
      */
     @Update("""
             UPDATE `user`
@@ -35,25 +32,49 @@ public interface UserMapper {
             """)
     int update(UserRow row);
 
-    /** 新建一行。**不吞唯一键冲突** —— 撞名该报出去（调用方先查过，这是兜底）。 */
+    /**
+     * 新建一行。不吞唯一键冲突：撞名该报出去（调用方先查过，这里只是兜底）。
+     *
+     * @param row 用户行
+     * @return 受影响行数
+     */
     @Insert("""
             INSERT INTO `user` (id, username, password_hash, display_name, created_at)
             VALUES (#{id}, #{username}, #{passwordHash}, #{displayName}, #{createdAt})
             """)
     int insert(UserRow row);
 
+    /**
+     * @param id 用户 id
+     * @return 用户行；不存在时为 null
+     */
     @Select("SELECT " + UserRow.COLUMNS + " FROM `user` WHERE id = #{id}")
     UserRow findById(@Param("id") String id);
 
-    /** 登录用。账号上有唯一索引，所以最多一行。 */
+    /**
+     * 登录用。账号上有唯一索引，所以最多一行。
+     *
+     * @param username 账号
+     * @return 用户行；不存在时为 null
+     */
     @Select("SELECT " + UserRow.COLUMNS + " FROM `user` WHERE username = #{username}")
     UserRow findByUsername(@Param("username") String username);
 
-    /** 注册时查重。用 COUNT 而不是把整行拉回来 —— 这里只需要知道「有没有」。 */
+    /**
+     * 注册时按账号查重，只返回有没有。
+     *
+     * @param username 账号
+     * @return 匹配行数
+     */
     @Select("SELECT COUNT(*) FROM `user` WHERE username = #{username}")
     int countByUsername(@Param("username") String username);
 
-    /** 同上，查的是用户名 —— 它也有唯一索引。 */
+    /**
+     * 注册时按用户名查重；用户名也有唯一索引。
+     *
+     * @param displayName 用户名
+     * @return 匹配行数
+     */
     @Select("SELECT COUNT(*) FROM `user` WHERE display_name = #{displayName}")
     int countByDisplayName(@Param("displayName") String displayName);
 }

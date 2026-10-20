@@ -9,16 +9,14 @@ import java.lang.reflect.Method;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 把「写在 SQL 里的约定」也变成测试。
+ * 把写在 SQL 里的约定变成测试。
  *
- * <p>剩下的这条断言看着像在检查字符串，实际上守的是一个**改动起来毫无声响**的错误：
- * 表加一列，{@code SELECT *} 的结果集就变了，而映射代码会按旧假设继续跑 ——
- * 不编译报错、不测试失败、不在日志里留痕，所以只能靠这里挡住。
+ * <p>这些断言守的是无声的错误：表加一列后 {@code SELECT *} 的结果集会变化，而映射代码
+ * 仍按旧假设运行 —— 不编译报错、不测试失败、不留日志，只能在这里挡住。{@code @Select}
+ * 是运行时保留，可以直接读注解。
  *
- * <p>读注解里的 SQL 是可行的，因为 {@code @Select} 都是运行时保留。
- *
- * <p>"save 绝不能出现 fencing_token"那条断言随该列一起搬到了 {@code workspace} 表上，
- * 现在住在 {@link WorkspaceMapperSqlTest}。
+ * <p>"save 绝不能出现 fencing_token"的断言随该列移到了
+ * {@link WorkspaceMapperSqlTest}。
  */
 class SessionMapperSqlTest {
 

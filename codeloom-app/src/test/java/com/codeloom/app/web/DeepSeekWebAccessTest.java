@@ -22,10 +22,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 用 JDK 自带的 {@code com.sun.net.httpserver} 回放服务商的响应。
+ * 用 JDK 自带的 {@code com.sun.net.httpserver} 回放服务商响应。
  *
- * <p>整条链路（拼路径 → 带密钥 → 发请求 → 解析 → 翻错误）全部离线可测：
- * 不需要网络，也不需要真的 API Key。
+ * <p>整条链路（拼路径、带密钥、发请求、解析、翻译错误）均可离线测试，
+ * 不需要网络，也不需要真实 API Key。
  */
 class DeepSeekWebAccessTest {
 

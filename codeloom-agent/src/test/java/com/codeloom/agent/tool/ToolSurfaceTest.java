@@ -12,11 +12,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 工具声明的"样子"。
- *
- * <p>它守的是两件事：**声明和参数 schema 对得上**（这两处一个是代码、一个是 JSON 文本，
- * 编译器管不到），以及**每个工具都真的声明了**（漏声明不会报错，只会让界面显示得糙，
- * 所以它必须由测试来喊）。
+ * 工具呈现声明。守住两点：声明的主语必须存在于参数 schema（代码与 JSON 文本之间无编译期检查），
+ * 且每个标准工具都确实声明了形状和动作词。
  */
 class ToolSurfaceTest {
 
@@ -62,7 +59,7 @@ class ToolSurfaceTest {
     @Test
     @DisplayName("声明的主语不在参数 schema 里 → 启动时就炸")
     void subjectMustExistInTheSchema() {
-        // 参数里只有 path，声明却说主语是 file_path
+        // 参数只有 path，声明的主语却是 file_path。
         Tool liar = new ProbeTool("file_path");
 
         assertThatThrownBy(() -> new ToolRegistry(List.of(liar)))
@@ -77,7 +74,7 @@ class ToolSurfaceTest {
                 .containsEntry("probe", ToolSurface.of(ToolSurface.Shape.READ, "读", "path"));
     }
 
-    /** 一个只为这两条测试存在的工具：它的参数永远是 {@code path}，主语键由构造参数给。 */
+    /** 测试工具：参数固定为 path，主语键由构造参数提供。 */
     private record ProbeTool(String subjectKey) implements Tool {
 
         @Override
@@ -132,7 +129,7 @@ class ToolSurfaceTest {
         assertThat(ToolSurface.of(ToolSurface.Shape.EDIT, "改", "path").subjectIsPath()).isTrue();
         assertThat(ToolSurface.of(ToolSurface.Shape.SEARCH, "搜", "pattern").subjectIsPath()).isFalse();
         assertThat(ToolSurface.of(ToolSurface.Shape.EXECUTE, "跑", "command").subjectIsPath()).isFalse();
-        // 没声明主语时，形状再像路径也不算 —— "哪一个参数"都不知道，谈它是不是路径没有意义
+        // 未声明主语时无法判断其是否为路径。
         assertThat(ToolSurface.of(ToolSurface.Shape.READ, "读", null).subjectIsPath()).isFalse();
     }
 

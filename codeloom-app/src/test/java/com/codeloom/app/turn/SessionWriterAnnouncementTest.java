@@ -34,15 +34,14 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 「落库即宣告」在**真库 + 真总线**上的兑现处。
+ * 「落库即宣告」在真库和真总线上的验证。
  *
- * <h2>为什么这个类**不开**测试事务</h2>
- * 要验的恰好是"提交之后才发"，而测试事务是回滚的 —— 那样一条都不会发出去，
- * 测什么都是空的。所以这一整个类用 {@code NOT_SUPPORTED} 跑，写下来就是真写下来，
- * 收尾由 {@link #dropWhatWasCommitted()} 逐张表删干净。
+ * <p>本类不开测试事务：要验证的正是"提交之后才发"，而测试事务会回滚，一条也发不出去。
+ * 因此整个类以 {@code NOT_SUPPORTED} 运行，写入即真实提交，收尾由
+ * {@link #dropWhatWasCommitted()} 逐表清理。
  *
- * <p>机制那一半（登记顺序、没有事务时当场发、广播失败不抛）在
- * {@code EventAnnouncerTest} 里；两条一起才盖住"机制对"和"这条写入路径真的走了它"。
+ * <p>机制部分（登记顺序、无事务时立即发送、广播失败不抛）在 {@code EventAnnouncerTest}；
+ * 两者合起来覆盖"机制正确"和"该写入路径确实走了它"。
  */
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
 @Transactional(propagation = Propagation.NOT_SUPPORTED)

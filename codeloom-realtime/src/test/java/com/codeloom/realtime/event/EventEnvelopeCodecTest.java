@@ -17,9 +17,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 事件信封的线上格式。
  *
- * <p>这一层是**跨进程**的：Redis Pub/Sub 的消息体，和 SSE 帧的 {@code data:}，
- * 用的是同一份格式。所以它和 {@code EventCodec} 一样是"改了就没人读得动旧数据"的东西 ——
- * 下面这几条断言盯的就是格式本身，不只是"能不能转回去"。
+ * <p>这一层跨进程：Redis Pub/Sub 的消息体和 SSE 帧的 {@code data:} 使用同一份格式。
+ * 因此它和 {@code EventCodec} 一样，改了就可能没人读得动旧数据；下面的断言检查格式本身，
+ * 不只是能否往返。
  */
 class EventEnvelopeCodecTest {
 
@@ -49,8 +49,8 @@ class EventEnvelopeCodecTest {
     @Test
     @DisplayName("流式增量：线上**没有 seq 这个键** —— 浏览器于是也不会给它安一个 id")
     void ephemeralEventCarriesNoSeq() {
-        // 这一条直接决定 SSE 帧里有没有 `id:` 字段，而那是客户端断线重连时回传的游标。
-        // 给一条正在打字中的片段安上 id，客户端重连后就会从一个不存在的 seq 接着拉。
+        // 这决定 SSE 帧里有没有 id: 字段，而它是客户端断线重连时回传的游标。
+        // 给正在打字中的片段安上 id，客户端重连后会从不存在的 seq 接着拉。
         EventEnvelope envelope = EventEnvelope.ephemeral(SESSION, AT, new AssistantDelta("半个句"));
 
         String json = codec.write(envelope);
@@ -62,7 +62,7 @@ class EventEnvelopeCodecTest {
     @Test
     @DisplayName("payload 是内嵌对象，不是被转义成一坨反斜杠的字符串")
     void payloadIsAnEmbeddedObject() {
-        // 排查时能直接 `jq .payload` 剥开看，而不是对着 \" 数反斜杠
+        // 排查时能直接 jq .payload 剥开看，而不是对着反斜杠数转义。
         String json = codec.write(EventEnvelope.of(
                 new StoredEvent(SESSION, 1L, AT, new UserMessage("看一下 README"))));
 
@@ -97,8 +97,8 @@ class EventEnvelopeCodecTest {
                 .isInstanceOf(EventCodecException.class)
                 .hasMessageContaining("未知的事件类型");
 
-        // 时间戳也是"坏数据"的一种。`DateTimeParseException` 不继承 IllegalArgumentException，
-        // 漏掉它的话这一类会以另一种异常形状漏出去（见 read 的 catch）
+        // 时间戳也是坏数据的一种。DateTimeParseException 不继承 IllegalArgumentException，
+        // 漏掉它这一类会以另一种异常形状漏出去（见 read 的 catch）。
         assertThatThrownBy(() -> codec.read("""
                 {"sessionId":"s-1","seq":1,"at":"昨天下午","type":"USER_MESSAGE","payload":{"text":"x"}}
                 """))
@@ -109,8 +109,8 @@ class EventEnvelopeCodecTest {
     @Test
     @DisplayName("信封自己守住那条不变量：落库的必须有 seq、易失的必须没有")
     void theEnvelopeItselfGuardsTheInvariant() {
-        // 这条约束不该只写在写入侧的代码里 —— 读出来的时候它同样要成立，
-        // 否则一条"没有 seq 的持久事件"会一路飘到 SSE 的 id 字段上去
+        // 这条约束不能只写在写入侧，读出来时同样要成立，否则一条没有 seq 的持久事件
+        // 会一路飘到 SSE 的 id 字段上。
         assertThatThrownBy(() -> new EventEnvelope(SESSION, null, AT, new UserMessage("x")))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("必须带 seq");
@@ -122,8 +122,8 @@ class EventEnvelopeCodecTest {
     @Test
     @DisplayName("JSON 里的 type 判别字段和本体是一致的 —— 解出来的一定是对应的那个类")
     void typeDiscriminatorMatchesTheBody() {
-        // 信封记录本身不带 type（它由事件类推导），所以"判别字段和本体是否一致"
-        // 只能这样验：写出去再解回来，本体必须还是原来那个类
+        // 信封记录本身不带 type（由事件类推导），所以只能写出去再解回来，
+        // 验证本体仍然是原来那个类。
         EventEnvelope envelope = EventEnvelope.ephemeral(SESSION, AT, new AssistantDelta("半"));
 
         EventEnvelope decoded = codec.read(codec.write(envelope));

@@ -9,19 +9,11 @@ import java.nio.file.Path;
 import java.util.Optional;
 
 /**
- * 精确局部替换。**永远不做整文件覆盖。**
+ * 精确局部替换，永远不做整文件覆盖。
  *
- * <h2>为什么这条很重要</h2>
- * 整文件覆盖有两个致命问题：一是 diff 会变成"整个文件都变了"，diff 卡片直接失去意义、
- * 审计也失去价值；二是**它会静默地抹掉别人在这期间对这个文件的改动**。
- *
- * <p>局部替换天然规避了第二条：如果 {@code old_string} 在工作区里已经找不到了，
- * 说明文件被改过（很可能是对方会话合并进来的），工具会失败并让模型重新读文件 ——
- * 这正是"两条会话分叉后如何自愈"的机制。
- *
- * <h2>失败信息是故意写长的</h2>
- * 模型只能通过这段文本来决定下一步。所以"没找到"时要告诉它**该怎么办**
- * （重新读文件），而不是只丢一句 "not found"。
+ * <p>整份覆盖会让 diff 失去意义，并可能静默抹掉同时发生的改动。局部替换要求
+ * {@code old_string} 唯一匹配；匹配不到说明文件已变，失败信息要引导模型重新读取，
+ * 这就是两条会话分叉后的自愈入口。
  */
 public final class EditFileTool implements Tool {
 
@@ -80,25 +72,14 @@ public final class EditFileTool implements Tool {
             return ToolOutcome.failed("文件不存在: " + rawPath + "。要新建请用 write_file。");
         }
 
-        // **改之前必须观测过。** 它挡的是一件很实的事：没有"读到过的那一份"做基准，
-        // 就没有任何东西能说明模型改的是**它以为的那份内容**。
-        //
-        // 两个参考实现在这一处是同一条规矩：Claude Code 的 Edit 直接报
-        // "File has not been read yet"；deepseek-harness 的改文件那道检查在没观测过时
-        // 同样拒绝。它们要的都是"有个版本可以做基准"。
-        //
-        // **不要求"整份"**（那是 write_file 那条规则的要求）：edit 改的是它**逐字引用的
-        // 那一段**，读到的是不是整份与它无关。要求整份反而会把"读了 100-200 行，
-        // 改其中一行"这种完全正当的用法挡掉。
+        // 修改前必须观测过，否则没有基准证明改的是模型以为的内容。
+        // 不要求整份：edit 只改动逐字引用的那一段，部分读取是正当用法。
         Optional<ReadLedger.Observation> observed = context.reads().observationOf(file);
         if (observed.isEmpty()) {
-            // **只说状态，不教它怎么做。** 从前这里还跟了一句"先用 read_file 看一眼…"，
-            // 而工具描述里已经写着这条约束 —— 重复的那半句会原样进工具结果，
-            // 于是界面上也出现一句教训人的话（它原本只是说给模型的）
+            // 只说明状态，不重复工具描述里的指导。
             return ToolOutcome.failed("还没读过 " + rawPath + "，不能改它。");
         }
-        // 读完之后被别人改过：old_string 可能还匹配得上，但那是**另一份内容**里的位置。
-        // 这时候改下去，改的和模型以为的不是同一处
+        // 读后被改动时，old_string 可能仍匹配，但匹配的是另一份内容里的位置。
         if (ReadLedger.changedSince(file, observed.get())) {
             return ToolOutcome.failed(rawPath + " 在你读过之后被改过了（另一个 agent，或者人自己动的）。"
                     + "先重新读一遍，确认当前内容再改。");
@@ -108,7 +89,7 @@ public final class EditFileTool implements Tool {
 
         int occurrences = countOccurrences(content, oldString);
         if (occurrences == 0) {
-            // 这条分支就是"对方会话改了同一个文件"之后的自愈入口
+            // 这是“对方会话改了同一文件”后的自愈入口。
             return ToolOutcome.failed("在 " + rawPath + " 里没有找到 old_string 那段内容。"
                     + "文件可能已被其他会话修改，或者你的内容与文件不完全一致（注意空白字符）。"
                     + "请重新用 read_file 读取 " + rawPath + " 确认当前内容后再试。");
@@ -121,13 +102,11 @@ public final class EditFileTool implements Tool {
         String updated = content.replace(oldString, newString);
         write(file, updated, rawPath);
 
-        // 写完刷新账上的版本：现在磁盘上是 `updated`，而这个工具**手里就有它的全文** ——
-        // 所以它是"整份"。不刷新的话，紧接着的第二次 edit 会拿旧版本去比对，然后被自己刚写的改动拦住
+        // 写完刷新记录：工具手里就是全文，因此算整份；否则紧接着的 edit 会被旧版本拦住。
         context.reads().mark(file, true);
 
         int line = lineOf(content, oldString);
-        // 界面那份带**起始行号**：diff 卡片要按它给每一行标号。
-        // 给模型看的那段话里也有这个数，但那是自由文本 —— 从里面反解行号等于猜
+        // 界面需要结构化的起始行号，不能从给模型的自由文本反解。
         String presentation = "{\"kind\":\"diff\",\"startLine\":" + line + "}";
         return ToolOutcome.mutated("已修改 " + rawPath + "（第 " + line + " 行附近，替换 "
                 + oldString.length() + " 字符为 " + newString.length() + " 字符）")

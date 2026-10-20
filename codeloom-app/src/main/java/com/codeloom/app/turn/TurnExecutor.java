@@ -45,57 +45,29 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 执行器：把「一条会话的一轮」从头到尾办完的地方。系统里唯一同时握着四边的东西。
+ * 执行器：把一条会话的一轮从头办完，是系统里唯一同时握着四边的东西。
  *
- * <pre>
- *   抢租约 → 起续约看门狗 → 找/建 worktree → 读事件流 → 跑 AgentTurn
- *          → （回调里逐条落库 + 同事务推进状态）→ 收尾状态 → 释放租约
- * </pre>
+ * <p>流程：抢租约、起续约看门狗、找或建工作区、读事件流、跑 AgentTurn（回调逐条落库并
+ * 同事务推进状态）、收尾、释放租约。必须住在 app：它同时使用 realtime（租约、事件）、
+ * workspace（worktree、命令、仓储）和 agent（循环、工具），模块图中只有 app 能看到这三边。
  *
- * <h2>为什么它必须住在 app</h2>
- * 它要同时用三个模块：租约与事件（realtime）、worktree 与命令 + 会话与项目仓储
- * （workspace）、循环与工具（agent）。按现在的模块图，
- * {@code app} 是唯一合法能同时看到这三边的地方 —— 别处都会需要新增一条依赖边。
+ * <p>三块独立协作者本包内：{@link TurnInputFactory} 决定这一轮喂什么，
+ * {@link TurnBroadcaster} 推给正在看的人，{@link TurnWorkspace} 取工作区并把改动提交。
+ * 它们与租约和状态机没有共享状态，执行器因此看不见 {@code EventStore}、
+ * {@code LlmClientProvider}、{@code CommandPolicy} 等不该操心的东西。
  *
- * <h2>它现在**不**干哪些事</h2>
- * 有三块独立成协作者（都在本包）：{@link TurnInputFactory}（这一轮喂什么给模型）、
- * {@link TurnBroadcaster}（推给正在看的人）、{@link TurnWorkspace}
- * （拿到 worktree、把改动提交成 commit）。它们和执行器的租约/状态机
- * **没有共享状态** —— 上面那张流程图的每一步都留在这里，那三件事只是被它调用一下；
- * 于是执行器**看不见** {@code EventStore}、{@code LlmClientProvider}、
- * {@code CommandPolicy} 这些它本来就不该操心的东西。
+ * <p>三条刻意的顺序：看门狗在开始跑之前启动，否则慢启动（拉历史、建工作区）可能把租约熬过期；
+ * 事件逐条落库而不是整轮攒完，崩溃恢复依赖 {@code ToolCallRequested} 在工具开始前已持久；
+ * 失去租约后既不写也不释放锁 —— 写入会被 fencing 拒绝，而 release 因 holderId 不匹配本就是
+ * 安全的空操作，跳过只是让"这一轮什么都没动"显式可见。
  *
- * <h2>三条容易做错、这里刻意做对的</h2>
- * <ol>
- *   <li><b>续约看门狗在跑之前就起。</b> 中途才起的话，一个慢的启动阶段
- *       （拉历史、建 worktree）就可能把租约熬过期，然后整轮都在一个已不属于自己的
- *       会话上跑。
- *   <li><b>事件逐条落库，不是整轮攒完再写。</b> 见
- *       {@link AgentTurn#run(TurnInput, java.util.function.ToLongFunction)} ——
- *       崩溃恢复靠的就是「{@code ToolCallRequested} 在工具开始跑之前已经持久」。
- *   <li><b>失去租约之后一个字都不写，也不释放锁。</b> 写入会被 fencing 拒绝；
- *       而释放之所以也跳过，是因为那时候锁已经不属于我们了 ——
- *       不过要说清楚：{@code release} 的 Lua 脚本会比对 holderId，对不上就返回 0，
- *       所以<b>那条路本来就是安全的空操作</b>，跳过它不是为了防什么，
- *       而是让"这一轮什么都没动"在代码里显式可见。
- * </ol>
- *
- * <h2>用量：只记，不拦</h2>
- * 每一轮的用量都会作为 {@link TurnTokensUsed} 落库（见 {@link #tokensUsed}），
- * 所以"这条会话花了多少、跑的是哪个模型"翻事件流查得到。
- *
- * <p><strong>刻意没有</strong>"累计超限就拦住"那一层：本项目是 BYOK ——
- * 用户填自己的 API key，**花的是他自己的钱**，所以"平台为了控制成本拦用户"这个主体
- * 根本不存在。{@link TokenBudget} 因此只剩单轮那一层，那是**结论不是缺口**：
- * 单轮那层管的是自旋（模型陷进"读文件→改文件→读文件"），和谁付钱无关。
- *
- * <p>崩溃恢复**不自动续跑**：那个开关已经删掉了（见 {@code CrashRecovery}）。
- * 本项目部署形态是宿主机 + 人在键盘前，"接着跑"用户自己说一句就行。
+ * <p>用量只记录不拦截：本项目 BYOK，花的是用户自己的钱，不存在平台控制成本这一层；
+ * {@link TokenBudget} 只剩单轮，用于防止自旋。崩溃恢复也不自动续跑（见 {@code CrashRecovery}）。
  */
 @Component
 public class TurnExecutor {
 
-    /** 落进事件的失败原因长度。事件表要长期保存，异常信息再长也没人读。 */
+    /** 落进事件的失败原因长度；事件表长期保存，过长的异常信息没人读。 */
     private static final int REASON_MAX_CHARS = 200;
 
     private static final Logger log = LoggerFactory.getLogger(TurnExecutor.class);
@@ -112,8 +84,7 @@ public class TurnExecutor {
     private final TurnRequestRepository requests;
 
     /**
-     * 三件各自独立的事，各自一个协作者 —— 见类注释「它现在不干哪些事」。
-     * 它们和执行器的租约/状态机**没有共享状态**，各自能被单独读、单独测。
+     * 三件独立的事各有一个协作者，与租约和状态机没有共享状态，可单独阅读和测试（见类注释）。
      */
     private final TurnInputFactory inputFactory;
     private final TurnBroadcaster broadcaster;
@@ -145,28 +116,34 @@ public class TurnExecutor {
         this.turnWorkspace = turnWorkspace;
     }
 
-    /** 用户发了话，跑一轮。 */
+    /**
+     * 用户发了话，跑一轮。
+     *
+     * @param userMessage 消息正文
+     * @return 本轮结果
+     */
     public TurnResult send(SessionId sessionId, String userMessage) {
         return send(sessionId, userMessage, null);
     }
 
     /**
-     * 用户发了话，跑一轮；{@code clientMessageId} 用来挡重复请求。
+     * 用户发了话，跑一轮；{@code clientMessageId} 用于挡重复请求。
      *
-     * <p>幂等检查放在**抢租约之前**：连"忙不忙"都不该问 —— 重复请求的答案不是
-     * "等会儿再来"，而是"这件事已经办过了"。放进 run 里的话，一个正在跑的会话
-     * 会把重复请求报成 {@code Busy}，客户端就会去重试，而重试只会一直得到 {@code Busy}。
+     * <p>幂等检查在抢租约之前：重复请求的答案不是"等会儿再来"，而是"这件事已办过"。
+     * 放进 run 里的话，正在跑的会话会把重复请求报成 {@code Busy}，客户端重试只会一直得到
+     * {@code Busy}。
+     *
+     * @param clientMessageId 客户端请求标识；null 表示不查重
+     * @return 本轮结果
      */
     public TurnResult send(SessionId sessionId, String userMessage, String clientMessageId) {
         Objects.requireNonNull(userMessage, "userMessage");
 
-        // ★ 审批挂着的时候**照样收下这句话**，只是排队 —— 见 TurnResult.Queued。
-        //   不能把它打成 FAILED：状态机只允许 AWAITING_APPROVAL → WAITING_USER，
-        //   而每一轮开头那一步是迁到 THINKING，那样用户那句话一个字都不落库。
-        //
-        //   这一句放在**认领幂等键之前**：被排队的这句话还没被处理过，
-        //   把它记成"这件事已经办过了"是假的 —— 用户答完批准再打一遍同样的话，
-        //   就会撞上一句"这个请求之前已经处理过了"，而它明明没有被处理
+        // 审批挂着时照样收下这句话，只是排队（见 TurnResult.Queued）：打成 FAILED 不行，
+        // 状态机只允许 AWAITING_APPROVAL → WAITING_USER，而每轮开头要迁到 THINKING，
+        // 那样这句话一个字都不会落库。
+        // 这也必须在认领幂等键之前：被排队的话尚未处理，记成"已办过"是假的，
+        // 用户答完批准再打一遍会撞上"这个请求之前已经处理过了"
         Session early = requireSession(sessionId);
         if (early.state() == SessionState.AWAITING_APPROVAL) {
             return queue(sessionId, userMessage);
@@ -180,11 +157,8 @@ public class TurnExecutor {
     }
 
     /**
-     * 这一轮还轮不到，先把话排着。
-     *
-     * <p>{@code ahead} 是它前面还排着几句 —— 调用方拿它说"你前面还有 2 句"，
-     * 而不是干巴巴一句"已收下"。用户排了五句的时候，那两句话的区别就是他知不知道
-     * 自己排到哪儿了。
+     * 这一轮还轮不到，先把话排着。{@code ahead} 让调用方说出"前面还有几句"，
+     * 用户才知道自己排到了哪里。
      */
     private TurnResult queue(SessionId sessionId, String userMessage) {
         int ahead = pending.size(sessionId);
@@ -194,14 +168,15 @@ public class TurnExecutor {
     }
 
     /**
-     * 接着跑一轮，**不追加新的用户消息**。
+     * 接着跑一轮，不追加新的用户消息。
      *
-     * <p>挂起的工具调用被答复之后走这条路（见 {@code ApprovalService}）：那条答复已经
-     * 作为事件落库、并充当了那次调用的结果，所以模型需要的是"把历史原样喂回去接着跑"，
-     * 而不是一条新的用户消息 —— 伪造一条会污染审计流（看起来像用户说了话），
-     * 也会让模型看到一句它本来没收到的话。
+     * <p>挂起的工具调用被答复后走这条路（见 {@code ApprovalService}）：答复已作为事件落库、
+     * 充当调用结果，模型需要的是把历史原样喂回去；伪造一条用户消息会污染审计流，
+     * 也会让模型看到它没收到的话。
      *
-     * <p>不抢租约的话调用方要自己先放锁，否则这里是 {@link TurnResult.Busy}。
+     * <p>不抢租约时调用方要先放锁，否则返回 {@link TurnResult.Busy}。
+     *
+     * @return 本轮结果
      */
     public TurnResult resume(SessionId sessionId) {
         return run(sessionId, Optional.empty());
@@ -210,20 +185,14 @@ public class TurnExecutor {
     // ------------------------------------------------------------------
 
     private TurnResult run(SessionId sessionId, Optional<String> newUserMessage) {
-        // **先取会话，再抢租约**：租约是按会话所在的**那棵树**抢的（见 ExecutionLease），
-        // 而"哪棵树"要从会话推出来。
-        //
-        // 顺序反过来还有第二个好处：会话 id 不存在时在这里就失败了，
-        // 而不是**先占住一棵树、再发现没这条会话** —— 后者会为一次无效请求
-        // 把整棵树锁住到租约到期
+        // 先取会话再抢租约：租约按会话所在的树发放，而树要从会话推出。
+        // 反过来会在会话 id 不存在时先占住整棵树，直到租约到期
         return run(requireSession(sessionId), newUserMessage);
     }
 
     /**
-     * 跑一轮，跑完之后**顺手把排着队的话交付掉**。
-     *
-     * <p>交付分两步，而且两步必须分在两个租约里：**落库**在 {@code runOnce} 里面
-     *（追加事件要持有租约），**接着再跑一轮**在外面（那时候租约已经还回去了）。
+     * 跑一轮，结束后把排队的消息交付掉。交付分两步且必须在两个租约里：落库在
+     * {@code runOnce} 内（追加事件需要租约），接着再跑一轮在外层（此时租约已归还）。
      */
     private TurnResult run(Session session, Optional<String> newUserMessage) {
         Attempt attempt = runOnce(session, newUserMessage);
@@ -231,7 +200,7 @@ public class TurnExecutor {
             return attempt.result();
         }
         // 会话刚刚回到"等用户说话"，而排着的那几句已经落库了 —— 立刻接着跑一轮
-        // 把它们交给模型。**不需要新的用户消息**：它已经在历史里了
+        // 把它们交给模型；不需要新的用户消息，它已经在历史里了
         return run(requireSession(session.id()), Optional.empty());
     }
 
@@ -245,36 +214,30 @@ public class TurnExecutor {
 
         Optional<LeaseToken> acquired = leases.tryAcquire(session);
         if (acquired.isEmpty()) {
-            // 这棵树已经有执行者了 —— **不阻塞**，但也不再让用户自己去重试：
-            // 把这句话排着，等那一轮收尾时交付 —— 见 TurnResult.Queued
-            //
-            // resume 那条路没有新消息可排 —— 它本来就是"接着跑"，
-            // 被挡住只能如实说 Busy
+            // 树已有执行者：不阻塞，把新消息排着，等那一轮收尾时交付（见 TurnResult.Queued）。
+            // resume 没有新消息可排，只能如实返回 Busy
             return newUserMessage
                     .map(text -> new Attempt(queue(sessionId, text), false))
                     .orElseGet(() -> new Attempt(new TurnResult.Busy(sessionId), false));
         }
         LeaseToken token = acquired.get();
 
-        // 取消信号由**登记表**发放，而不是由调用方传进来：这样"用户点了中断"那个请求
-        // 才有东西可够 —— 它拿不到执行器内部的局部变量，只能通过这张表找到这一轮的 token
+        // 取消信号由登记表发放，而不是由调用方传入：中断请求拿不到执行器内部的局部变量，
+        // 只能通过这张表找到这一轮的 token
         CancellationToken cancellation = turns.register(sessionId);
         LeaseWatchdog watchdog = LeaseWatchdog.start(leases, token, cancellation);
 
-        // 用它跟踪"当前会话"。回调改不了外部局部变量，而 catch 里需要**最新**的那个 ——
-        // 拿旧状态去写 FAILED 会把审计流里的迁移记错。
-        //
-        // **租约只挡住后来的写者，不会让请求开头读到的快照变新。** 等锁期间可能已经
-        // 有另一轮跑完、把 turn_index 推进了；拿旧快照去 advance/settle 会把那个号写回去。
-        // 所以拿到锁之后第一件事是重读会话，后面所有迁移都从这份当前状态出发。
+        // 跟踪当前会话：回调改不了外部局部变量，而 catch 需要最新状态去写 FAILED。
+        // 租约只挡住后来的写者，不会让请求开头的快照变新；等锁期间可能有另一轮推进了
+        // turn_index，拿旧快照去 advance/settle 会把号写回去。所以拿锁后先重读会话
         AtomicReference<Session> current = new AtomicReference<>();
-        // 声明在 try 外面：失败那条路也要用它去提交这一轮已经落到磁盘上的改动
-        // （见 fail 里的 commitQuietly）。**它可能一直是 null** —— 连工作区都没建起来时
+        // 声明在 try 外：失败路径也要用它提交本轮已写到磁盘的改动（见 commitQuietly）。
+        // 它可能一直是 null —— 连工作区都没建起来时
         Workspace workspace = null;
         try {
             current.set(requireSession(sessionId));
-            // 等锁期间那一轮可能停在"等人批"了。那句话还是该排队，不能拿
-            // AWAITING_APPROVAL 去走 advance(THINKING) —— 那会撞状态机。
+            // 等锁期间会话可能停在等人批。消息仍应排队，不能拿 AWAITING_APPROVAL
+            // 去走 advance(THINKING)，那会撞状态机
             if (current.get().state() == SessionState.AWAITING_APPROVAL
                     && newUserMessage.isPresent()) {
                 return new Attempt(queue(sessionId, newUserMessage.get()), false);
@@ -282,29 +245,24 @@ public class TurnExecutor {
             Project project = requireProject(current.get().projectId());
             workspace = turnWorkspace.ensure(current.get(), project);
 
-            // FAILED 只能先回 IDLE 再进 THINKING（状态机的约束），所以重试是两步
+            // FAILED 只能先回 IDLE 再进 THINKING，所以重试是两步
             apply(current, writer.retryFromFailed(current.get(), token));
             apply(current, writer.advance(current.get(), SessionState.THINKING, null, token));
 
-            // 压缩必须赶在用户这条消息**落库之前**。水位线取的是"当前最后一条事件"，
-            // 顺序反过来就会把用户刚说的话一起压掉 —— 模型于是看不见这一轮的指令，
-            // 表现成"它答非所问"。这是整套里最容易写反的一处
+            // 压缩必须赶在用户消息落库之前：水位线取当前最后一条事件，顺序反了会把
+            // 用户刚说的话一起压掉，模型看不见本轮指令，表现成答非所问
             compactor.compactIfNeeded(current.get(), ContextCompactor.Trigger.PRESSURE,
                             cancellation, token)
                     .ifPresent(written -> apply(current, written));
 
-            // 留言排在用户这条消息**之前**落库：它们是更早发生的（一直在队列里等着），
-            // 而且这样模型看到的顺序就是"谁先说的在前"
+            // 留言排在用户消息之前落库：它们发生得更早，模型看到的顺序应是先说的在前
             applyNotes(sessionId, current, token);
 
             newUserMessage.ifPresent(s -> apply(current, writer.append(current.get(), new UserMessage(s), token)));
 
-            // 上下文装不下时的补救：**压一次**，然后让循环重发。
-            //
-            // 走的是 Trigger.OVERFLOW —— 不看阈值（provider 刚给过答案，而我们那个估算器
-            // 恰恰是可能错的那一个）。返回"有没有真的落一条压过的记录"：
-            // 没落就说明什么都没修动，那时让循环把**原始那个错误**报出去，
-            // 比假装"压过了、还是不行"更诚实（见 ContextRepair）
+            // 上下文溢出时的补救：压一次，然后让循环重发。走 Trigger.OVERFLOW 不看阈值，
+            // 因为服务商刚报过错、而估算器可能不准。返回值表示是否真的落了压缩记录；
+            // 没落就让循环报原始错误，比假装"压过了仍不行"更诚实（见 ContextRepair）
             ContextRepair repairAfterOverflow = () -> compactor
                     .compactIfNeeded(current.get(), ContextCompactor.Trigger.OVERFLOW,
                             cancellation, token)
@@ -322,40 +280,29 @@ public class TurnExecutor {
             if (watchdog.leaseLost()) {
                 return new Attempt(new TurnResult.LeaseLost(sessionId), false);
             }
-            // **一轮结束前把这一轮的改动提交掉**，然后才收尾。见 TurnWorkspace.commit 的注释：
-            // 不提交的话，agent 写出来的文件对 git 来说是未跟踪的，而回滚和合并
-            // 看到的都是"分支上的提交" —— 于是那两件事都会以为什么都没发生
+            // 收尾前先提交本轮改动（见 TurnWorkspace.commit）：不提交的话 agent 写出的文件
+            // 对 git 是未跟踪的，而回滚和合并都只看分支上的提交，会以为什么都没发生
             TurnWorkspace.Commit commit = turnWorkspace.commit(current.get(), workspace);
-            // 收尾：checkpoint + 这一轮的用量 + 状态回到等用户 + 轮次号，一个事务。
-            // **停下来的原因**落进 SessionStateChanged.reason，于是"这轮为什么停"
-            // （打转了？被取消了？验证没过？）在审计流里看得见。
-            //
-            // 轮次号推不推**不在这里判**：它由 finalState 推出来（挂着等人批的那一轮
-            // 没跑完，不推；批准之后接着跑完时才推），规则在 SessionWriter.completes 那一处
+            // 收尾：checkpoint、用量、状态、轮次号在同一个事务里。停止原因落进
+            // SessionStateChanged.reason，审计流里看得见本轮为什么停。
+            // 轮次号是否推进由 finalState 决定，规则在 SessionWriter.completes
             SessionWriter.Written written = writer.finishTurn(current.get(), commit,
                     outcome.status().name(),
                     finalStateFor(outcome), tokensUsed(outcome), token);
             apply(current, written);
 
-            // ★ 协作提醒：这一轮**新建**了文件的话，告诉项目里其他人的 agent。
-            //   放在收尾之后：那时候这轮已经落了库、状态也对，而留言本来就是
-            //   "下一轮开头才被领走"的东西（见 AgentNotes），早一句晚一句都不影响。
-            //
-            //   **只有真的产生了新提交才算数**：这一轮什么都没改时，交出来的位置还是上一个
-            //   HEAD（见 TurnWorkspace.Commit.created），拿它去算新建文件会得到上一轮的那几个
+            // 本轮新建了文件时提醒项目里其他人的 agent。放在收尾之后：此时已落库、状态也对，
+            // 而留言本来就在下一轮开头才被领走（见 AgentNotes）。
+            // 只有真的产生了新提交才算，否则拿到的是上一个 HEAD 的新建文件
             if (commit.created()) {
-                // 新建了哪些文件**从刚写下的那条记录里读**（见 createdIn）——
-                // 不再问一遍 git，免得同一个提交的改动一轮里算两遍
+                // 从刚写下的记录里读，不再问一遍 git，避免同一提交的改动一轮算两遍
                 announceNewFiles(current.get(), createdIn(written));
             }
 
-            // ★ 交付排队中的那几句。**必须在这里落库** —— 追加事件要持有租约，
-            //   而它马上要在 finally 里还回去。过了这一行它们就只能干等着
-            //   下一次有人发消息时才被看见，而用户已经在界面上等着了。
-            //
-            //   接着要不要**再跑一轮**由外层决定：挂在审批上时不能
-            //   （状态机只允许 AWAITING_APPROVAL → WAITING_USER）。
-            //   那种情况下这几句静静待在历史里，等用户答完批准、resume 那一轮带上它们
+            // 排队消息必须在这里落库：追加事件需要租约，而它马上要在 finally 里归还；
+            // 过了这一行就只能等下次有人发消息才被看见。是否接着再跑一轮由外层决定：
+            // 挂在审批上时不能（状态机只允许 AWAITING_APPROVAL → WAITING_USER），
+            // 那几句会留在历史里，等批准后的 resume 带上
             boolean delivered = deliverQueued(current, token);
 
             return new Attempt(new TurnResult.Completed(outcome),
@@ -372,11 +319,10 @@ public class TurnExecutor {
     }
 
     /**
-     * 把别的会话送来的留言领进来，落成事件。
+     * 把别的会话送来的留言落成事件。
      *
-     * <p>它们在此之前只是**队列里的字符串**（见 {@code AgentNotes} 的类注释：发留言的
-     * 请求不持有租约，落不了库），到这里才成为事实 —— 因为此刻这一轮正持有租约，
-     * 走的是和其他事件完全一样的那条写入路径。
+     * <p>在此之前它们只是队列里的字符串（发留言的请求不持有租约，落不了库）；到这里才成为
+     * 事实，因为本轮持有租约，走的是和其他事件相同的写入路径。
      */
     private void applyNotes(SessionId sessionId, AtomicReference<Session> current, LeaseToken token) {
         List<AgentNoteDelivered> drained = notes.drain(sessionId);
@@ -384,37 +330,31 @@ public class TurnExecutor {
             try {
                 apply(current, writer.append(current.get(), drained.get(i), token));
             } catch (RuntimeException e) {
-                // 已经落成功的那几条**先确认掉**：不确认的话下一轮 drain 会把它们
-                // 重新捞出来，同一句话在事件流里落两遍
+                // 先确认已成功的几条：否则下一轮 drain 会重新捞出它们，同一句话落两遍
                 notes.ack(sessionId, drained.subList(0, i));
-                // 剩下这些（含刚好失败的那个）挪回队列等下一轮。
-                // 用户以为已经发出去的留言，不能因为这一轮出了点事就永远到不了
+                // 剩余（含刚失败的那条）挪回队列等下一轮；用户以为已发出的留言不能因此丢失
                 notes.requeue(sessionId, drained.subList(i, drained.size()));
                 throw e;
             }
         }
-        // 全部落成才确认。在那之前它们一直躺在 pending 里，
-        // 所以"落了一半就崩"不会让剩下的那些消失
+        // 全部落成才确认；在那之前它们留在 pending 里，落一半崩溃也不会让剩余消失
         notes.ack(sessionId, drained);
     }
 
     /**
-     * 把一次写入的结果应用回来：**游标**跟着走。
-     *
-     * <p>广播不在这里 —— 写入自己在事务提交之后宣布（见 {@code SessionWriter.Written}）。
-     * 从前这一步还得负责推，靠的是"调用点在事务外"这个顺序上的巧合；而漏掉它的那几处
-     * （回滚、换模型、两条同步）压根不经过这个方法，所以那条巧合从来没护住它们。
+     * 把写入结果应用回来，只更新游标。广播不在这里：写入自己在事务提交后宣布
+     * （见 {@code SessionWriter.Written}）。
      */
     private void apply(AtomicReference<Session> current, SessionWriter.Written written) {
         current.set(written.session());
     }
 
     /**
-     * 落一条事件，**并把存储层分配的 seq 还回去**。
+     * 落一条事件并返回存储层分配的 seq。
      *
-     * <p>循环拿它当投影的坐标（见 {@code AgentTurn.Workbench.append}）：喂假的进去，
-     * 下一轮按真实 seq 补读时就会判错 —— 同一个事件被折两遍、或者整批被跳过，
-     * 而两种都不报错，只是模型看到的上下文悄悄地重复或漏掉一截。
+     * <p>循环拿它当投影坐标（见 {@code AgentTurn.Workbench.append}）：返回假 seq 会让下一轮
+     * 按真实 seq 补读时判错，同一事件折两遍或整批跳过，两种都不报错，只是模型上下文悄悄
+     * 重复或缺一段。
      */
     private long applyOne(AtomicReference<Session> current, SessionWriter writer,
                           PersistentEvent event, LeaseToken token) {
@@ -434,12 +374,9 @@ public class TurnExecutor {
     }
 
     /**
-     * 这一轮新建了哪些文件 —— **从刚写下的那条记录里读**，不回头再问一遍 git。
-     *
-     * <p>同一个提交的改动一轮里只该算一次（见 {@code WorkspaceChanges}）：算两遍不只慢，
-     * 还让"界面上显示的改动"和"提醒对方的那句话"有机会不一致 —— 而它们是同一件事。
-     *
-     * <p>路径是**项目相对**的（记录里就是那个形状），正好也是给人看的那个形状。
+     * 本轮新建了哪些文件，从刚写下的记录里读，不再问 git。同一提交的改动一轮只该算一次
+     * （见 {@code WorkspaceChanges}）：算两遍不仅慢，还可能让界面显示的改动和提醒内容不一致。
+     * 路径是项目相对的，也是给人看的形状。
      */
     private static List<String> createdIn(SessionWriter.Written written) {
         return written.events().stream()
@@ -453,28 +390,15 @@ public class TurnExecutor {
     }
 
     /**
-     * 这一轮**新建**了文件的话，告诉项目里其他人的 agent。
+     * 本轮新建了文件时，通知项目里其他人的 agent。
      *
-     * <h2>为什么需要它</h2>
-     * A 让 agent 写鉴权、B 也让 agent 写鉴权 —— 两边各写一份，合并的时候才撞上。
-     * 而两边的树是**分开的**：B 那边 {@code AuthService.java} 根本不存在，
-     * 所以没有任何现成的机制能让他知道。这一条补的就是那个信息差。
+     * <p>需要它是因为两边的树分开：A 和 B 各自让 agent 写同一块功能时，B 那边根本看不到 A 的
+     * 新文件，只会在合并时撞上。三条边界：只报新建（改已有文件可能只是改个 typo，全报会变成
+     * 噪声）；只提醒不拦（是否重复做由人判断，平台不替人分配工作）；自动发送、不经确认
+     * （等 A 想起来说一句时，B 的 agent 早已做完一轮设计）。
      *
-     * <h2>三条边界</h2>
-     * <ul>
-     *   <li><b>只报新建</b>（见 {@link FileChange#created()}）：新建一个文件几乎总意味着
-     *       "我要做一块新东西"，而改一个已有文件可能只是修个 typo。全报的话，
-     *       对方连收十轮就把它当背景噪声了</li>
-     *   <li><b>只提醒，不拦</b>：该不该重复做是**人**的判断。平台替两个人决定
-     *       "这块归谁"是越界的，而这个产品的平等协作正是建立在"谁都不替谁做主"上</li>
-     *   <li><b>不经用户确认，自动发</b>：这正是它有用的地方 —— 等 A 想起来说一句
-     *       "我在做鉴权"，B 的 agent 早就写完一圈设计了</li>
-     * </ul>
-     *
-     * <h2>发给哪条会话</h2>
-     * 发给对方**轮次最多的那条**。服务器不知道他"当前"开着哪一条（会话表里没有
-     * 时间列），而轮次最多是他的主力会话 —— 这是个近似，但比"最新建的"准：
-     * 刚建出来还没用过的那条，不可能是他正在做事的会话。
+     * <p>发给对方轮次最多的那条会话：服务端不知道他当前打开哪条（会话表没有时间列），
+     * 而轮次最多的是主力会话；刚建好还没用过的会话不可能是他正在做事的那条。
      */
     private void announceNewFiles(Session session, List<String> created) {
         if (created.isEmpty()) {
@@ -485,10 +409,8 @@ public class TurnExecutor {
         if (project == null) {
             return;
         }
-        // 正文里**不带名字**：名字由读的那一侧按 id 现查 —— 界面那条前缀、投影里那句
-        // "[来自 X 的 agent 的留言]"。写进正文等于同一句话里说两遍（界面上就是
-        // "小明 的 agent 捎来一句：小明 刚新建了…"），而且改过名之后永远对不上
-        //（见 AgentNoteDelivered）
+        // 正文不带名字：名字由读取方按 id 现查（界面前缀、投影里的"[来自 X 的 agent 的留言]"），
+        // 写进正文会重复，且改名后永远对不上（见 AgentNoteDelivered）
         String text = "刚新建了 " + String.join("、", created)
                 + "（还没合进主干）。如果你正在做的事和这是一块，先跟他说一声，别各写一份。";
 
@@ -501,7 +423,7 @@ public class TurnExecutor {
         }
     }
 
-    /** 这个人在这个项目里轮次最多的那条会话。见 {@link #announceNewFiles} 里那段说明。 */
+    /** 这个人在这个项目里轮次最多的会话（见 {@link #announceNewFiles}）。 */
     private Optional<SessionId> busiestSessionOf(UserId owner, ProjectId project) {
         return sessions.findByProject(project, SESSION_SCAN, 0).stream()
                 .filter(candidate -> candidate.ownerId().equals(owner))
@@ -510,24 +432,20 @@ public class TurnExecutor {
     }
 
     /**
-     * 找"他那条主力会话"时一次拉多少条。
-     *
-     * <p>直接拉全量：会话表的注释里写着这个数量级很小（一个人的会话是几条到几十条），
-     * 而分页只会让这段代码多一个没人会去调的循环。
+     * 查找主力会话时一次拉多少条。取前 200 条，不翻页：会话数量很小（每人几条到
+     * 几十条），分页只会多一个没人会调的循环；超过这个数时只在按 id 排序的前 200 条里挑。
      */
     private static final int SESSION_SCAN = 200;
 
     /**
-     * 把排队中的用户消息落库。**调用方必须持有这一轮的租约。**
+     * 把排队中的用户消息落库；调用方必须持有本轮租约。
      *
-     * <p>落成**普通的 {@code UserMessage}**，不用另造一种事件：它的语义本来就一样 ——
-     * "用户说了这句话"。区别只在于它什么时候被交给模型，而那是靠"它落在哪一轮"
-     * 决定的（排在后面，所以下一轮才看得见）。
+     * <p>落成普通的 {@code UserMessage}，不另造事件：语义同样是"用户说了这句话"，
+     * 区别只是交付时机，而那由它落在哪一轮决定（排在后面，下一轮才可见）。
+     * {@code TurnStates.after(UserMessage)} 为空，因此不会改变会话状态 ——
+     * 会话挂在审批上时也不会被推走。
      *
-     * <p>{@code TurnStates.after(UserMessage)} 是空的，所以它**不会动会话状态** ——
-     * 这一条要紧：会话正挂在审批上时落这条，不会把它从 AWAITING_APPROVAL 推走。
-     *
-     * @return 交付了几条
+     * @return 是否交付了消息
      */
     private boolean deliverQueued(AtomicReference<Session> current, LeaseToken token) {
         List<String> queued = pending.drain(current.get().id());
@@ -538,10 +456,10 @@ public class TurnExecutor {
     }
 
     /**
-     * 尽力把会话记成 {@code FAILED}，但**绝不因此把真正的原因盖掉**。
+     * 尽力把会话记成 {@code FAILED}，但绝不让记录失败盖掉真正的原因。
      *
-     * <p>失败时最该被看见的是"为什么失败"，而不是"我连记录失败都失败了"。
-     * 后者作为 suppressed 挂在原异常上，需要时看得到，平时不抢眼。
+     * <p>失败时最该被看见的是"为什么失败"，而不是"记录失败也失败了"；后者作为 suppressed
+     * 挂在原异常上，需要时可见。
      */
     private TurnResult fail(AtomicReference<Session> current, RuntimeException cause, LeaseToken token,
                             LeaseWatchdog watchdog, Workspace workspace) {
@@ -549,28 +467,19 @@ public class TurnExecutor {
             return new TurnResult.LeaseLost(token.sessionId());
         }
 
-        // 这一轮**已经落到磁盘上的改动先提交掉**，好让它有一个可回的位置 ——
-        // 不提交的话那些文件对 git 来说是未跟踪的，而 reset --hard 不碰未跟踪文件，
-        // 回滚会以为什么都没发生。失败和用户取消都要走这一步
+        // 先把本轮已写到磁盘的改动提交掉，给它一个可回的位置；不提交的话这些文件是未跟踪的，
+        // reset --hard 不会碰，回滚会以为什么都没发生。失败和取消都要走这一步
         TurnWorkspace.Commit commit = commitQuietly(current, workspace);
 
-        // **用户取消不是失败。**
-        //
-        // LlmCallException 自己就把 CANCELLED 单列了一类，注释写着"不是失败，上层不该
-        // 当错误报给用户"—— 但流式读取那条路是**抛异常**出来的，到了这儿就成了普通错误：
-        // 会话被打成 FAILED、界面上一行红字加一个 Java 异常类名。
-        //
-        // 所以这里按**正常收尾**走：回到等用户指示（同 finalStateFor 里那条"会话停在那儿
-        // 是常态"），事件里记的是谁停了它，不是异常原文。
+        // 用户取消不是失败。LlmCallException 已单列 CANCELLED，但流式读取以异常抛出，
+        // 到这里会变成普通错误：会话 FAILED、界面一行红字加异常类名。
+        // 因此按正常收尾走：回到 WAITING_USER，事件记录谁停了它，而不是异常原文
         if (cause instanceof LlmCallException llm && llm.isCancelled()) {
             if (current.get() != null) {
                 try {
-                    // reason 写 **{@code CANCELLED}**，和正常收尾那条路（{@code finishTurn}
-                    // 传的 {@code outcome.status().name()}）是同一个值 —— 界面上要认的就是它。
-                    // 这里另起一句中文的话，前端就得靠文案去比对，那种判据改动一次就断
-                    //
-                    // 走 abortTurn 而不是 advance：后者只移状态机，前者顺带打 checkpoint、
-                    // 推轮次号 —— 用户按了停止，这次交互对他来说是结束了（见 SessionWriter.completes）
+                    // reason 写 CANCELLED，与正常收尾的 outcome.status().name() 同值，
+                    // 前端按它识别；另起中文文案会让前端靠文案比对，改一次就断。
+                    // 用 abortTurn 而不是 advance：前者还打 checkpoint、推轮次号
                     apply(current, writer.abortTurn(current.get(), commit,
                             SessionState.WAITING_USER, TurnOutcome.Status.CANCELLED.name(), token));
                 } catch (RuntimeException transitionFailure) {
@@ -583,7 +492,7 @@ public class TurnExecutor {
         String reason = abbreviate(cause.toString());
         if (current.get() != null) {
             try {
-                // 同上：失败也是一次交互的结束，同样有自己的位置
+                // 失败同样意味着一次交互结束，也有自己的位置
                 apply(current, writer.abortTurn(current.get(), commit,
                         SessionState.FAILED, reason, token));
             } catch (RuntimeException transitionFailure) {
@@ -594,14 +503,11 @@ public class TurnExecutor {
     }
 
     /**
-     * 尽力把这一轮已经落到磁盘上的改动提交掉。**提交不了就放弃，返回 null。**
+     * 尽力提交本轮已写到磁盘的改动；提交不了就返回 null，不抛异常。
      *
-     * <p>不抛异常是刻意的，理由和 {@link #fail} 那条一样：正在处理的是"这一轮为什么失败"，
-     * 而"我连提交都失败了"绝不能盖掉它 —— 那会让人对着一句 git 报错查半天，
-     * 而真正的原因写在 suppressed 里没人看。
-     *
-     * <p>拿不到工作区（连建都没建起来）时同样返回 null。那种情况下这个位置确实没有
-     * 可回的点，{@code SessionWriter.abortTurn} 会跳过 checkpoint 只收尾。
+     * <p>理由同 {@link #fail}：正在处理"这一轮为什么失败"，"提交也失败了"不能盖掉它。
+     * 拿不到工作区时同样返回 null，此时确实没有可回的点，
+     * {@code SessionWriter.abortTurn} 会跳过 checkpoint 只收尾。
      */
     private TurnWorkspace.Commit commitQuietly(AtomicReference<Session> current, Workspace workspace) {
         if (workspace == null || current.get() == null) {
@@ -616,11 +522,8 @@ public class TurnExecutor {
     }
 
     /**
-     * 这一轮跑完之后，会话停在哪。
-     *
-     * <p>只有"挂着等人批"是例外 —— 它没有收尾完毕，所以停在 {@code AWAITING_APPROVAL}；
-     * 答复到了再由那条路径把它推到 {@code WAITING_USER} 并续跑。
-     * 其余情况一律是 {@code WAITING_USER}（会话停在那里是常态，不是异常）。
+     * 本轮结束后会话停在哪。只有挂着等人批例外，停在 {@code AWAITING_APPROVAL}，答复到达后
+     * 再推到 {@code WAITING_USER} 并续跑；其余一律 {@code WAITING_USER}，这是常态而非异常。
      */
     private static SessionState finalStateFor(TurnOutcome outcome) {
         return outcome.status() == TurnOutcome.Status.AWAITING_APPROVAL
@@ -629,21 +532,17 @@ public class TurnExecutor {
     }
 
     /**
-     * 把这一轮的用量翻译成事件。
+     * 把本轮用量翻译成事件。
      *
-     * <p>{@code model} 记的是**响应里回报的**那个，不是请求时写的那个 —— 两者可能不同
-     * （别名、路由），而账上该记的是真正跑了的那个。模型还没开口时
-     * {@code outcome.model()} 就等于请求里的名字，所以两种情况都说得通。
+     * <p>{@code model} 记录响应里回报的模型，而不是请求时写的：别名或路由可能让两者不同，
+     * 账上要记真正跑的那个。模型未开口时它等于请求名，两种情况都成立。
      */
     private static TurnTokensUsed tokensUsed(TurnOutcome outcome) {
         TokenUsage usage = outcome.usage();
-        // 上下文那两项来自**最后一次调用**，不是这一轮的累计 —— 见 TurnOutcome#lastCallUsage。
-        // 窗口按**服务商回报的模型**查（和 model 那一列同源），不是请求时写的那个：
-        // 别名会被映射，而两个名字的窗口可能不一样
-        //
-        // **一次都没调成的时候给 null，不给 0**：那两样是"没有读数"，
-        // 而 0 是个像真值的假值（"上下文是 0"不可能发生）。判断在 TokenUsage 自己身上
-        // （isKnown）—— 服务商没报用量时，那次调用的数同样是不可用的
+        // 上下文两项来自最后一次调用而非本轮累计（见 TurnOutcome#lastCallUsage）；
+        // 窗口按服务商回报的模型查，别名映射后的窗口可能与请求名不同。
+        // 一次都没调成时给 null 而不是 0：0 是像真值的假值（"上下文是 0"不可能发生）。
+        // 判断在 TokenUsage.isKnown —— 服务商没报用量时同样不可用
         TokenUsage last = outcome.lastCallUsage();
         Integer contextTokens = last.isKnown() ? last.inputTokens() : null;
         Integer contextWindow = last.isKnown()
@@ -663,17 +562,14 @@ public class TurnExecutor {
     // ------------------------------------------------------------------
 
     /**
-     * 续约看门狗：按租约给的节奏续期，续不上就**取消这一轮**。
+     * 续约看门狗：按租约给出的节奏续期，续不上就取消本轮。
      *
-     * <p>为什么续不上必须当场停，而不是"跑完再说"：后续写入确实会被 fencing token 拒绝，
-     * 但**工作区里的文件改动不会被拒绝** —— 继续跑下去，就是在一条已经不属于自己的会话上
-     * 改代码。事件被挡住了，文件却真的被改了，那是最难收拾的一种状态。
+     * <p>必须当场停，不能跑完再说：后续写入会被 fencing token 拒绝，但工作区里的文件改动
+     * 不受 fencing 保护，继续跑就是在一条已不属于自己的会话上改代码 —— 事件被挡住、文件却
+     * 真被改了，是最难收拾的状态。它整段时间都在睡眠，跑在虚拟线程上。
      *
-     * <p>跑在虚拟线程上：它整段时间都在睡，正是虚拟线程最擅长的负载。
-     */
-    /**
-     * 续约看门狗。**不是 private**：它守的那条规则（续约失败 = 立刻放弃本轮）只有把
-     * 一个"续约会失败/会抛异常"的租约塞给它才验得了，而这在这个包里做得到。
+     * <p>不是 private：验证"续约失败即放弃本轮"需要塞入一个续约会失败或抛异常的租约，
+     * 而在本包内做得到。
      */
     static final class LeaseWatchdog {
 
@@ -707,20 +603,16 @@ public class TurnExecutor {
                 try {
                     renewed = leases.renew(token);
                 } catch (RuntimeException e) {
-                    // **续约这一步自己炸了，与"续约被拒"是同一件事**：我们已经不知道
-                    // 自己还持不持着这把锁（Redis 中途挂了就是这条）。
-                    //
-                    // 放它过去的话，这个线程会安静地死掉，而 leaseLost 永远是假 ——
-                    // 本轮于是"以为锁还在"跑完。写入还有 fencing token 挡着，
-                    // **但工作区里那些改动没有任何东西挡**，那正是下面这段要防的事
+                    // 续约自身抛异常与"续约被拒"同义：已不知道是否还持锁（例如 Redis 中途挂掉）。
+                    // 放过去会让线程安静死掉、leaseLost 永远为假，本轮以为锁还在而跑完；
+                    // 写入有 fencing 挡着，但工作区改动没有任何东西挡
                     log.warn("会话 {} 的租约续不上，按失去执行权处理", token.sessionId(), e);
                     renewed = false;
                 }
                 if (renewed) {
                     continue;
                 }
-                // 已经失去执行权。取消的话，循环会在下一个边界上停下来
-                //（每一轮模型调用前、每一个工具调用前都检查）
+                // 已失去执行权；取消后循环会在下一个工具边界停下
                 leaseLost.set(true);
                 cancellation.cancel();
                 return;

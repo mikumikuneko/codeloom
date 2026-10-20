@@ -1,24 +1,23 @@
-# 复制成 application-local.yml（放在同一个目录下），按你的环境改。
-# 那个文件已被 gitignore —— 这一个是给"刚 clone 下来的人"看的。
+# 复制成同目录下的 application-local.yml，按你的环境修改。目标文件已被 gitignore，
+# 这一份是给刚 clone 下来的人看的。
 #
-# 中间件怎么起、库怎么建：见 docs/deploy/middleware/README.md 与 docs/sql/schema.sql
+# 中间件如何启动、数据库如何创建：见 docs/deploy/middleware/README.md 与 docs/sql/schema.sql。
 codeloom:
-  # MySQL / Redis 的地址。中间件和本机同一台就写 localhost；
-  # 应用在宿主机、中间件在另一台机器（作者用的是虚拟机的 NAT 网段）就写那台的地址。
+  # MySQL 与 Redis 地址。中间件和本机同一台就写 localhost；应用在宿主机、中间件在另一台
+  # 机器（作者使用虚拟机的 NAT 网段）就写那台机器的地址。
   db-host: localhost
   redis-host: localhost
 
-  # 加密"用户存在库里的 API Key"的那把钥匙。
-  # 它没有默认值、也不会自动生成：自动生成意味着每次重启换一把，
-  # 库里已经加密的东西就再也解不开。
+  # 加密用户库中 API Key 的主密钥。没有默认值，也不会自动生成：自动生成意味着每次重启
+  # 换一把，库里已经加密的内容再也解不开。
   #
-  # **留空不拦启动**：只是 BYOK 用不了（存/读密钥的接口会报错），
-  # 不碰密钥的测试照样能跑。但**配了却是错的**（不是合法 base64、长度不对）
-  # 会立刻启动失败 —— 那种错当场发现最省事。
-  # 自己生成一串，例如：openssl rand -base64 32
+  # 留空不拦启动，只是 BYOK 不可用（存、读密钥的接口会报错），不碰密钥的测试仍能运行。
+  # 配置了但格式错误（不是合法 base64、长度不对）会立刻启动失败。
+  # 生成示例：openssl rand -base64 32
+  # 见 docs/decisions/architecture/2026-09-28-secret-key-has-no-default.md。
   secret-key: "换成你自己生成的一串随机值"
 
-# 口令不用填：仓库里那份 compose 用的是 root，而 application.yml 的默认值也是 root。
-# 改过中间件的口令才需要覆盖这几个键：
+# 口令不用填：仓库里那份 compose 使用 root，application.yml 的默认值也是 root。
+# 只有改过中间件口令时才需要覆盖：
 #   spring.datasource.username / spring.datasource.password   （MySQL）
 #   spring.data.redis.password                                （Redis）

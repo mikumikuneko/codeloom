@@ -24,8 +24,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 事件总线的真 Redis 测试。
  *
- * <p>本实例发布的消息**绕 Redis 一圈再回到本实例的订阅者**（见 {@code RedisEventBus} 的类注释），
- * 所以这些测试顺带把那条路径也走通了 —— 它和"另一个实例发来的"走的是同一段代码。
+ * <p>本实例发布的消息绕 Redis 一圈再回到本实例的订阅者，走的是和“另一个实例发来的”
+ * 同一段代码。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isRedisReachable")
@@ -59,8 +59,8 @@ class RedisEventBusTest {
     @Test
     @DisplayName("流式增量也送得到，而且**没有 seq**")
     void ephemeralEventsHaveNoSeq() {
-        // 这一条直接决定 SSE 帧里有没有 `id:` —— 有了它，客户端断线重连时会从
-        // 一个不存在的 seq 接着拉
+        // 直接决定 SSE 帧里有没有 {@code id:}；有了它，客户端断线重连会从
+        // 一个不存在的 seq 接着拉。
         try (EventBus.Subscription ignored = bus.subscribe(sessionId, received::add)) {
             bus.publishEphemeral(sessionId, new AssistantDelta("半个句"));
 

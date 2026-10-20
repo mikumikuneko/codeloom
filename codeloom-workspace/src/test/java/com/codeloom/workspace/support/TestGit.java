@@ -7,15 +7,11 @@ import java.util.List;
 import java.nio.file.Path;
 
 /**
- * 在测试里直接跑 git：**摆状态**用它，**断言状态**也用它。
+ * 在测试里直接跑 git：摆状态和断言状态都走它。
  *
- * <h2>为什么断言不借生产那个包装</h2>
- * 用被测代码去断言被测代码，等于自己给自己作证：包装写错的时候，
- * 那条断言会跟着一起错，然后一起绿。所以断言一律走这里，直接问 git 本身。
- *
- * <h2>两种失败方式</h2>
- * {@link #run} 非零就抛（摆状态时这个就是错）；{@link #output} 不抛（问"这条分支
- * 不存在吧"时，非零正是答案）。
+ * <p>断言不使用生产代码的包装，因为包装写错时，用它做的断言会一起错、一起绿。
+ * {@link #run} 在退出码非零时抛异常；{@link #output} 不抛，用于"它不存在"这类
+ * 以非零为答案的断言。
  */
 public final class TestGit {
 
@@ -23,9 +19,11 @@ public final class TestGit {
     }
 
     /**
-     * @return git 的输出（标准输出与标准错误合并）
-     * @throws IllegalStateException 退出码非零 —— 消息里带上 git 自己的输出，
-     *                               否则失败现场只有一句"退出码 1"
+     * @param workingDir 工作目录
+     * @param args git 参数
+     * @return git 的输出，标准输出与标准错误合并
+     * @throws IllegalStateException 退出码非零；消息带上 git 输出，避免只剩一句"退出码 1"
+     * @throws IOException 无法启动 git 或等待时被中断
      */
     public static String run(Path workingDir, String... args) throws IOException {
         Outcome outcome = execute(workingDir, args);
@@ -36,7 +34,14 @@ public final class TestGit {
         return outcome.output();
     }
 
-    /** 同样跑一条 git，但**退出码非零不算错** —— 断言"它不存在"时要用它。 */
+    /**
+     * 同样跑一条 git，但退出码非零不算错，用于断言"它不存在"。
+     *
+     * @param workingDir 工作目录
+     * @param args git 参数
+     * @return git 的输出
+     * @throws IOException 无法启动 git 或等待时被中断
+     */
     public static String output(Path workingDir, String... args) throws IOException {
         return execute(workingDir, args).output();
     }

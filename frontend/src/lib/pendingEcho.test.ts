@@ -3,13 +3,12 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { createPendingEcho, type PendingEcho } from './pendingEcho'
 
 /**
- * 钉的是**回收规则**那两条：第一次只记基线；条数变少（回滚）时基线要跟着落下来。
+ * 钉的是回收规则那两条：第一次只记基线；条数变少（回滚）时基线要跟着落下来。
  *
- * <p>第二条是**真踩过的 bug**：回滚之后再发一句，同一句话会在屏幕上出现两次
- * （一次真的、一次灰的）—— 因为基线停在回滚前那个大数上，差值算出来是 0，
- * 一条回声都收不走。
+ * 第二条对应的失效：基线停在回滚前的数上，差值算出来是 0，一条回声都收不走，
+ * 回滚后再发的一句会在屏幕上出现两次（一次真的、一次灰的）。
  *
- * <p>它不需要 React、也不需要 DOM：状态机是普通对象。
+ * 不需要 React 或 DOM：状态机是普通对象。
  */
 
 const SESSION = 's1'
@@ -62,7 +61,7 @@ describe('回声什么时候被收走', () => {
 
   it('**回滚之后基线要落下来** —— 不落的话那条灰字会永久挂在屏幕末尾', () => {
     echo.observeStream(SESSION, 3)
-    // 回滚：流被截短了
+    // 回滚：流被截短了。
     echo.observeStream(SESSION, 1)
     echo.noteSent(SESSION, '回滚之后说的')
 
@@ -97,7 +96,7 @@ describe('发送失败', () => {
     echo.noteSent(SESSION, 'A')
     echo.noteSent(SESSION, 'B')
 
-    // 先发的 A 失败了 —— B 还好好地排着，不该被误伤
+    // 先发的 A 失败了，B 还排着，不该被误伤。
     echo.dropSent(SESSION, 'A')
 
     expect(echo.pending(SESSION)).toEqual(['B'])

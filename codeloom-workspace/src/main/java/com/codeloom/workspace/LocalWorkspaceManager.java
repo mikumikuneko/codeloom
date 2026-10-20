@@ -21,26 +21,20 @@ import java.util.Optional;
 /**
  * {@link WorkspaceManager} 的本地实现：真 git、真文件系统。
  *
- * <h2>目录布局</h2>
- * <pre>
- *   &lt;workspacesRoot&gt;/&lt;ownerId&gt;/&lt;projectId&gt;/      一棵树一个 git worktree
- * </pre>
- *
- * <p>按人分一层目录、再按项目分一层：一个人在一个项目里就一棵树，这两维正好是
- * {@link WorkspaceId} 的两半，所以目录名不需要额外的编码，人一眼就能对上。
- *
- * <p><strong>不能把它们拼成一个目录名。</strong>文本形式（{@code value()}）用的是冒号分隔，
- * 而冒号在 Windows 上是**保留字符**（它分隔 NTFS 的备用数据流），拿它当文件名的一部分
- * 会得到一个建不出来的路径。分两层就没有这个问题，而且顺带让文件管理器里好读。
- *
- * <p>注意 worktree 是**主仓库的兄弟目录**，不是它的子目录。放进仓库里面的话，
- * 项目自己的 git 会把它们当成未跟踪文件，而且里面嵌套的 git 仓库会让状态判断变得混乱。
+ * <p>工作区目录是 {@code workspacesRoot/ownerId/projectId}。不能拼成一个目录名：
+ * {@link WorkspaceId#value()} 用冒号分隔，而冒号在 Windows 上是保留字符。
+ * worktree 是主仓库的兄弟目录，不是子目录 —— 放在仓库里会被项目自己的 git 当成
+ * 未跟踪内容，嵌套的 git 仓库也会干扰状态判断。
  */
 public final class LocalWorkspaceManager implements WorkspaceManager {
 
     private final GitClient git;
     private final Path workspacesRoot;
 
+    /**
+     * @param git 执行 git 的子进程客户端
+     * @param workspacesRoot 所有工作区目录的根，会规范化为绝对路径
+     */
     public LocalWorkspaceManager(GitClient git, Path workspacesRoot) {
         this.git = Objects.requireNonNull(git, "git");
         this.workspacesRoot = Objects.requireNonNull(workspacesRoot, "workspacesRoot")
@@ -55,27 +49,19 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
         git.initRepo(repoPath, creator);
     }
 
-    /** 预置目录里那个占位文件的名字。为什么是它、为什么是空的 —— 见下面 {@link #seed}。 */
+    /** 预置目录里占位文件的名字，理由见 {@link #seed}。 */
     private static final String FIRST_FILE = "README.md";
 
     /**
-     * 新项目自带的那个目录，靠里面一个文件在 git 里活下来。
+     * 在新项目里预置顶层目录，并放一个空的 {@code README.md}。
      *
-     * <h2>为什么目录里必须有一个文件</h2>
-     * <strong>git 存不了空目录</strong>：它记的是文件，目录只是路径的一段。一个没有文件的
-     * 目录在 {@code git status} 里根本不存在，于是进不了基点提交 —— 而两棵树都是从基点
-     * checkout 出来的，结果是<strong>两个人在自己的树里都看不到它</strong>，只有主仓库那个
-     * 目录里躺着。那比"没有这个目录"更难查：它在磁盘上确实存在。
+     * <p>git 不记录空目录，目录里必须有文件才能进入基点提交；两棵树都从基点 checkout，
+     * 否则两个人在自己的树里都看不到它。文件用 {@code README.md} 而不是
+     * {@code .gitkeep}，内容为空，因为替用户决定目录里写什么超出了平台职责。
      *
-     * <h2>为什么这个文件叫 {@code README.md}，而且是空的</h2>
-     * 名字用 {@code README.md} 而不是 {@code .gitkeep}：它是别人打开一个目录时
-     * **第一个会点开的东西**，而 {@code .gitkeep} 只是 git 圈里的惯用法。
-     *
-     * <p>内容是**空的**：这个目录是我们替他放的，但"他的项目里该写什么"不是我们能回答的
-     * —— 写一句就等于替他开了个头。
-     *
-     * <p>会失败就抛：这一步失败意味着新项目少了它该有的落脚处，
-     * 而"静默地少一个目录"要等到用户打开左栏才发现。
+     * @param repoPath 项目仓库目录
+     * @param firstDirectory 顶层目录名；null 或空白表示不预置
+     * @throws UncheckedIOException 目录或占位文件创建失败
      */
     private static void seed(Path repoPath, String firstDirectory) {
         if (firstDirectory == null || firstDirectory.isBlank()) {
@@ -93,17 +79,15 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     @Override
     public void removeWorkspace(WorkspaceId workspaceId, Path repoPath) {
         Path worktree = worktreePath(workspaceId);
-        // 仓库不在了（例如项目已经删到最后一步）就没有名册可清，只剩地上那个目录
+        // 仓库不在了（项目可能已经删到最后一步）就没有名册可清，只剩磁盘上的目录
         if (Files.isDirectory(repoPath.resolve(".git"))) {
             if (Files.isDirectory(worktree)) {
                 git.worktreeRemove(repoPath, worktree);
             } else {
-                // 目录没了、名册里可能还留着一条：对它用 remove 会以一个"路径不存在"结束，
-                // 而这里要的只是把那条记录清掉
+                // 目录没了、名册里可能还有记录；对它用 remove 会以"路径不存在"结束
                 git.pruneWorktrees(repoPath);
             }
-            // 分支必须一起删。留着的话，这个人将来重新进同一个项目时
-            // worktree add -b 会因为"分支已存在"而失败 —— 而那看起来像"进不去项目"
+            // 分支必须一起删：留着它，重新进入同一项目时 worktree add -b 会因分支已存在而失败
             git.branchDelete(repoPath, branchName(workspaceId));
         }
         Directories.deleteRecursively(worktree);
@@ -128,11 +112,11 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     public Workspace create(WorkspaceId workspaceId, Path repoPath, String baseCommit) {
         Path worktree = worktreePath(workspaceId);
         if (Files.isDirectory(worktree)) {
-            // 幂等：目录已经在就说明建过了，直接读出现状返回，不重复 worktree add
+            // 幂等：目录已存在就读出当前状态，不重复 worktree add
             return describe(workspaceId, worktree);
         }
         excludeToolOutput(repoPath);
-        // baseCommit 为空 = 项目还是空目录起步的状态，那就从基点（主干）分出
+        // baseCommit 为空表示项目从空目录起步，从主干（基点）分出
         String base = (baseCommit == null || baseCommit.isBlank()) ? MAIN_BRANCH : baseCommit;
         git.worktreeAdd(repoPath, worktree, branchName(workspaceId), base);
         return describe(workspaceId, worktree);
@@ -141,35 +125,37 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     /**
      * 让 git 忽略 agent 的落盘目录（见 {@link Workspace#TOOL_OUTPUT_DIR}）。
      *
-     * <h2>写的是 {@code .git/info/exclude}</h2>
-     * 它是 git 官方的**本地**忽略机制：不进版本库，而且主仓库的那一份**对所有 worktree
-     * 生效**，写一次就够。为什么不写 {@code .gitignore}、代价是什么，见
+     * <p>写进 {@code .git/info/exclude}：这是本地忽略机制，不进版本库，主仓库的那一份
+     * 对所有 worktree 生效。不要再补 {@code .gitignore}，它会跟着基点提交进入用户项目的
+     * 历史。失败不抛：没写成的后果只是工作区多出噪声文件，不能因此让创建 worktree 失败。
+     * 理由见
      * {@code docs/decisions/bug-fix/2026-10-08-workspace-ignore-lives-in-info-exclude.md}。
      *
-     * <p>**这是唯一的忽略机制** —— 别在别处再补一个 {@code .gitignore}：它会跟着基点提交
-     * 进用户项目的历史，正是上面那条要避免的事。
+     * <p>模式带 {@code **} 前缀：落盘目录在项目根下，而项目根是 worktree 根下的
+     * {@code untitled}，不是 worktree 根本身。只写相对模式会忽略错层级，agent 的产物
+     * 仍会出现在 {@code git status} 里。
      *
-     * <p>失败**不抛异常**：这只是一条"别把落盘目录提交进去"的保险，它没做成的后果是
-     * 工作区里多出一些噪声文件；而建不出 worktree 会让整条会话根本用不了。
+     * @param repoPath 项目主仓库路径
      */
     private static void excludeToolOutput(Path repoPath) {
         Path exclude = repoPath.resolve(".git/info/exclude");
         if (!Files.isDirectory(exclude.getParent())) {
-            return;   // 不是 git 仓库，或者结构不是我们预期的样子 —— 那就别动它
+            return;   // 不是 git 仓库，或结构不是预期形态，不去动它
         }
+        String pattern = "**/" + Workspace.TOOL_OUTPUT_DIR;
         try {
             String current = Files.exists(exclude)
                     ? Files.readString(exclude, StandardCharsets.UTF_8)
                     : "";
-            if (current.lines().anyMatch(Workspace.TOOL_OUTPUT_DIR::equals)) {
-                return;   // 幂等：已经有这一行了
+            if (current.lines().anyMatch(pattern::equals)) {
+                return;   // 幂等：这一行已经存在
             }
             Files.writeString(exclude,
                     current + (current.isEmpty() || current.endsWith("\n") ? "" : "\n")
-                            + Workspace.TOOL_OUTPUT_DIR + "\n",
+                            + pattern + "\n",
                     StandardCharsets.UTF_8);
         } catch (IOException e) {
-            // 理由见方法注释：宁可工作区里多几个噪声文件，也不能因此建不出 worktree
+            // 见方法注释：宁可多几个噪声文件，也不能因此建不出 worktree
         }
     }
 
@@ -185,9 +171,8 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
 
     @Override
     public String commit(Workspace workspace, String message, CommitIdentity identity) {
-        // 不先跑一次 git status 探有没有改动：commitAll 内部已经能识别
-        // "nothing to commit" 并返回当前 HEAD（见 GitClient.commitStaged），
-        // 行为完全一致。而 status 在大仓库上要哈希整个工作树，一个 turn 里白跑一次不划算。
+        // 不先跑 git status：commitAll 内部识别 "nothing to commit" 并返回当前 HEAD，
+        // 而在大仓库上 status 要哈希整个工作树
         return git.commitAll(requireExisting(workspace), message, identity);
     }
 
@@ -195,7 +180,7 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     public void resetTo(Workspace workspace, String commitSha) {
         Path worktree = requireExisting(workspace);
         git.resetHard(worktree, commitSha);
-        // 紧跟着清掉未跟踪的文件 —— 少了这一步回滚就不生效，理由见 GitClient.cleanUntracked
+        // 必须同时清掉未跟踪文件，否则回滚对 agent 刚写的文件不生效，见 GitClient.cleanUntracked
         git.cleanUntracked(worktree);
     }
 
@@ -206,7 +191,7 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
 
     @Override
     public int commitsBehind(Path worktree, String ref) {
-        // {@code HEAD..ref} 就是"ref 上有、而我没有"的那些提交
+        // HEAD..ref 就是 "ref 上有、而我没有" 的提交
         return git.countCommits(requireDirectory(worktree, "工作区"), "HEAD.." + ref);
     }
 
@@ -231,8 +216,7 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
 
     @Override
     public String conflictSide(Path worktree, String path, boolean ours) {
-        // 索引里的 stage 2 是"我方"、3 是"对方"。这个映射只在这里出现一次 ——
-        // 把"2 和 3 哪个是哪边"泄漏到上层，是那种看代码时看不出错、但要错就全错的细节
+        // 索引 stage 2 是我方、3 是对方；这个映射只在这里出现一次
         return git.conflictSide(requireDirectory(worktree), ours ? 2 : 3, path);
     }
 
@@ -245,10 +229,8 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     public void resolveConflictByContent(Path worktree, String path, String content) {
         Path root = requireDirectory(worktree);
 
-        // 语义上的那道边界在应用层（这个路径必须先是 git 报出来的冲突文件之一），
-        // 这里挡的是另一个问题：**这个路径本身会不会跑出仓库**。
-        // 两个问题不一样，而三行的成本换的是"写入目标一定在仓库里"这个能直接读出来的保证 ——
-        // 写入是这里唯一一处会让内容落到磁盘上的操作，不值得靠上游的检查来推断安全
+        // 应用层已保证 path 是 git 报出的冲突文件；这里防的是路径逃出仓库 ——
+        // 这是本类唯一一处把内容写到磁盘上的操作，不靠上游检查推断安全
         Path target = root.resolve(path).normalize();
         if (!target.startsWith(root)) {
             throw new IllegalArgumentException("路径越出了仓库：" + path);
@@ -276,10 +258,12 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     }
 
     /**
-     * 同一个判据，只是"这是什么目录"的说法跟着调用点走。
+     * 校验目录存在；错误信息里的称呼跟随调用点。
      *
-     * <p>它从前在五个地方各写一遍（目标工作区 / 工作区 / 工作目录），改一处判定
-     * 就会漏掉别处。**说法可以不同，判断只能有一处。**
+     * @param worktree 要检查的目录
+     * @param what 错误信息里对这个目录的称呼
+     * @return 原样返回 {@code worktree}
+     * @throws IllegalStateException 目录不存在
      */
     private static Path requireDirectory(Path worktree, String what) {
         if (!Files.isDirectory(worktree)) {
@@ -290,7 +274,12 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
 
     // ------------------------------------------------------------------
 
-    /** {@code <workspacesRoot>/<ownerId>/<projectId>} */
+    /**
+     * 这棵树的工作区目录：{@code workspacesRoot/ownerId/projectId}。
+     *
+     * @param workspaceId 树的主人 × 项目
+     * @return 工作区路径
+     */
     public Path worktreePath(WorkspaceId workspaceId) {
         return workspacesRoot
                 .resolve(workspaceId.ownerId().value())
@@ -298,16 +287,14 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
     }
 
     /**
-     * 分支名：{@code workspace/<ownerId>}。
+     * 这棵树的分支名：{@code workspace/} 加 ownerId。
      *
-     * <p><strong>刻意不带 projectId</strong>：分支活在**那个项目的仓库**里，所以"哪个项目"
-     * 这一维在名字里是冗余的 —— 而冗余的部分迟早会和主体漂移。
+     * <p>刻意不带 projectId：分支只存在于该项目的仓库里，那一维是冗余的。也不使用
+     * {@link WorkspaceId#value()}，因为冒号是 git ref 名的非法字符。公开是为了让测试
+     * 引用同一份命名规则。
      *
-     * <p>前缀不用树 id 的文本形式（{@code owner:project}）：git 的 ref 名里
-     * **冒号是非法字符**，这行会直接被 {@code check-ref-format} 拒掉。
-     *
-     * <p>公开是为了测试能指向**同一份**命名规则而不是各抄一遍 —— 抄出来的那几份在改名时
-     * 会各自安静地过期，而"测试里的分支名"过期之后测的就不是真的那棵树了。
+     * @param workspaceId 树的主人 × 项目
+     * @return 分支名
      */
     public static String branchName(WorkspaceId workspaceId) {
         return "workspace/" + workspaceId.ownerId().value();

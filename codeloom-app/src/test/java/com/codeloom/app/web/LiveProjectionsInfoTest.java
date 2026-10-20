@@ -11,11 +11,10 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@code /actuator/info} 里那块"常驻投影"。
+ * {@code /actuator/info} 里的常驻投影信息。
  *
- * <p>它自己没什么逻辑，值得钉的是**形状与那几个数**：键名、以及默认的两个上限有没有
- * 真的绑上去 —— 那几个数正是调 {@code codeloom.live-projections} 时唯一的凭据，
- * 报错了或者报了个空，调的时候就没有依据。
+ * <p>逻辑很少，需要钉住的是键名以及默认上限是否真的绑定：这些数字是调整
+ * {@code codeloom.live-projections} 时唯一的依据，报错或为空就没有依据。
  */
 class LiveProjectionsInfoTest extends AbstractPersistenceTest {
 

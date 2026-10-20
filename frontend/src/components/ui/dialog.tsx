@@ -39,10 +39,8 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        // **遮罩不模糊**：这个产品的正文是**背后那条会话流** —— 弹一个对话框出来时，
-        // 你多半还在看它跑到哪儿了。糊上就等于把正在读的东西拿走。
-        // 但"不模糊"不等于"不压暗"：black/10 在一片深底上约等于没有，
-        // 弹窗和背景糊成一团 —— 压到 60%，视线才知道该去哪
+        // 遮罩不模糊：正文是背后那条会话流，弹窗出现时人多半还在看它跑到哪儿了。
+        // 但要压暗：black/10 在深底上约等于没有，弹窗会和背景糊成一团。
         "fixed inset-0 isolate z-50 bg-black/60 duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
@@ -91,8 +89,8 @@ function DialogContent({
 
 function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    // gap-4：这个框内部的别的缝都是 16 或 20（内容之间 gap-4、卡片内边距 p-5），
-    // 只有标题与描述之间原来是 8 —— 那个值是**漏出来的**，不是有意留窄
+    // gap-4：框内其他缝都是 16 或 20（内容之间 gap-4、卡片内边距 p-5），
+    // 只有标题与描述之间原来是 8，那是漏出来的值，不是有意留窄。
     <div
       data-slot="dialog-header"
       className={cn("flex flex-col gap-4", className)}
@@ -110,14 +108,12 @@ function DialogFooter({
   showCloseButton?: boolean
 }) {
   return (
-    // **页脚不画分隔线、也不铺底。** 它原来带 border-t + bg-muted/40，而在这套令牌下
-    // 那层底是画不出来的（--muted #1d1d22 落在 --popover #1a1a1f 上，差 3/255）——
-    // 于是屏幕上只剩一条横贯的线，卡片看着像被拦腰截断、按钮掉到了外面。
-    // 这里要的是"按钮在卡片里"，不是"卡片下面接了个条"
+    // 页脚不画分隔线也不铺底：原样式在这套令牌下画不出底色（--muted #1d1d22 与
+    // --popover #1a1a1f 只差 3/255），屏幕上只剩一条横贯的线，卡片像被拦腰截断、
+    // 按钮掉到外面。要的是"按钮在卡片里"，不是"卡片下面接了个条"。
     //
-    // **也不加 mt。** 加了它，页脚上面那条缝就比别处宽（grid 的 gap-4 再加这一截），
-    // 于是"标题—描述—按钮"三段里，描述是**贴着标题**的、不在中间。
-    // 不加，上下两条缝一样宽，它自然落在正中
+    // 也不加 mt：那会让页脚上方的缝比别处宽（grid 的 gap-4 再加这一截），
+    // 描述就贴着标题而不在中间；不加时上下两条缝一样宽。
     <div
       data-slot="dialog-footer"
       className={cn(
@@ -144,8 +140,8 @@ function DialogTitle({
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        // leading-snug 而不是 leading-none：行高等于字号时，标题的下沿**紧贴着字底**，
-        // 于是它和下面那行之间的缝看起来比实际值小一截。给标题一点行高，两段才分得开
+        // leading-snug 而不是 leading-none：行高等于字号时标题下沿紧贴字底，
+        // 它与下一行的缝看起来比实际值小；给一点行高，两段才分得开。
         "font-heading text-base leading-snug font-medium",
         className
       )}

@@ -10,33 +10,29 @@ import org.apache.ibatis.annotations.Select;
 import java.util.List;
 
 /**
- * {@code event} 表的读写。**append-only：本接口里没有 UPDATE，也没有逐条的 DELETE。**
+ * {@code event} 表的读写。append-only：本接口没有 UPDATE，也没有逐条 DELETE。
  *
- * <p>这不是"暂时没写"，是这张表的性质：回放、断线补齐、审计、崩溃恢复全都建立在
- * 「已经写下的行不会再变」上面。需要修正历史时，做法是再追加一条事件，
- * 而不是改旧的 —— 事件溯源里没有"改历史"这个操作。
+ * <p>这是表的性质，不是暂时没写：回放、断线补齐、审计、崩溃恢复都建立在“已经写下的行
+ * 不会再变”上。需要修正历史时只能追加一条事件。见
+ * {@code docs/decisions/architecture/2026-09-24-one-event-log-as-the-source-of-truth.md}。
  *
- * <h2>例外：整条会话一起删</h2>
- * 本接口只有两个 DELETE（{@link #deleteBySession} 与 {@link #deleteByProjectAndOwner}），
- * 删的都是**整条会话的流**，不是流里的某几条。这个区别是要紧的：改历史会让"回放到一半"
- * 讲不通，而整条流一起消失，剩下的话仍然自洽。
- *
- * <p>它们服务两件事：用户主动丢弃一条会话、一个人退出项目。前者见 {@code EventDiscard}
- * 的类注释 —— 那里写了为什么这件事正当，以及为什么不把它挂在 {@code EventStore} 上。
+ * <p>例外只有整条会话一起删（{@link #deleteBySession} 与
+ * {@link #deleteByProjectAndOwner}）：删除整条流后剩余部分仍然自洽，删流里的某几条则会让
+ * 回放讲不通。它们服务用户主动丢弃会话和退出项目两件事，理由见 {@code EventDiscard} 的类注释。
  */
 @Mapper
 public interface EventMapper {
 
     /**
-     * 批量插入并逐个回填自增主键。单条追加也用这个（传一个元素的列表）——
-     * 一条语句走两条路径，比"单条一个方法 + 批量一个方法"少一份会走岔的代码。
+     * 批量插入并逐个回填自增主键。单条追加也走这里（传一个元素的列表），避免单条与批量
+     * 各有一套可能走岔的代码。
      *
-     * <p>参数是**裸的 {@code List} 而不是 {@code @Param("events") List}**：
-     * {@code keyProperty = "id"} 要作用在**列表的每个元素**上，MyBatis 只有在参数
-     * 就是那个集合时才会去遍历它；加了 {@code @Param} 之后参数变成 Map，
-     * 属性路径就得改成 {@code "events.id"} 这类写法，是同一件事的两种拼法，
-     * 没必要多记一个。所以下面 {@code <foreach>} 里的集合名是固定的 {@code list}。
+     * <p>参数必须是不带 {@code @Param} 的裸 {@code List}：{@code keyProperty = "id"} 要作用
+     * 在列表的每个元素上，MyBatis 只有在参数本身就是集合时才会遍历它。加上 {@code @Param}
+     * 后参数变成 Map，属性路径要改成 {@code events.id}；因此 {@code <foreach>} 的集合名
+     * 固定为 {@code list}。
      *
+     * @param events 要插入的事件
      * @return 影响行数，等于 {@code events.size()}
      */
     @Insert("""
@@ -50,7 +46,14 @@ public interface EventMapper {
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     int insertAll(List<EventInsert> events);
 
-    /** 拉 {@code afterSeq} 之后的事件，用于断线重连补齐。开区间。 */
+    /**
+     * 拉取 {@code afterSeq} 之后的事件，按 id 升序；用于断线重连补齐。开区间。
+     *
+     * @param sessionId 会话
+     * @param afterSeq  已收到的最后一个 seq
+     * @param limit     本批最多取多少条
+     * @return 事件行，按 id 升序
+     */
     @Select("SELECT " + EventRow.COLUMNS
             + " FROM `event` WHERE session_id = #{sessionId} AND id > #{afterSeq}"
             + " ORDER BY id LIMIT #{limit}")
@@ -58,16 +61,25 @@ public interface EventMapper {
                              @Param("afterSeq") long afterSeq,
                              @Param("limit") int limit);
 
-    /** 拉全量事件，用于回放。按 id 升序 —— 那是它们发生的顺序。 */
+    /**
+     * 拉全量事件，用于回放。按 id 升序，也就是它们发生的顺序。
+     *
+     * @param sessionId 会话
+     * @return 该会话的全部事件
+     */
     @Select("SELECT " + EventRow.COLUMNS
             + " FROM `event` WHERE session_id = #{sessionId} ORDER BY id")
     List<EventRow> readAll(@Param("sessionId") String sessionId);
 
     /**
-     * 这条会话**最后一条**指定类型的事件；一条都没有时返回 null。
+     * 这条会话最后一条指定类型的事件；一条都没有时返回 null。
      *
-     * <p>走 {@code (session_id, id)} 那条索引**倒着**扫：问它的都是"最近怎么样"，
-     * 而它要找的那类事件通常每轮都写，所以几行之内就命中。
+     * <p>沿 {@code (session_id, id)} 索引倒序扫描。调用的事件类型不保证每轮都写；有记录时
+     * 通常几行之内就命中。
+     *
+     * @param sessionId 会话
+     * @param type      事件类型名
+     * @return 最后一条该类型事件；没有时为 null
      */
     @Select("SELECT " + EventRow.COLUMNS
             + " FROM `event` WHERE session_id = #{sessionId} AND `type` = #{type}"
@@ -75,23 +87,43 @@ public interface EventMapper {
     EventRow findLastOfType(@Param("sessionId") String sessionId, @Param("type") String type);
 
     /**
-     * 删掉这条会话的全部事件 —— 见类注释，这是两条 DELETE 里按会话的那一条。
+     * 最后一次开启一轮的事件：用户发言、别的 agent 的留言或平台指令。
      *
-     * <p>它**除了让 seq 出现空洞，不做任何事**：删掉的那段 seq 不会再被分配给别人，
-     * 于是 event.id 上留下了一段空洞。这不影响任何读法 —— 断线补齐按
-     * {@code id > cursor} 拉、回放按会话拉，两者都不假设 seq 连续；
-     * 而真正要求"分配顺序 = 提交顺序"的那个论证（见 schema.sql）说的是并发写入，
-     * 与删除无关。
+     * <p>这三种之外的事件都是轮内产物。用量事件只有在轮真正收尾时才写，拿它和最后一条
+     * 开启事件比先后，就能判断最后一轮有没有读数；只看最后一条用量事件会把上一轮的
+     * 读数当成这一轮的。
+     *
+     * @param sessionId 会话
+     * @return 最后一条开启事件；没有时为 null
+     */
+    @Select("SELECT " + EventRow.COLUMNS
+            + " FROM `event` WHERE session_id = #{sessionId}"
+            + " AND `type` IN ('USER_MESSAGE', 'AGENT_NOTE_DELIVERED', 'PLATFORM_INSTRUCTION')"
+            + " ORDER BY id DESC LIMIT 1")
+    EventRow findLastTurnStart(@Param("sessionId") String sessionId);
+
+    /**
+     * 删掉这条会话的全部事件。
+     *
+     * <p>这会让 seq 出现空洞：删掉的 seq 不会再分配给别人。读路径不受影响，断线补齐按
+     * {@code id > cursor} 拉、回放按会话拉，都不假设 seq 连续；schema.sql 里“分配顺序等于
+     * 提交顺序”的论证针对并发写入，与删除无关。
+     *
+     * @param sessionId 会话
+     * @return 删除的行数
      */
     @Delete("DELETE FROM `event` WHERE session_id = #{sessionId}")
     int deleteBySession(@Param("sessionId") String sessionId);
 
     /**
-     * 删掉**这个人在这个项目里**所有会话的事件。
+     * 删掉这个人在这个项目里所有会话的事件。
      *
-     * <p><strong>必须跑在 {@code session} 行被删之前</strong>：这条语句靠 {@code session}
-     * 表定位"哪些事件属于这个人"，会话行没了它就一条都匹配不上 ——
-     * 而 DELETE 影响 0 行不会报错，于是那些事件会**静默地**永远留在库里。
+     * <p>必须在 {@code session} 行被删之前执行：这条语句靠 {@code session} 表定位事件。
+     * 会话行先没了它一条也匹配不上，而 DELETE 影响 0 行不会报错，那些事件会静默地留在库里。
+     *
+     * @param projectId 项目
+     * @param ownerId   会话拥有者
+     * @return 删除的行数
      */
     @Delete("""
             DELETE FROM `event`

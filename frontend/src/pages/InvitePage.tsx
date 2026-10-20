@@ -10,42 +10,25 @@ import { useAuth } from '@/stores/auth'
 /**
  * 别人发来的邀请链接。
  *
- * <h2>这一页刻意在登录关卡**外面**</h2>
- * 点开链接的人多半还没注册。把他直接扔到登录页，他只会看到"请登录"，
- * 而不知道自己被邀请去哪、该不该费劲注册 —— 那是这件事最差的顺序。
+ * 这一页刻意在登录关卡外面：点开链接的人多半还没注册，直接扔到登录页只会看到
+ * "请登录"，不知道自己被邀请去哪、该不该注册。正确顺序是先让他看见"某某邀请你
+ * 加入某某项目"，再决定要不要注册；所以预览不需要登录（后端同样），只有"加入"才要。
  *
- * <p>正确顺序是：**先让他看见"某某邀请你加入某某项目"，再让他决定要不要注册**。
- * 所以预览这一步不需要登录（后端也是这么做的，见 {@code InvitationService.preview}），
- * 只有"加入"那一下才要。
+ * 没有卡片：这一页只有几行字和一个动作，套盒子会把注意力引到容器上。与登录页
+ * 共用的是"居中一列、产品名在最上面"的骨架。
  *
- * <h2>没有卡片 —— 这一点和登录页不同</h2>
- * 登录页有一组表单，需要一个面把它托住；这一页只有几行字和**一个动作**，
- * 套一个盒子反而会把注意力引到容器上。两页共用的是"居中一列、产品名在最上面"
- * 那套骨架，不是一个盒子。
+ * 主角是那一句话，所以用标题的体量："X 邀请你加入 Y"是这一页的全部信息，其余
+ * （有效期、身份、出口、说明）都是注脚。
  *
- * <h2>主角是那一句话，所以它是标题的体量</h2>
- * 「root 邀请你加入 test」是这一页的全部信息：人名和项目名加重，连接词降成次要色。
- * 其余各行（有效期、身份、出口、说明）都是它的注脚，全部小字、降档。
+ * 「换个账号」是控件不是一句话：把项目加到错的账号头上是这一页唯一会出的事故，
+ * 且没有撤销入口，所以出口贴着身份行、是一个真按钮。
  *
- * <h2>「换个账号」是一个控件，不是一句话</h2>
- * 把项目加到错的账号头上是这一页唯一会出的事故，而且没有撤销入口。
- * 所以出口贴着身份行站、是一个真的按钮 —— 一句"不是你？换个账号"
- * 混在正文里会被扫过去。
+ * 三种人三种主角（`preview.viewer` 说的）：还没加入 → 邀请是主角，动作是「加入
+ * 项目」；已在这个项目里 → 主角是"你已经在 X 里了"，动作是「打开项目」；链接是
+ * 自己发的 → 主角是"这是你自己生成的链接"，他想知道这张链接还能不能用。
  *
- * <h2>三种人，三种主角</h2>
- * 拿着链接的人不一定是"还没加入的人"（{@code preview.viewer} 说的就是这个）：
- *
- * <ul>
- *   <li><b>还没加入</b> —— 上面那句邀请是主角，动作是「加入项目」。</li>
- *   <li><b>已经在这个项目里</b>（链接是别人发的）—— 主角得改成"你已经在 test 里了"，
- *       动作是「打开项目」。给他「加入项目」等于让他按一个什么也不会发生的按钮。</li>
- *   <li><b>就是他自己发的</b> —— 主角是"这是你自己发出去的链接"。
- *       他会想知道的那件事只有一个：**这张链接还能用吗**（能，发给对方就行）。</li>
- * </ul>
- *
- * <p>这件事从前是后端在"点下去"的那一刻才处理的，代价是：发起人点一下自己的链接，
- * 那张本来要发给对方的凭据就**被作废了**（见 {@code InvitationService.accept} 的注释）。
- * 现在提前到预览里说，那一次假动作根本不会发生。
+ * 提前到预览里说，发起人点自己的链接时就不会再把要发给对方的凭据作废。见
+ * `docs/decisions/architecture/2026-09-29-invite-links-not-username-invites.md`。
  */
 export function InvitePage() {
   const { token = '' } = useParams()
@@ -55,16 +38,16 @@ export function InvitePage() {
   const user = useAuth((s) => s.user)
   const logout = useAuth((s) => s.logout)
 
-  // 预览 = 一次标准的"拉一次"（加载 / 出错 / 取消），见 useAsync
+  // 预览 = 一次标准的"拉一次"（加载 / 出错 / 取消），见 useAsync。
   const { data: preview, error: loadError, loading } = useAsync(
     () => invitations.preview(token),
     [token],
   )
-  /** "加入"那一下的失败。和上面那条读取失败分开 —— 一个还没拿到内容，一个已经有内容了 */
+  /** "加入"那一下的失败。和读取失败分开：一个还没拿到内容，一个已经有内容了 */
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
-  // 这一页可能在登录关卡外面，所以 "我是谁" 要自己问一次
+  // 这一页可能在登录关卡外面，所以"我是谁"要自己问一次。
   useEffect(() => {
     if (status === 'unknown') void load()
   }, [status, load])
@@ -85,8 +68,8 @@ export function InvitePage() {
   /**
    * 换个账号：先登出，再带着"要回到这一页"去登录页。
    *
-   * <p>它和匿名那条路用的是同一套约定（把来源记在 state 里，见 {@code RequireAuth}），
-   * 所以登完会回到这一页，链接不会白点。
+   * 与匿名那条路用同一套约定（把来源记在 state 里，见 `RequireAuth`），登完回到
+   * 这一页，链接不会白点。
    */
   async function switchAccount() {
     await logout()
@@ -94,7 +77,7 @@ export function InvitePage() {
   }
 
   const canAccept = preview?.usable === true
-  /** 拿着链接的人是谁 —— 服务端说了算（它看得见 cookie），见类注释 */
+  /** 拿着链接的人是谁，服务端说了算（它看得见 cookie），见类注释 */
   const viewer = preview?.viewer ?? 'GUEST'
   /** 已经在项目里的人（包括发链接的人自己）：这一页对他没有"加入"可做 */
   const inside = viewer !== 'GUEST'
@@ -104,14 +87,13 @@ export function InvitePage() {
       <div className="w-full max-w-sm space-y-10">
         {loading ? (
           // 读取中也要有产品名：来的人可能从没见过 codeloom，
-          // 一屏只有"正在读取…"的话他连自己点进了什么都没有头
+          // 一屏只有"正在读取…"连自己点进了什么都不知道。
           <div className="space-y-6">
             <h1 className="text-sm font-semibold tracking-tight">codeloom</h1>
             <p className="text-sm text-muted-foreground">正在读取邀请…</p>
           </div>
         ) : preview === null ? (
-          // 链接本身读不到：产品名还是要露 —— 不然这一屏只剩一句报错，
-          // 来的人连"自己点进了什么"都不知道
+          // 链接本身读不到：产品名还是要露，不然这一屏只剩一句报错。
           <div className="space-y-6">
             <h1 className="text-sm font-semibold tracking-tight">codeloom</h1>
             <p role="alert" className="text-sm text-destructive">
@@ -127,9 +109,9 @@ export function InvitePage() {
               <div className="space-y-3">
                 <p className="text-xl font-medium leading-8 tracking-tight">
                   {viewer === 'INVITER' ? (
-                    // **「为……生成」，不是「发给……」**：后者把项目名摆成了收件人
-                    //（"发给 test 的链接"读起来像发给了某个人），而项目名在这一句里
-                    // 的角色是"为哪个项目"。用"生成"还能和按钮上那个「生成链接」对上
+                    // 「为……生成」而不是「发给……」：后者把项目名摆成收件人，
+                    // 而项目名的角色是"为哪个项目"。用"生成"还能和按钮上的
+                    // 「生成链接」对上。
                     <>
                       <span className="text-muted-foreground">这是你自己为 </span>
                       <span className="text-foreground">{preview.projectName}</span>
@@ -157,11 +139,10 @@ export function InvitePage() {
                     </p>
                   )
                 ) : viewer === 'MEMBER' ? null : (
-                  // "什么时候作废"是"我该不该现在处理它"的直接答案。
-                  // 写时刻而不是"24 小时内"：有效期是服务端定的，抄一个数到界面上会对不上。
+                  // "什么时候作废"是"我该不该现在处理它"的直接答案。写时刻而不是
+                  // "24 小时内"：有效期是服务端定的，抄一个数会对不上。
                   //
-                  // 已经在内、而链接不是他发的人看不到这一行 —— 这张凭据什么时候失效，
-                  // 不是他的事（他能做的只有打开项目）
+                  // 已经在内、且链接不是他发的人看不到这一行：这不是他的事。
                   <p className="text-xs text-loom-faint">
                     {formatMoment(preview.expiresAt)} 前有效
                   </p>
@@ -175,7 +156,7 @@ export function InvitePage() {
               </div>
             </div>
 
-            {/* 已经在项目里的人：这一页对他只剩下"进去"这一件事 */}
+            {/* 已经在项目里的人：这一页对他只剩"进去"这件事 */}
             {canAccept && inside && (
               <div className="space-y-3">
                 <Button
@@ -185,7 +166,7 @@ export function InvitePage() {
                   打开项目
                 </Button>
                 {viewer === 'INVITER' && (
-                  // 发起人心里那个问题只有一个：我这张链接废了吗
+                  // 发起人心里那个问题只有一个：我这张链接废了吗。
                   <p className="text-xs text-loom-faint">
                     你已经在里面了 —— 这张链接还能用，发给对方就行。
                   </p>
@@ -198,8 +179,8 @@ export function InvitePage() {
                 <p className="text-sm text-muted-foreground">
                   需要一个账号才能加入。注册或登录之后会回到这一页。
                 </p>
-                {/* 把"本来要去哪"记在 state 里 —— 和 RequireAuth 用的是同一套约定，
-                    所以登录完成之后会回到这个 /invite/<token> 上 */}
+                {/* 把"本来要去哪"记在 state 里，和 RequireAuth 同一套约定，
+                    登录完成会回到 /invite/TOKEN */}
                 <Button
                   className="w-full"
                   onClick={() => navigate('/login', { state: { from: `/invite/${token}` } })}
@@ -211,8 +192,7 @@ export function InvitePage() {
 
             {canAccept && !inside && status === 'authenticated' && (
               <div className="space-y-4">
-                {/* 身份行和它的出口在同一行：那件事（加错人）是唯一会出的事故，
-                    出口得是一个看得见的控件 */}
+                {/* 身份行和出口同一行：加错人是唯一会出的事故，出口得是看得见的控件 */}
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm text-muted-foreground">
                     会以 <span className="text-foreground">{user?.displayName}</span> 的身份加入。
@@ -231,7 +211,7 @@ export function InvitePage() {
                   <Button className="w-full" disabled={busy} onClick={() => void accept()}>
                     {busy ? '正在加入…' : '加入项目'}
                   </Button>
-                  {/* 按钮是这一页唯一要做的事，所以它下面要说清按下去之后会怎样 */}
+                  {/* 按钮是这一页唯一要做的事，下面要说清按下去之后会怎样 */}
                   <p className="text-xs text-loom-faint">加入之后直接打开这个项目。</p>
                 </div>
               </div>

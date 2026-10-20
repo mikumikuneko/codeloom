@@ -21,31 +21,20 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * {@link ExecutionLease} 的 Redis 实现：{@code SET NX PX} 抢锁 + Lua 续约/释放。
+ * {@link ExecutionLease} 的 Redis 实现：{@code SET NX PX} 抢锁，Lua 脚本续约与释放。
  *
- * <h2>为什么不用 Redisson 的 RLock</h2>
- * 它会把续期、竞态、误删这三件事一次性封装掉 —— 而这三件事在这里需要展开在代码里，
- * 每一处都能指着解释"为什么必须这样"。
+ * <p>Redis 在这里只负责两件事：同一棵工作区同一时刻只有一个执行者，以及用租约过期
+ * 探测死实例。后者让崩溃恢复不必另建心跳检测。
  *
- * <h2>Redis 在这个机制里只管两件事</h2>
- * <ol>
- *   <li><b>快速互斥</b>：一棵工作区同一时刻只有一个执行者。
- *   <li><b>死实例探测</b>：租约过期本身就是"那个实例已经不在了"。
- *       不需要另建一套心跳存活检测 —— 崩溃恢复（扫描非终态会话）直接复用它。
- * </ol>
+ * <p>它不分配 fencing token 的序号。序号由 {@link WorkspaceFence} 在 MySQL 里发，
+ * 必须持久且不会回退；Redis 的 AOF everysec 和异步主从都保证不了这一点。计数器一旦
+ * 回退到低于已受理的高水位，这棵树会永久写不进去。
  *
- * <p>**它不分配 fencing token 的序号。** fencing token 由 {@link WorkspaceFence} 在 MySQL 里发，因为那必须是
- * 持久且不可能回退的，而 Redis 的 AOF everysec 加异步主从都做不到这一点 ——
- * 计数器一旦回退到低于已受理的高水位，这棵树会永久写不进去。
+ * <p>锁的键是一棵树而不是一条会话：同一个人的多条会话共用一棵树，必须互斥在同一把锁上，
+ * 否则它们会同时写同一份目录。锁的值是实例 id 加随机后缀，而不是裸的实例 id，因为
+ * 同一实例内部也会出现老线程删掉新线程锁的情况，见 {@link LeaseToken#holderId()}。
  *
- * <h2>锁的键是一棵树，不是一条会话</h2>
- * 同一个人的两条会话共用一棵树，所以它们必须在**同一把锁**上互斥 ——
- * 键要是还按会话走，两条会话就会各自拿到一把锁，然后同时写同一份目录。
- * 那个推导收在 {@code Session.workspaceId()} 里，见 {@link ExecutionLease} 的类注释。
- *
- * <h2>锁的值是 {@code 实例 id + 随机后缀}</h2>
- * 不是裸的实例 id。理由见 {@link LeaseToken#holderId()}：同一个实例内部也会出现
- * "老线程删掉新线程的锁"，光靠实例 id 分不出来。
+ * <p>理由见 {@code docs/decisions/architecture/2026-09-24-lease-and-fencing-token.md}。
  */
 @Component
 public class RedisExecutionLease implements ExecutionLease {
@@ -53,19 +42,18 @@ public class RedisExecutionLease implements ExecutionLease {
     private static final Logger log = LoggerFactory.getLogger(RedisExecutionLease.class);
 
     /**
-     * 键的前缀。后面接的是 {@code WorkspaceId} 的文本形式（两个 UUID，冒号分隔），
-     * 所以不会和别人撞。
+     * 键前缀，后面接 {@code WorkspaceId} 的文本形式（两个 UUID，冒号分隔）。
      *
-     * <p>刻意不做成 hash 结构（{@code HSET locks workspaceId value}）：一棵树一把锁、
-     * 带自己的 TTL，用独立的键最直观，过期也彼此独立 —— 一棵树的锁过期不该影响另一棵。
+     * <p>每棵树一个独立键、各自带 TTL，一棵树的锁过期不影响另一棵；用 hash 结构做不到
+     * 这种彼此独立的过期，也没有必要。
      */
     private static final String KEY_PREFIX = "codeloom:workspace-lock:";
 
     /**
      * 续约与释放共用同一个判断：值对得上才动手。
      *
-     * <p>必须在 Lua 里做，因为它得是原子的。分成「GET 比对」和「PEXPIRE/DEL」两条命令的话，
-     * 中间那一瞬间锁可能已经过期并被别人拿到 —— 于是我们删掉的是别人的锁。
+     * <p>必须在 Lua 里做才能原子。拆成 GET 比对和 PEXPIRE/DEL 两条命令时，中间锁可能
+     * 已经过期并被别人拿到，于是我们会续期或删掉别人的锁。
      */
     private static final DefaultRedisScript<Long> RENEW_SCRIPT = new DefaultRedisScript<>("""
             if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -87,6 +75,13 @@ public class RedisExecutionLease implements ExecutionLease {
     private final String instanceId;
     private final Duration leaseTtl;
 
+    /**
+     * @param redis      Redis 客户端
+     * @param fence      MySQL 侧的 fencing 发号与校验
+     * @param instanceId 本实例标识；默认随机 UUID
+     * @param leaseTtl   租约 TTL；必须为正
+     * @throws IllegalArgumentException TTL 不是正数
+     */
     public RedisExecutionLease(StringRedisTemplate redis,
                                WorkspaceFence fence,
                                @Value("${codeloom.instance-id:${random.uuid}}") String instanceId,
@@ -100,7 +95,12 @@ public class RedisExecutionLease implements ExecutionLease {
         }
     }
 
-    /** 锁的键。公开的理由同 {@code RedisEventBus.CHANNEL}：排障时能在 redis-cli 里找到它。 */
+    /**
+     * 锁的键。公开是为了排障时能在 {@code redis-cli} 里找到它。
+     *
+     * @param workspaceId 这棵树
+     * @return Redis 键
+     */
     public static String keyFor(WorkspaceId workspaceId) {
         return KEY_PREFIX + workspaceId.value();
     }
@@ -108,19 +108,28 @@ public class RedisExecutionLease implements ExecutionLease {
     /**
      * {@inheritDoc}
      *
-     * <p>取 TTL 的三分之一：允许连续两次续约失败才判死，能扛过一次网络抖动。
-     * 反过来 TTL 也不能太短，否则一个跑构建的长工具调用会在中途失去锁。
+     * <p>取 TTL 的三分之一：给续约留出余量。执行器一次续约失败或抛异常就按失去执行权
+     * 处理，不会等到 TTL 结束；这个间隔只是让失败发生在锁过期之前。TTL 也不能太短，
+     * 否则一个跑构建的长工具调用会在中途失去锁。
      */
     @Override
     public Duration renewInterval() {
         return leaseTtl.dividedBy(3);
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>不阻塞、不排队：拿不到就返回空，由调用方决定怎么处理。Redis 连不上时抛
+     * {@link LeaseUnavailableException}，而不是返回空，因为“问不到锁”和“别人持有锁”
+     * 的处置不同。抢到锁之后才发 fencing token；发号失败会先还锁再抛出。
+     *
+     * @throws LeaseUnavailableException Redis 连不上、超时或命令被拒
+     */
     @Override
     public Optional<LeaseToken> tryAcquire(Session session) {
         Objects.requireNonNull(session, "session");
-        // 入参是会话、锁的键是它所在的那棵树 —— 这个换算只在这里做一次，
-        // 见 ExecutionLease 类注释「入参是会话，锁的是树」
+        // 入参是会话，锁的键是它所在的那棵树；这个换算只在这里做一次。
         WorkspaceId workspaceId = session.workspaceId();
         String key = keyFor(workspaceId);
         String holderId = instanceId + "/" + UUID.randomUUID();
@@ -129,37 +138,37 @@ public class RedisExecutionLease implements ExecutionLease {
         try {
             acquired = Boolean.TRUE.equals(redis.opsForValue().setIfAbsent(key, holderId, leaseTtl));
         } catch (DataAccessException e) {
-            // 连不上、超时、命令被拒 —— 对调用方是同一件事：**这把锁现在问不到**。
-            // 不能当成"没抢到"：那个含义是"有人管着这棵树"，
-            // 而这个连"谁管着"都不知道，两者的处置完全不同
+            // 连不上、超时、命令被拒：这把锁现在问不到，不能当成“别人持有”。
             throw new LeaseUnavailableException(
                     "执行租约服务（Redis）连不上 —— 这一轮没法开始。稍后重试", e);
         }
         if (!acquired) {
-            // 不阻塞、不排队：拿不到就是拿不到，让调用方自己决定（多半是拒绝这次请求）
             return Optional.empty();
         }
 
         try {
-            // 发号必须在【抢到锁之后】。反过来做的话，一个抢锁失败的竞争者会把号推过
-            // 当前持有者的 token，于是持有者下一次写入被 fence 校验拒掉 —— 当前有效的持有者
-            // 反而写不进去。
+            // 发号必须在抢到锁之后。反过来的话，抢锁失败的竞争者也会把号推过当前持有者，
+            // 导致持有者下一次写入被 fence 校验拒掉。
             long fencingToken = fence.issue(workspaceId);
             return Optional.of(new LeaseToken(session.id(), workspaceId, fencingToken, holderId));
         } catch (RuntimeException e) {
-            // 锁拿到了却没还回去，它会一直被占到 TTL 结束 —— 那段时间里谁都拿不到这棵树的锁。
-            // 发号失败（比如工作区还不存在）是调用方的问题，不该让整棵树因此被锁住。
+            // 锁拿到了却没还回去，会一直占到 TTL 结束，期间谁都拿不到这棵树的锁。
+            // 发号失败（例如工作区还不存在）是调用方的问题，不该因此锁住整棵树。
             quietly("还锁", key, holderId);
             throw e;
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>返回 false 表示已经失去执行权，调用方必须立刻中止本轮：后续写入会被 fencing
+     * token 拒绝，但工作区里已经发生的文件改动不会被拒绝。
+     */
     @Override
     public boolean renew(LeaseToken token) {
         Long renewed = redis.execute(RENEW_SCRIPT, List.of(keyFor(token.workspaceId())),
                 token.holderId(), String.valueOf(leaseTtl.toMillis()));
-        // 返回 false 意味着**已经失去执行权**，调用方必须立刻中止本轮，
-        // 而不是继续跑完 —— 后续写入会被 fencing token 拒绝，但工作区里的文件改动不会被拒绝
         return renewed == 1L;
     }
 
@@ -169,14 +178,12 @@ public class RedisExecutionLease implements ExecutionLease {
     }
 
     /**
-     * 还锁，但**绝不把异常抛出去**。
+     * 还锁，绝不把异常抛出去。
      *
-     * <p>调用方几乎总站在两种位置上，而两种都要求它别抛：{@link #tryAcquire} 的失败分支
-     * 已经有一个正在往外抛的异常了，再抛一个会把它顶掉；而 {@code finally} 那一边更严重 ——
-     * 那里抛出去的东西会**盖掉本轮真正的结果**（成功、失败、还是被取消）。
+     * <p>两种调用位置都要求它不抛：{@link #tryAcquire} 的失败分支已经有一个正在抛出的
+     * 异常，再抛一个会把它顶掉；{@code finally} 里抛出的东西会盖掉本轮真正的结果。
      *
-     * <p>还不上也不是什么大事：锁有 TTL，最坏是别人多等一个 TTL。所以**记日志、不抛** ——
-     * 不声不响地失败和抛出去一样坏，只是坏得安静些。
+     * <p>还不上也不严重：锁有 TTL，最坏是别人多等一个 TTL。失败记日志，不能静默。
      */
     private void quietly(String what, String key, String holderId) {
         try {

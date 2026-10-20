@@ -28,10 +28,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 用 JDK 自带的 {@code com.sun.net.httpserver} 起一个本地服务端来回放响应。
- *
- * <p>这样整条客户端链路（拼请求 → 发 HTTP → 读流 → 解析 → 归一化结果）**全部离线可测**，
- * 不需要网络也不需要 API Key。fixture 那份真实抓包直接当作服务商的响应体喂进去。
+ * 用 JDK 自带的 HTTP 服务端回放响应，使完整客户端链路（拼请求、发送、读流、解析、归一化）
+ * 离线可测，不需要网络或 API Key。真实抓包 fixture 直接作为响应体。
  */
 class OpenAiCompatibleClientTest {
 
@@ -82,8 +80,7 @@ class OpenAiCompatibleClientTest {
         client.stream(request("请把 OrderService 的 create 改成幂等的"), event -> {
         }, CancellationToken.none());
 
-        // 这条就是那次 400 "invalid unicode code point" 的回归测试：
-        // 字节必须能被 UTF-8 解码，且解出来的中文和原文一字不差
+        // 回归 400 invalid unicode code point：字节必须能按 UTF-8 解出原文。
         byte[] body = receivedBody.get();
         assertThat(new String(body, StandardCharsets.UTF_8))
                 .contains("请把 OrderService 的 create 改成幂等的");
@@ -130,7 +127,7 @@ class OpenAiCompatibleClientTest {
         JsonNode tool = received.get().path("tools").get(0);
         assertThat(tool.path("type").asText()).isEqualTo("function");
         assertThat(tool.path("function").path("name").asText()).isEqualTo("read_file");
-        // JSON Schema 必须被当成对象嵌进去，不能变成一段字符串
+        // JSON Schema 必须作为对象嵌入，不能是字符串。
         assertThat(tool.path("function").path("parameters").isObject()).isTrue();
     }
 
@@ -142,8 +139,7 @@ class OpenAiCompatibleClientTest {
             received.set(readJson(exchange));
             send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
         });
-        // 来源模型传 null = **不知道这条是谁产的**（老事件就是这样）。
-        // 不知道来源时照发 —— 见 reasoningToSend："该发而没发"曾导致 400
+        // 来源模型为 null 表示来源未知（老事件）；未知时照发，因为漏发会导致 400。
         LlmRequest request = new LlmRequest("deepseek-reasoner",
                 List.of(LlmMessage.user("读一下 A"),
                         LlmMessage.assistantWithToolCalls("", List.of(new ToolCall("call_1",
@@ -155,8 +151,7 @@ class OpenAiCompatibleClientTest {
 
         JsonNode assistant = received.get().path("messages").get(1);
         assertThat(assistant.path("role").asText()).isEqualTo("assistant");
-        // ★ 字段名就是 DeepSeek 要的那个。少了它，思维链模式会回
-        //   400「The `reasoning_content` in the thinking mode must be passed back to the API.」
+        // 字段名必须是 reasoning_content，否则思维链模式返回 400。
         assertThat(assistant.path("reasoning_content").asText()).isEqualTo("我在想先看哪个文件");
         assertThat(assistant.path("tool_calls").isArray()).isTrue();
     }
@@ -169,7 +164,7 @@ class OpenAiCompatibleClientTest {
             received.set(readJson(exchange));
             send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
         });
-        // 这条 assistant 消息是 flash 说的，而这次请求发给 pro
+        // 该 assistant 消息由 flash 产出，本次请求发往 pro。
         LlmRequest request = new LlmRequest("deepseek-pro",
                 List.of(LlmMessage.user("接着改"),
                         LlmMessage.assistant("前半段我在想接口该怎么切", "deepseek-flash",
@@ -180,7 +175,7 @@ class OpenAiCompatibleClientTest {
         }, CancellationToken.none());
 
         JsonNode assistant = received.get().path("messages").get(1);
-        // 正文照发 —— 只有那份**只对 flash 成立**的思考被拦下来了
+        // 正文照发，只拦截仅对 flash 成立的思考。
         assertThat(assistant.path("content").asText()).contains("前半段我在想接口该怎么切");
         assertThat(assistant.has("reasoning_content"))
                 .as("别家模型产的思考不该发给新模型")
@@ -221,8 +216,7 @@ class OpenAiCompatibleClientTest {
         clientFor(baseUrl).stream(request("hi"), event -> {
         }, CancellationToken.none());
 
-        // 不产思考的 provider 走的永远是这一条 —— 所以"要不要回传"这件事
-        // 不需要一张按 provider 维护的表，它是自适应的
+        // 无思考的 provider 走该分支，无需按 provider 维护回传表。
         JsonNode user = received.get().path("messages").get(0);
         assertThat(user.has("reasoning_content")).isFalse();
     }
@@ -246,8 +240,7 @@ class OpenAiCompatibleClientTest {
                     LlmCallException ex = (LlmCallException) e;
                     assertThat(ex.retryable()).isFalse();
                     assertThat(ex.isCancelled()).isFalse();
-                    // 服务商的原文和状态码都要带出来，否则用户不知道到底哪不对 ——
-                    // 两句都在消息里，所以这里断言消息
+                    // 消息必须同时包含状态码和服务商原文。
                     assertThat(ex).hasMessageContaining("401")
                             .hasMessageContaining("Authentication Fails");
                 });
@@ -316,13 +309,11 @@ class OpenAiCompatibleClientTest {
                 .isInstanceOf(LlmCallException.class)
                 .satisfies(e -> {
                     assertThat(((LlmCallException) e).retryable()).isTrue();
-                    // 服务商说了等 3 秒，那就**带上来** —— 重试策略据此决定等多久，
-                    // 而它不许去解析服务商原文（见 LlmCallException.retryAfterMs）
+                    // Retry-After 必须结构化传递，重试策略不解析原文。
                     assertThat(((LlmCallException) e).retryAfterMs()).contains(3_000L);
                 });
 
-        // **一次** —— 重试不归这一层。若重试住在客户端里，界面上什么都看不见，
-        // 而"值不值得再来一次"要看的上下文它一样都不知道
+        // 只发一次：客户端不重试，重试需要轮次上下文和事件通道。
         assertThat(attempts.get()).isEqualTo(1);
     }
 
@@ -403,7 +394,7 @@ class OpenAiCompatibleClientTest {
         }
     }
 
-    /** 一个最小的正常流，用于那些不关心内容的测试。 */
+    /** 最小正常流，用于不关心内容的测试。 */
     private static String minimalStream() {
         return """
                 data: {"model":"deepseek-flash","choices":[{"delta":{"content":"你"}}]}

@@ -25,14 +25,14 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 真连一个**够不到**的 Redis，验的是那一下翻译。
+ * 连一个够不到的 Redis，验证错误翻译。
  *
- * <p>要区分的是两件事：{@code tryAcquire} 返回空 = "这棵树有人管着"（409 那一类）；
- * 抛这个异常 = "这把锁现在问不到"（503 那一类）。落成同一个东西的话，客户端会把
- * "中间件挂了"读成"别人在用"，然后去等等看 —— 而真正该做的是退避重试。
+ * <p>要区分两件事：{@code tryAcquire} 返回空表示这棵树有人管着（409 一类）；抛
+ * {@link LeaseUnavailableException} 表示这把锁现在问不到（503 一类）。混成同一个结果，
+ * 客户端会把中间件故障读成别人在用，然后等待；正确处置是退避重试。
  *
- * <p>**和 {@code app} 包里那个同名测试是两件事**，不能并：那个要 Redis **在**（它连真的），
- * 这个要 Redis **够不到**；并进去的话，Redis 一挂它就被跳过 —— 而那正是它唯一要验的那一刻。
+ * <p>不能与 {@code app} 包里的同名测试合并：那个要求 Redis 在线，这个要求 Redis
+ * 够不到。合并后 Redis 一挂就会被跳过，而那正是它唯一要验证的时刻。
  */
 class RedisExecutionLeaseUnavailableTest {
 
@@ -58,9 +58,9 @@ class RedisExecutionLeaseUnavailableTest {
     }
 
     /**
-     * 指向一个**没人监听**的端口。
+     * 指向一个没人监听的端口。
      *
-     * <p>超时给得很短、而"拒绝连接"本来就是立刻的 —— 这条测试不该在连接上耗时间。
+     * <p>超时给得短，而且“拒绝连接”本来就是立刻的；这条测试不该在连接上耗时间。
      */
     private static StringRedisTemplate templateAgainstNothing() {
         LettuceClientConfiguration client = LettuceClientConfiguration.builder()
@@ -77,7 +77,7 @@ class RedisExecutionLeaseUnavailableTest {
         return new StringRedisTemplate(factory);
     }
 
-    /** 走到发号就说明锁已经"抢到了"，而这条测试里根本连不上 —— 它不该被碰到。 */
+    /** 走到发号就说明锁已经“抢到了”，而这条测试里根本连不上；它不该被碰到。 */
     private static WorkspaceFence fenceThatMustNotBeCalled() {
         return new WorkspaceFence() {
             @Override

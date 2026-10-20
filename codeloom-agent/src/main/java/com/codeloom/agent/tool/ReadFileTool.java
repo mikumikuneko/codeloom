@@ -9,25 +9,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-/** 读取工作区里的一个文件，带行号，可选行范围。 */
+/**
+ * 读取工作区里的一个文件，返回带行号的文本，可选行范围。
+ *
+ * <p>产出有真实上界且可用 offset/limit 继续读取，因此声明为 {@link #selfBounded()}。
+ * 空文件是一次成功的读取，否则空文件将无法被读取，也就永远无法被覆盖。
+ */
 public final class ReadFileTool implements Tool {
 
     private static final int DEFAULT_MAX_LINES = 2_000;
     private static final int DEFAULT_MAX_LINE_CHARS = 2_000;
 
-    /**
-     * 一次读取的**总**字符上限。
-     *
-     * <h2>没有它的时候，这个工具其实没有上界</h2>
-     * {@code 2000 行 × 每行 2000 字符} 最坏是 <b>400 万字符</b>（约 100 万 token）——
-     * 一个压缩过的 JS、或者一行的大的 JSON，就能撞到。而"读文件"这一类工具的产出
-     * **不该再走那一轮的总量限制**（见 {@link Tool#selfBounded()}），
-     * 那意味着它必须自己设上界：不然就是把一个实际上无限大的东西直接灌进上下文。
-     *
-     * <p>取值和 {@code run_command}、{@code web_fetch} 共用同一个常量
-     * （{@link ToolLimits#MAX_OUTPUT_CHARS}）：三个都是"一次调用的产出"这件事，
-     * 用不同的数字只会让下一个读代码的人以为它们之间有什么区别。
-     */
     @Override
     public String name() {
         return ToolNames.READ_FILE;
@@ -54,19 +46,15 @@ public final class ReadFileTool implements Tool {
                 """;
     }
 
-    /** 只读：可以和同一批里的其它只读调用并发跑，见 {@link Tool#concurrencySafe()}。 */
+    /** 只读，可与同一批的只读调用并发；见 {@link Tool#concurrencySafe()}。 */
     @Override
     public boolean concurrencySafe() {
         return true;
     }
 
     /**
-     * 产出自带分段：{@code offset} / {@code limit} 就是"再取剩下那部分"的入口。
-     *
-     * <p>所以它**不参与**那一轮的总量限制：对它的落盘提示是一条**循环指令**
-     *（被落盘的正是这条 read 的结果），理由与两家的做法见 {@link Tool#selfBounded()}。
-     *
-     * <p>代价是它必须真的有界 —— 见 {@link ToolLimits#MAX_OUTPUT_CHARS}。
+     * offset/limit 是继续读取的入口，且单次输出受 {@link ToolLimits#MAX_OUTPUT_CHARS} 限制，
+     * 因此不触发每轮总量超限时的落盘改写（落盘提示会对读文件形成循环）；它的占用仍计入该轮总量。
      */
     @Override
     public boolean selfBounded() {
@@ -99,9 +87,7 @@ public final class ReadFileTool implements Tool {
         int limit = Math.max(1, arguments.path("limit").asInt(DEFAULT_MAX_LINES));
 
 
-        // 【流式读】不先 readAllLines 物化整个文件 —— offset/limit 存在的意义就是读大文件，
-        // 而 package-lock.json 这类几万到几十万行的文件全量读入会产生几十万个 String 然后丢弃。
-        // 读到该停的地方就 break。
+        // 流式读取，不物化整个文件；offset/limit 的意义就是读取大文件。
         StringBuilder out = new StringBuilder();
         boolean truncated = false;
         int lineNo = 0;
@@ -115,11 +101,11 @@ public final class ReadFileTool implements Tool {
                     continue;                       // 前面几行直接跳过，不物化
                 }
                 if (lineNo - from >= limit) {
-                    truncated = true;               // 后面还有内容，但行数已经读够了
+                    truncated = true;               // 行数已读够，后面还有内容
                     break;
                 }
                 if (out.length() >= ToolLimits.MAX_OUTPUT_CHARS) {
-                    // 行数还没到，**总量**先到顶了。一个压缩过的 JS、一行大 JSON 就能走到这儿
+                    // 行数未到但总字符先到顶；压缩后的 JS 或大 JSON 可以触发。
                     truncated = true;
                     break;
                 }
@@ -131,11 +117,7 @@ public final class ReadFileTool implements Tool {
         }
 
         if (!sawAnyLine) {
-            // **空文件是一次成功的读取，不是失败。** 报错的话后果不只是多一句废话：
-            // `write_file` 是"只在不存在时工作"、`edit_file` 要求 `old_string` 非空且唯一，
-            // 再加上读不了 —— **一个空文件就再也填不上了**。
-            //
-            // 现在空文件读得动（这是"读过才许覆盖"的前提），写也就有了路
+            // 空文件是成功读取：否则 write_file 与 edit_file 都无法填充它。
             if (isEmpty(file)) {
                 reads(context, file, true);
                 return ToolOutcome.ok(rawPath + " 现在**是空的**（0 行）。要往里写内容就用 write_file。");
@@ -143,15 +125,10 @@ public final class ReadFileTool implements Tool {
             return ToolOutcome.failed("起始行 " + from + " 超出了文件长度（这个文件一共 "
                     + lineNo + " 行）。");
         }
-        // 是整份吗：从第一行开始读的，**而且没被任何一种上限截住**。
-        // 只读了中间一段、或者后面还有没读到的，都不算整份 —— 拿那种印象去整份覆盖
-        // 会把没看到的部分静默抹掉（见 WriteFileTool）
+        // 只有从第一行开始且未被任何上限截住才算整份；部分读取不能用于整份覆盖。
         reads(context, file, !truncated && from == 1);
         if (truncated) {
-            // 说清**接着从哪一行读**：模型手里就有 offset 这个参数，它要的正是那个数
-            //（只说"后面还有"的话，它得自己数收到了多少行，数错一次就白读一轮）。
-            // （两种断法算出来是同一个式子：行数到顶时 lineNo 正好等于 from+limit，
-            //  总量到顶时它是"没能追加进去的那一行"）
+            // 明确下一次读取的 offset；只说“后面还有”会迫使模型自己数已读行数。
             int shown = lineNo - from;
             out.append("...（从第 ").append(from).append(" 行起显示了 ").append(shown)
                     .append(" 行，后面还有。接着读就用 offset=").append(from + shown).append("）\n");
@@ -162,19 +139,17 @@ public final class ReadFileTool implements Tool {
     }
 
     /**
-     * 记一笔：这个文件读过了，**读到的是现在这个版本**。
+     * 记录一次成功读取。只有真正读到才记录，错误路径不记录。
      *
-     * <p>**只有真的读到了才记**，失败的那几条路径都不记 —— 见 {@link WriteFileTool}：
-     * 覆盖那条规则靠的就是这本账，记错了等于它形同虚设。
-     *
-     * @param whole 拿到的是不是**整份**。不是整份的话，整份覆盖那条规则要拦住它：
-     *              没看到的那部分会被静默抹掉
+     * @param context 工具上下文
+     * @param file    读到的文件
+     * @param whole   是否读到整份；部分读取不允许整份覆盖
      */
     private static void reads(ToolContext context, Path file, boolean whole) {
         context.reads().mark(file, whole);
     }
 
-    /** 读不到大小就当它不是空的 —— 那就走原来那句"起始行超出长度"的报错，不在这儿编一个结论。 */
+    /** 读不到大小就当作非空，走“起始行超出长度”的报错。 */
     private static boolean isEmpty(Path file) {
         try {
             return Files.size(file) == 0;
@@ -183,7 +158,7 @@ public final class ReadFileTool implements Tool {
         }
     }
 
-    /** 手写补位：{@code String.format} 每次都要新建 Formatter 并解析格式串，是朴素拼接的几十倍。 */
+    /** 追加带行号的文本；手写补位以避免每次格式化的开销。 */
     private static void appendNumbered(StringBuilder out, int lineNo, String line) {
         String shown = line.length() <= DEFAULT_MAX_LINE_CHARS
                 ? line

@@ -47,8 +47,8 @@ class ProjectRowTest {
     @Test
     @DisplayName("成员查不出来时【炸掉】而不是返回一个没有成员的项目")
     void missingMembersFailLoudly() {
-        // 数据库里有一行 project，却一行 project_member 都查不到 —— 这说明写入路径漏了。
-        // 静默返回一个空成员的项目，会让这个错误一路飘到「谁能看到这个项目」的判断里去。
+        // 有项目行却查不到任何成员，说明写入路径漏了；静默返回空成员项目会让错误
+        // 传播到"谁能看到这个项目"的判断里
         ProjectRow row = ProjectRow.of(
                 new Project(PROJECT_ID, ALICE, "x", "D:/x", Set.of(ALICE)));
 

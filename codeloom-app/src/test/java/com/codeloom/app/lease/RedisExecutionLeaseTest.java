@@ -31,14 +31,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 那是持久化在 workspace 表上的。所以这里的"锁"和"号"都是真的。
  *
  * <p>为什么每个测试自己 {@code new} 租约实例而不是注入 Spring 那个：
- * 需要给不同实例配**不同的 TTL**，才能在不手工删键的前提下制造"租约真的过期了"。
- * 手工删键测的是"键没了会怎样"，让 TTL 自然过期测的才是**接管这条真实路径**。
+ * 需要给不同实例配不同的 TTL，才能在不手工删键的前提下制造"租约真的过期了"。
+ * 手工删键测的是"键没了会怎样"，让 TTL 自然过期测的才是接管这条真实路径。
  *
- * <h2>隔离靠"每个测试一棵新树"，不再是"每条新会话"</h2>
- * Redis 的状态不参与事务回滚，所以键必须天然唯一，否则上一个测试留下的锁会把下一个卡住
- * （表现成"抢锁莫名失败"）。锁的键现在是一棵树，而树由「人 + 项目」决定 —— 项目是常量，
- * 所以**每个测试自己生成一个 owner**。这一点很容易在改测试时踩到：以前生成一个新
- * sessionId 就够了，现在生成新 sessionId 会落到**同一棵树**上。
+ * <p>隔离靠每个测试一棵新树，而不是每条新会话。Redis 状态不参与事务回滚，键必须天然唯一，
+ * 否则上一个测试留下的锁会卡住下一个，表现成“抢锁莫名失败”。锁的键是一棵树，树由
+ * 「人 + 项目」决定；项目是常量，所以每个测试生成一个 owner。注意：生成新 sessionId
+ * 不再够，它会落到同一棵树上。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -77,7 +76,7 @@ class RedisExecutionLeaseTest {
     @Test
     @DisplayName("【共享工作区】同一个人的两条会话互斥 —— 它们共用一棵树，不能同时写")
     void twoSessionsOfOnePersonAreMutuallyExclusive() {
-        // 这是把树的键从"每会话"提到"每人"之后**必须**成立的一条：
+        // 这是把树的键从"每会话"提到"每人"之后必须成立的一条：
         // 两条会话共用一份目录，要是各自拿到一把锁，它们就会同时改写同一批文件 ——
         // 而那正是 worktree 隔离本来要防的事。
         Session first = savedSession();
@@ -141,7 +140,7 @@ class RedisExecutionLeaseTest {
         RedisExecutionLease newHolder = lease("inst-new");
 
         LeaseToken old = oldHolder.tryAcquire(session).orElseThrow();
-        // 等老租约**真的**过期。固定 sleep(400) 对 300ms 的 TTL 看着够，但机器一忙就不够 ——
+        // 等老租约真的过期。固定 sleep(400) 对 300ms 的 TTL 看着够，但机器一忙就不够 ——
         // 而那会表现成"抢锁失败抛 NoSuchElement"，看起来像锁实现坏了。
         // 轮询到抢到为止，慢机器上多等一会儿就对了
         LeaseToken fresh = Await.untilPresent("老租约过期、新持有者接管",
@@ -164,7 +163,7 @@ class RedisExecutionLeaseTest {
     @Test
     @DisplayName("发号失败时锁要还回去，不能让它空占到 TTL 结束")
     void lockIsReturnedWhenIssuingFails() {
-        // 库里没有这棵树，发号会抛。注意造的是"没落过库的**树**"（新 owner），
+        // 库里没有这棵树，发号会抛。注意造的是"没落过库的树"（新 owner），
         // 而不是"没落过库的会话" —— 号是按树发的
         Session unknown = orphanSession();
         RedisExecutionLease holder = lease("inst-a");
@@ -187,7 +186,7 @@ class RedisExecutionLeaseTest {
     }
 
     @Test
-    @DisplayName("续约节奏是 TTL 的三分之一 —— 允许连续两次续约失败才判死")
+    @DisplayName("续约节奏是 TTL 的三分之一")
     void renewIntervalIsOneThirdOfTtl() {
         assertThat(lease("inst-a", Duration.ofSeconds(30)).renewInterval())
                 .isEqualTo(Duration.ofSeconds(10));
@@ -204,7 +203,7 @@ class RedisExecutionLeaseTest {
     }
 
     /**
-     * 一条真会话**和它那棵树**，owner 每次都是新的。
+     * 一条真会话和它那棵树，owner 每次都是新的。
      *
      * <p>owner 必须每次不同：树的键是「人 + 项目」而项目是常量，所以复用 owner 就会让两个
      * 测试落在同一棵树上 —— 而 Redis 的锁不跟着事务回滚。
@@ -218,7 +217,7 @@ class RedisExecutionLeaseTest {
         return savedFor(other.ownerId());
     }
 
-    /** 一条会话和一个 owner，但**不落那棵树** —— 用来测"对不存在的树发号"。 */
+    /** 一条会话和一个 owner，但不落那棵树——用来测“对不存在的树发号”。 */
     private Session orphanSession() {
         return Session.create(SessionId.generate(), PROJECT_ID, UserId.generate(),
                 TestSessions.DEFAULT_MODEL);

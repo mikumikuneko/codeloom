@@ -6,29 +6,20 @@ import com.codeloom.domain.user.UserId;
 import java.util.Objects;
 
 /**
- * 一棵工作区的标识：**谁**在**哪个项目**里的那一份。
+ * 一棵工作区的标识：谁在哪个项目里的那一份。键是「用户 × 项目」，不是会话。
  *
- * <h2>为什么键是「用户 × 项目」，而不是会话</h2>
- * 树挂在「人 + 项目」上：一个人在一个项目里有且只有一棵树，他的所有会话
- * 都在那棵树里干活。**换会话只换对话，不换代码。**
+ * <p>一个人在一个项目里有且只有一棵树，所有会话都在其中干活：换会话只换对话，不换代码。
+ * 若键落在会话上，同一个人开第二段对话就看不到上一轮的改动，还要为合并付一次代价。
  *
- * <p>键要是落在会话上（每会话一棵 worktree、一条 {@code session/<id>} 分支），
- * **同一个人在同一项目里开第二段对话就看不到上一轮的改动了** —— 代码明明是他的，
- * 却因为"换了条会话"而隔在另一棵树里；而且这个人的两条会话线还要为「合并」付一次代价，
- * 而它们本来就是同一个人的同一份工作。
+ * <p>它同时是并发控制的粒度：执行租约锁的是一棵树（见 {@link com.codeloom.domain.port.ExecutionLease}），
+ * 锁的键必须与树的键相同，否则同一个人的两条会话能同时写一份 worktree；不同的人各有自己的树，照旧能同时跑。
  *
- * <h2>它同时是并发控制的粒度</h2>
- * 执行租约锁的是**一棵树**（见 {@code ExecutionLease}），而不只是"一条会话" ——
- * 因为同一个人的两条会话现在共用一份目录，谁也不能在另一个人正写的时候插进去。
- * 这是最要紧的一条推论：**锁的键和树的键必须是同一个**，否则两个会话能同时
- * 写一份 worktree，而那正是 worktree 隔离本来要防的事。
+ * <p>文本形式是两个 UUID 用冒号连接，Redis 锁键和日志用它（见 {@link #value()}）；UUID 里不会出现冒号。
+ * 磁盘目录不用它：冒号在 Windows 上是保留字符，工作区按 ownerId/projectId 分两层（见 {@code LocalWorkspaceManager}）。
  *
- * <p>（两个**不同**的人各有自己的树，所以他们照旧能同时跑，互不干扰 ——
- * 隔离没有消失，只是从"每个会话"提到了"每个人"。）
- *
- * <h2>两个 UUID 拼成文本形式，用冒号分隔</h2>
- * Redis 键、目录名、日志都用它，见 {@link #value()}。UUID 里不会出现冒号，
- * 所以拼起来不会有歧义。
+ * @param ownerId   树属于谁；见
+ *                  {@code docs/decisions/architecture/2026-09-24-workspace-per-person-merge-to-converge.md}
+ * @param projectId 在哪一个项目里
  */
 public record WorkspaceId(UserId ownerId, ProjectId projectId) {
 
@@ -37,15 +28,24 @@ public record WorkspaceId(UserId ownerId, ProjectId projectId) {
         Objects.requireNonNull(projectId, "projectId");
     }
 
+    /**
+     * 从用户和项目构造。
+     *
+     * @param ownerId   树属于谁
+     * @param projectId 在哪一个项目里
+     * @return 工作区标识
+     */
     public static WorkspaceId of(UserId ownerId, ProjectId projectId) {
         return new WorkspaceId(ownerId, projectId);
     }
 
     /**
-     * 文本形式：{@code <ownerId>:<projectId>}。
+     * 文本形式：ownerId 和 projectId 用冒号连接，供 Redis 锁键和日志使用。
      *
-     * <p>目录名用它（见 {@code LocalWorkspaceManager}）：那一层多出来的斜杠会把
-     * 同一棵树拆进两层目录里，而"一棵树一个目录名"是路径规则好读的前提。
+     * <p>磁盘目录不用它：冒号在 Windows 上是保留字符，工作区按
+     * ownerId/projectId 分两层（见 {@code LocalWorkspaceManager}）。
+     *
+     * @return 以冒号分隔的文本标识
      */
     public String value() {
         return ownerId.value() + ":" + projectId.value();

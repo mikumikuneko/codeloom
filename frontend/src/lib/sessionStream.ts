@@ -1,37 +1,29 @@
 /**
- * 事件流 → 人看的条目。**这是一个纯函数**（同样的输入永远给同样的输出）。
+ * 把事件流折叠成人看的条目。这是一个纯函数：同样的输入永远给同样的输出。
  *
- * <h2>它和后端那个 ContextAssembler 不是一回事</h2>
- * 那个投影是**给模型看**的：只保留对话，工具调用压成 API 要求的形状，
- * 状态变化、checkpoint、用量全部丢掉。
+ * 它和后端给模型的上下文投影目的不同：那份只保留对话和工具调用的 API 形状，
+ * 这里保留人需要看到的工具调用、结果、失败原因和用量。同一个事件流，两种读者。
  *
- * <p>而这个投影是**给人看**的 —— 人要看的恰恰是那些被丢掉的东西：
- * 它调了什么工具、跑没跑通、为什么停下来、这一轮花了多少。
- * 同一个事件流，两种读者，两种投影。**这是事件溯源最直接的兑现**。
- *
- * <h2>工具调用和它的结果合成一条</h2>
- * 分开显示的话，每一步工具调用都会变成两行 —— 而"它跑了 mvn test"和"跑失败了"
- * 本来就是一件事的两半。所以这里在遇到结果时**回头把结果填进那条**，
- * 而不是新加一条。
+ * 工具调用与它的结果合成一条：遇到结果时回头填进那条调用，不新增一行。
  */
 
 import { dropsStreaming, isActive, settlesDangling } from '@/lib/sessionState'
 import { parsePresentation, type ToolPresentation } from '@/lib/toolPresentation'
 
 /**
- * 一次调用**存在过、却没有结果**的几种原因。
+ * 一次调用存在过、却没有结果的几种原因。
  *
- * <p>存的是"哪一种"，不是那句话 —— 字怎么写是界面的事（见 `ToolLine` 右端那一格）。
- * 放在这里的话，同一件事会有两份文案，而它们迟早会不一样。
+ * 存的是原因，不是文案：怎么写由界面决定（见 `ToolLine` 右端那一格）。放在这里
+ * 会让同一件事有两份文案，迟早不一致。
  */
 export type Unfinished =
-  /** 跑着的时候用户让它停了。进程树已经被杀了。 */
+  /** 用户让这一轮停了；进程树已经被杀。 */
   | 'cancelled'
-  /** 平台在它执行到一半的时候没了（崩溃恢复时补写的那个事实）。 */
+  /** 平台在它执行到一半时没了（崩溃恢复时补写的事实）。 */
   | 'interrupted'
-  /** 用户**拒绝**了这次调用：它没执行，而且不会再有结果（后端那条 TOOL_REJECTED）。 */
+  /** 用户拒绝了这次调用：它没执行，也不会再有结果（后端那条 TOOL_REJECTED）。 */
   | 'rejected'
-  /** 收尾时才发现它一直没有结果 —— 当时发生了什么不知道（见 closeDanglingCalls 那道兜底）。 */
+  /** 收尾时才发现一直没有结果，当时发生了什么未知（closeDanglingCalls 的兜底）。 */
   | 'no-result'
 
 /** 一条工具调用的结果（合并进调用那一条里）。 */
@@ -41,43 +33,41 @@ export interface ToolOutcome {
   truncated: boolean
   exitCode: number | null
   /**
-   * 这一次调用**实际**改动了工作区吗。
+   * 这一次调用是否实际改动了工作区。
    *
-   * <p>它是后端算出来、随事件落库的**事实**。从前没有它，界面只能拿一张按工具名
-   * 写死的名单去猜（`run_command` 跑一条 `git status` 什么都没动，而名单说它动了）。
-   * 判"这一类工具通常会改"和判"这一次真的改了"是两件事，前者只能猜。
+   * 这是后端算好、随事件落库的事实，不是按工具名推测的名单：`run_command` 跑一条
+   * `git status` 什么都没改。判"这类工具通常会改"与判"这一次真的改了"是两件事。
    */
   mutated: boolean
   /**
-   * 只给界面看的结构化结果（后端随事件落库）。**模型看不到它**。
+   * 只给界面看的结构化结果（后端随事件落库），模型看不到。
    *
-   * <p>缺失、坏 JSON、认不出来的形状都是 `null` —— 那时界面退回渲染 `output`，
+   * 缺失、坏 JSON、认不出来的形状都是 `null`，那时界面退回渲染 `output`，
    * 也就是旧事件的样子。见 {@link parsePresentation}。
    */
   presentation?: ToolPresentation | null
 }
 
 /**
- * 一个文件**一步之内**改了多少行。
+ * 一个文件在一步之内改了多少行。
  *
- * <p>它是后端算好、随事件流过来的（见 {@code WorkspaceChanges}），所以这里只描述形状。
- * 路径是**项目相对路径** —— git 说的仓库路径在后端已经翻过一道。
+ * 由后端算好、随事件流过来（见 `WorkspaceChanges`），这里只描述形状。路径是
+ * 项目相对路径：git 的仓库路径已在后端翻过一道。
  */
 export interface ChangedFile {
   path: string
   added: number
   deleted: number
-  /** 二进制文件 —— git 给不出行数，只能说"它变了" */
+  /** 二进制文件：git 给不出行数，只能说它变了 */
   binary: boolean
-  /** 这一步是**新建**了这个文件，不是改了一个已有的 */
+  /** 这一步新建了这个文件，不是修改已有文件 */
   created: boolean
   /**
-   * 这条改动出自哪一个提交 —— 点开看正文时要拿它去问（见 `ProjectDiffView`）。
+   * 这条改动出自哪个提交；点开正文时拿它去问（见 `ProjectDiffView`）。
    *
-   * <p>它跟着**文件**走、不跟着轮走：一轮里可能落好几条改动记录（批准一次之后续跑，
-   * 收尾会再落一条），同一条路径于是可能出自两个提交。上面那个合并按 `...file` 摊开，
-   * 所以留下的是**晚**的那一个 —— 也就是说点开看到的是**其中一次**的正文，
-   * 而行数是两次的和。这一条如实记在这儿，别把它当成"全部"。
+   * 它跟着文件走，不跟着轮走：一轮里可能落几条改动记录（批准后续跑、收尾再落
+   * 一条），同一路径于是可能出自两个提交。按路径合并后留下的是较晚的那个，所以
+   * 点开看到的是其中一次的正文，而行数是几次的和。
    */
   commitSha: string
 }
@@ -85,19 +75,16 @@ export interface ChangedFile {
 /** 一轮改了哪些文件。 */
 export interface TurnFiles {
   files: ChangedFile[]
-  /** 改动太多、后端只记下了前一批 —— 界面要如实说"没记全"，而不是只报那个偏小的数字 */
+  /** 改动太多，后端只记下了前一批；界面要如实显示"没记全"，不能只报偏小的数字 */
   truncated: boolean
 }
 
 /**
- * 这次工具调用**还在跑吗**。
+ * 这次工具调用还在跑吗。
  *
- * <p>两个条件缺一不可：没有结果，**也**没有"它没跑完"这个事实。少了后半个，
- * 崩溃恢复之后那条调用会一直闪 —— 界面在说它还在跑，而它早就没了。
- *
- * <p>**这条规则只有这一处**：界面上有两处问"整轮/单个工具还在跑吗"，而 fold 里
- * 还有一处问"要不要给它补一个没跑完"（那一处在这个之上多一个条件）。各写一遍的话，
- * 将来多一种结局就会漏改一处 —— 漏掉的那处不报错，只是一直闪。
+ * 两个条件缺一不可：没有结果，也没有"没跑完"这个事实。少了后者，崩溃恢复之后
+ * 那条调用会一直显示成在跑。这条规则只放在这一处，fold 里补"没跑完"的那一处
+ * 也复用它：各写一遍的话，多一种结局就会漏改一处，而漏掉的那处不报错。
  */
 export function toolIsRunning(
   outcome: ToolOutcome | null,
@@ -107,11 +94,10 @@ export function toolIsRunning(
 }
 
 /**
- * 这一轮现在是什么状态 —— 取它**最后**一条状态变更。
+ * 这一轮现在是什么状态，取它最后一条状态变更。
  *
- * <p>界面上有两处要问它（投影要不要给悬挂的调用收尾、会话流那一栏要不要画用量行），
- * 而它们必须看**同一个事实**。所以状态进流（见 StreamItem 里那条 `state`），
- * 谁都不许去数别的迹象。
+ * 投影是否要给悬挂的调用收尾、会话流是否要画用量行，都必须看这同一个事实。
+ * 状态以条目形式进流（见 StreamItem 的 `state`），不要在别处数迹象。
  */
 export function turnStateOf(turn: StreamItem[]): string | null {
   const last = turn.findLast((item) => item.kind === 'state')
@@ -119,45 +105,34 @@ export function turnStateOf(turn: StreamItem[]): string | null {
 }
 
 /**
- * 这一轮**还在被推进**吗 —— 看它最后一条状态，不看 item 的形状。
+ * 这一轮是否还在被推进，只看它最后一条状态，不看条目形状。
  *
- * <h2>为什么不看形状</h2>
- * 从前这里问的是"最后一条 item 是不是一条还在跑的工具"。那个判据会**随流的形状漂**：
- * 后来往流里加了一种条目（状态本身也进流），工具后面就跟着一条状态条目，
- * 于是"工具正在跑"再也判不出来 —— 症状是**Esc 打断在工具执行期间失灵**，
- * 而那恰好是最需要打断的时候（一次构建可能几十秒）。
+ * 形状判据会随流演化失效：新增一种条目后，"最后一条是还在跑的工具"不再成立，
+ * 症状是 Esc 在工具执行期间打断失灵。状态是后端每一步都落的事实。理由见
+ * `docs/decisions/bug-fix/2026-10-10-turn-activity-comes-from-the-state-not-the-shape.md`。
  *
- * <p>状态是"这一轮在被推进"的**事实**（后端每一步都落一条），从它推才是稳的。
- *
- * @param turn 这一轮的那些条目。**传整条流也行**：最后一条状态一定属于最后那一轮。
+ * @param turn 这一轮的条目；传整条流也可以，最后一条状态一定属于最后一轮
  */
 export function turnIsActive(turn: StreamItem[]): boolean {
   return isActive(turnStateOf(turn))
 }
 
 /**
- * 这一轮**跑完了没有** —— 用量那一行只在这时才画。
+ * 这一轮是否已经跑完；用量行只在这时显示。
  *
- * <h2>为什么不能只看"等不等批准"</h2>
- * 挂起等人批时那一轮会先结算一次（状态 `AWAITING_APPROVAL`、落一条用量），
- * 批准之后它**接着跑**（`WAITING_USER → THINKING → EXECUTING_TOOL`）。
- * 只判"是不是 AWAITING_APPROVAL"的话，批准后的续跑一开始就会把挂起那一刻的用量
- * 露出来 —— 屏幕上写着"这一轮用了 4,894 tokens"，而这一轮还在干活，
- * 等它真跑完那个数还会再变一次。人看到的是"先出现、又消失/跳一下"。
+ * 不能只判 `AWAITING_APPROVAL`：挂起等人批时这一轮会先结算一次，批准之后继续跑。
+ * 判据是终态（`WAITING_USER` / `FAILED`），或者这一轮留下了 `turnEnd`（失败 /
+ * 打断 / 拒绝）。历史轮次（`live === false`）只要不是停在审批上也算结束：
+ * 老数据可能没有状态条目，不能把它们全藏掉。
  *
- * <p>所以判据是**终态**：`WAITING_USER` / `FAILED`，或者这一轮已经被停住
- * （失败、打断、拒绝留下的 `turnEnd`）。历史轮次（`live === false`）只要不是
- * 停在审批上就算结束 —— 老数据里可能没有状态条目，不能把它们全藏掉。
+ * 批准之后那一瞬，后端会先把状态推到 `WAITING_USER` 再开始续跑。若这一轮最后
+ * 一条实质条目是刚被批准的审批，说明续跑还没有产出，同样不能显示。
  *
- * <p>还有一处更细的：**批准之后那一瞬间**，后端会先把状态从 `AWAITING_APPROVAL`
- * 推到 `WAITING_USER`，然后才开始续跑。那一瞬的 `WAITING_USER` 不是"这一轮完了"，
- * 而是"挂起那一段收完了" —— 如果把用量露出来，人就会看到它出现一下、续跑一开始
- * 又消失。判据是这一轮**最后一条实质条目**：如果它就是那条刚被批准的审批，
- * 说明续跑还没产出任何东西，不能画。
+ * 理由见 `docs/decisions/bug-fix/2026-10-18-the-usage-line-waits-for-the-turn-to-finish.md`。
  *
  * @param turn    这一轮的条目
- * @param live    这是不是**最后那一轮**（只有它有"还在跑"这种可能）
- * @param stopped 这一轮是否留下了一条 `turnEnd` 通知（失败 / 打断 / 拒绝）
+ * @param live    是否为最后一轮（只有它可能还在跑）
+ * @param stopped 这一轮是否留下了 `turnEnd` 通知（失败 / 打断 / 拒绝）
  */
 export function usageLineVisible(turn: StreamItem[], live: boolean, stopped: boolean): boolean {
   const state = turnStateOf(turn)
@@ -173,7 +148,7 @@ export function usageLineVisible(turn: StreamItem[], live: boolean, stopped: boo
   return !live && state !== 'AWAITING_APPROVAL'
 }
 
-/** 这一轮的最后一条实质条目是不是一条**刚被批准**的调用。状态 / 用量 / 检查点不算实质。 */
+/** 这一轮最后一条实质条目是否是刚被批准的调用。状态、用量、检查点不算实质。 */
 function justResolvedApproval(turn: StreamItem[]): boolean {
   const last = turn.findLast(
     (item) => item.kind !== 'state' && item.kind !== 'checkpoint' && item.kind !== 'usage',
@@ -181,7 +156,7 @@ function justResolvedApproval(turn: StreamItem[]): boolean {
   return last?.kind === 'approval' && last.approved === true
 }
 
-/** 一轮改动的增删合计。两处都在算它（会话流那一行、回滚面板那一行），算的地方只留一个。 */
+/** 一轮改动的增删合计。会话流和回滚面板都调这里，不各算一遍。 */
 export function changeTotals(files: ChangedFile[]): { added: number; deleted: number } {
   return {
     added: files.reduce((sum, file) => sum + file.added, 0),
@@ -189,46 +164,44 @@ export function changeTotals(files: ChangedFile[]): { added: number; deleted: nu
   }
 }
 
-/** 一轮的改动。{@code turn} 就是**块号**（见 {@link groupIntoTurns}），和"第几轮"是同一条尺子。 */
+/** 一轮的改动。`turn` 是块号（见 {@link groupIntoTurns}），与"第几轮"是同一把尺子。 */
 export interface TurnChanges extends TurnFiles {
   turn: number
 }
 
 /**
- * 把这条流切成**块**：一块 = 一句用户消息 + 它之后发生的事。
+ * 把流切成块：一块 = 一句用户消息 + 它之后发生的事。
  *
- * <h2>为什么"哪几条算一轮"只能定义一次</h2>
- * 会话流按它分块、回滚面板按它标位置、"这一轮改了哪些文件"按它挂号 ——
- * 三处各数一遍的话，两套编号一旦错开，"改了 N 个文件"就挂到**别人那一轮**头上，
- * 而那看起来完全像真的。这里为 checkpoint 栽过一次：它多占一块，后面每一轮整体错一格。
- * 所以分块只有这一个函数，{@link turnChanges} 收的就是它的产出。
+ * 会话流分块、回滚面板标位置、"这一轮改了哪些文件"挂号都依赖这个定义；各数一遍
+ * 会让编号错开，把改动挂到别人那一轮。分块只有这一个函数。
  *
- * <p>**回滚标记（checkpoint）不进分块**：它不显示（渲染时返回 null），
- * 留着只会让开头多出一块**空块** —— 而空块自己没有高度，`space-y` 却会给它下一个兄弟留白。
+ * 回滚标记（checkpoint）不进分块：它不显示，留着会让开头多出一个空块，而空块
+ * 没有高度，`space-y` 却会给下一个兄弟留白。块由用户消息起，块号即第几条用户
+ * 消息。理由见
+ * `docs/decisions/bug-fix/2026-10-10-turns-are-cut-by-user-messages.md`。
  */
 export function groupIntoTurns(items: StreamItem[]): StreamItem[][] {
   const turns: StreamItem[][] = []
-  /** 第一条用户消息**之前**落下的那些（状态条目、通知）—— 它们属于**那一轮**，不是单独一块 */
+  /** 第一条用户消息之前的条目（状态、通知）：它们属于那一轮，不是单独一块 */
   const leading: StreamItem[] = []
   for (const item of items) {
     if (item.kind === 'checkpoint') {
       continue
     }
     if (item.kind === 'user') {
-      // **块由用户消息起。** 这样块号就是"第几条用户消息"，而"第 k 轮"在整个界面上
-      // 只此一套下标 —— 悬停那行的「第 N 轮」和回滚面板按消息顺序取的那句，用的是同一个 k
+      // 块由用户消息起：块号就是"第几条用户消息"，整个界面只此一套下标。
       turns.push(leading.splice(0))
       turns[turns.length - 1].push(item)
       continue
     }
     if (turns.length === 0) {
-      // 还没见过用户消息：先攒着，等那一块建起来再并进去
+      // 还没见过用户消息：先攒着，等那一块建起来再并进去。
       leading.push(item)
       continue
     }
     turns[turns.length - 1].push(item)
   }
-  // 一句用户消息都还没有（会话刚建好）时，开头那些自成一块 —— 不然它们没地方显示
+  // 一句用户消息都没有（会话刚建好）时，开头那些自成一块，否则没地方显示。
   if (turns.length === 0 && leading.length > 0) {
     turns.push(leading)
   }
@@ -236,17 +209,14 @@ export function groupIntoTurns(items: StreamItem[]): StreamItem[][] {
 }
 
 /**
- * 每一轮改了哪些文件 —— **从流里数出来**，不再另发请求。
+ * 每一轮改了哪些文件，从流里数出来，不另发请求。
  *
- * <p>轮次号就是**块号**（见 {@link groupIntoTurns}）。一轮里可能落好几条改动记录
- *（批准一次之后续跑，收尾时会再落一条），**按路径相加**而不是只留最后一条 ——
- * 那会把前一次的改动从账上抹掉。
+ * 轮次号是块号（见 {@link groupIntoTurns}）。一轮可能落多条改动记录（批准后续跑、
+ * 收尾再落一条），按路径相加而不是只留最后一条，否则会抹掉前一次。它按已经分好
+ * 的块数，不自己再数用户消息。
  *
- * <p>它按**已经分好的块**数，不自己再数一遍用户消息：两种数法一旦错开，
- * "这一轮改了哪些文件"就会挂到别人那一轮头上，而那看起来完全像真的。
- *
- * <p>写法上是个纯函数，和 {@link fold} 一样：同样的流永远给同样的结果。
- * 于是会话流显示的、回滚面板列的，是**同一份推导**，不可能各说各的。
+ * 纯函数，和 {@link fold} 一样：同样的流给同样的结果，所以会话流与回滚面板读的是
+ * 同一份推导。
  */
 export function turnChanges(turns: StreamItem[][]): TurnChanges[] {
   return turns.flatMap((block, turn) => {
@@ -258,21 +228,20 @@ export function turnChanges(turns: StreamItem[][]): TurnChanges[] {
         truncated = true
       }
     }
-    // 一轮可能落好几条改动记录，也可能一条都没有（没写任何文件的那些轮）
+    // 一轮可能落多条改动记录，也可能一条都没有（没写任何文件的那些轮）。
     return files.size === 0 ? [] : [{ turn, files: [...files.values()], truncated }]
   })
 }
 
 /**
- * 每一轮改了哪些文件，**按后端那个轮次号**索引（见 `WorkspaceChanges.turnIndex`）。
+ * 每一轮改了哪些文件，按后端的轮次号索引（见 `WorkspaceChanges.turnIndex`）。
  *
- * <h2>为什么这里不跟着会话流用"块号"</h2>
- * 因为读它的是**回滚面板**，而那个面板里的每一行本来就是一个后端号
- *（它列的是 checkpoint，号是后端推的）。两条路各自和自己那套对齐：
- * 会话流按块号挂号、回滚面板按后端号挂号 —— 谁也不去猜另一套，就不会错开。
+ * 读它的是回滚面板，而面板里每一行本来就是一个后端号（它列的是 checkpoint，
+ * 号由后端推）。所以会话流按块号挂号，回滚面板按后端号挂号，谁也不去猜另一套。
  *
- * <p>老事件没有这个号（字段是后加的），那些改动**进不了这张表** ——
- * 这比按位置猜一个号塞进去诚实：猜错的话，那句话配的就是别人的改动。
+ * 老事件没有这个号，那些改动进不了这张表；按位置猜一个号会把它配到别人的改动上。
+ * 理由见
+ * `docs/decisions/bug-fix/2026-10-10-frontend-stops-counting-turns-itself.md`。
  */
 export function changesByTurnIndex(items: StreamItem[]): Map<number, TurnFiles> {
   const byTurn = new Map<number, { files: Map<string, ChangedFile>; truncated: boolean }>()
@@ -294,10 +263,10 @@ export function changesByTurnIndex(items: StreamItem[]): Map<number, TurnFiles> 
 }
 
 /**
- * 把一条改动并进"按路径"的账里。
+ * 把一条改动并进按路径的账里。
  *
- * <p>**按路径相加**而不是只留最后一条：一轮里可能落好几条改动记录
- *（批准一次之后续跑，收尾时会再落一条），只留最后一条会把前一次的改动从账上抹掉。
+ * 按路径相加而不是只留最后一条：一轮可能落多条改动记录（批准后续跑、收尾再落
+ * 一条），只留最后一条会抹掉前一次。
  */
 function mergeChanges(into: Map<string, ChangedFile>, item: StreamItem): void {
   if (item.kind !== 'changes') {
@@ -317,11 +286,10 @@ function mergeChanges(into: Map<string, ChangedFile>, item: StreamItem): void {
 
 export type StreamItem = {
   /**
-   * 这一条对应的事件 id。**引用回复指向的就是它**。
+   * 这一条对应的事件 id；引用回复指向的就是它。
    *
-   * <p>只有已落库的事件才有（流式增量没有），所以是可选的 —— 而它由
-   * {@link fold} 在出口统一盖上，不在每个分支里各写一遍：那种写法迟早会漏掉一支，
-   * 而漏掉的那一支在界面上表现为"这一条没法引用"，不会报错。
+   * 只有已落库的事件才有（流式增量没有），所以可选。由 {@link fold} 在出口统一
+   * 盖上，不在各分支各写一遍：漏掉的分支表现为"这一条没法引用"，不会报错。
    */
   seq?: number
 } & (
@@ -338,18 +306,16 @@ export type StreamItem = {
     }
   | {
       /**
-       * 一次模型调用失败了，后端正在等一下再试。
+       * 一次模型调用失败，后端正在等待后重试。
        *
-       * <p>从前重试藏在 provider 客户端里，那几秒**界面上什么都没有** ——
-       * 看的人只觉得"它卡住了"。后端现在把它落成事件（见 LlmRetryScheduled），
-       * 这里照着显示。
+       * 重试落成事件而不是藏在 provider 客户端里：否则等待的那几秒界面上什么都没有。
        */
       kind: 'retry'
-      /** 第几次尝试（从 1 开始）：1 表示"第一次失败了，正在试第二次" */
+      /** 第几次尝试（从 1 开始）：1 表示第一次失败，正在试第二次 */
       attempt: number
       maxAttempts: number
       delayMs: number
-      /** 为什么 —— 稳定的分类（限流 / 服务端故障 / 网络错误），不是服务商那句英文原文 */
+      /** 稳定的失败分类（限流 / 服务端故障 / 网络错误），不是服务商原文 */
       reason: string
     }
   | {
@@ -357,21 +323,18 @@ export type StreamItem = {
       callId: string
       approved: boolean | null
       /**
-       * 后端为什么要问 —— 一句话，摆在人点"批准"的地方。
+       * 后端为什么要问，摆在批准按钮旁边。
        *
-       * 判据有三种（程序不在免审批名单里 / 动到了工作区外面 / 这行命令看不懂），
-       * 要人过目的东西完全不同。**老事件里没有这一项**（那时我们只记"谁答的"、
-       * 不记"为什么问"），那时它是空串。
+       * 判据有三种（程序不在免审批名单、动到了工作区外、命令看不懂），要人过目的
+       * 东西各不相同。老事件没有这一项，那时是空串。
        */
       reason: string
     }
   /**
    * 一行小字。
    *
-   * <p>{@code turnEnd} 只在**这一轮就此收场**的两条上出现 —— 失败了、或者被打断
-   * （按 Esc / 拒绝且没留指示）。它给下游一个能判别的标记："这一轮没有正常跑完"。
-   * 它的用处：那种轮次**不报"用时"**（见 TurnTail）——
-   * 一个没跑完的轮次，那个数字说明不了什么。
+   * `turnEnd` 只在"这一轮就此收场"时出现：失败，或被打断（按 Esc / 拒绝且没留
+   * 指示）。下游据此知道这一轮没有正常跑完，例如不报"用时"（见 TurnTail）。
    */
   | {
       kind: 'notice'
@@ -379,50 +342,37 @@ export type StreamItem = {
       text: string
       turnEnd?: TurnEnd
       /**
-       * **某个人做的一个动作**。存的是**用户 id** ——
-       * 名字在渲染时按它现查，所以改过用户名之后界面上跟着变（见后端 {@code SessionRewound}）。
-       * 没有它的是"平台自己发生的事"（同步、压缩），那种没有主语。
+       * 某个人做的一个动作。存用户 id；名字在渲染时现查，改名后界面跟着变。
+       * 没有它的是平台自己的动作（同步、压缩），那种没有主语。
        */
       actorId?: string | null
     }
   /**
-   * 一条状态变更。**不显示**（渲染时返回 null）—— 它留在流里只为一件事：
-   * 让"这一轮现在什么状态"只有**一个**事实来源（见 {@link turnStateOf}）。
-   *
-   * <p>从前状态不进流，于是会话流那一栏只能**去数**"这一块里还有没有没答复的审批卡片"
-   * 来回答"还挂着等人批吗" —— 同一个问题两个来源，两边不同步就自相矛盾。
+   * 一条状态变更。不显示（渲染时返回 null），留在流里只为让"这一轮现在什么状态"
+   * 只有一个事实来源（见 {@link turnStateOf}）。
    */
   | { kind: 'state'; to: string; reason: string }
   /**
    * 这一轮改了哪些文件。
    *
-   * <p>**它由后端在收尾时算好、随事件流过来** —— 不是前端去问 git，也不是前端另发一个请求
-   * 换一份回来。这一条是从"读的时候各算一遍"搬到"写的时候算一次"的落点，
-   * 理由见后端 {@code WorkspaceChanges} 的类注释。
-   *
-   * <p>它自己不占一行：跟着那一轮的尾巴显示（见 {@code ChangesRow}）。
+   * 由后端在收尾时算好、随事件流过来，不是前端去问 git 或另发请求。它自己不占
+   * 一行，跟着那一轮的尾巴显示（见 `ChangesRow`）。
    */
   | {
       kind: 'changes'
       files: ChangedFile[]
       truncated: boolean
-      /** 这是第几轮（后端那个号，见 `WorkspaceChanges.turnIndex`）。加这个字段之前落的事件没有 */
+      /** 这是第几轮（后端号，见 `WorkspaceChanges.turnIndex`）；加字段之前的事件没有 */
       turnIndex: number | null
     }
   /**
-   * 一个回滚点。**它不显示**（渲染时给 null），留在列表里只为两件事：
+   * 一个回滚点。不显示（渲染时返回 null），留在列表里只为两件事：
    *
-   * <ul>
-   *   <li>回滚要把流截断到准确的位置 —— 认的是**这一条的 {@link #seq}**（每条事件都有，
-   *       见 {@link fold} 出口那道统一盖章），见 {@link foldOne} 里
-   *       {@code SESSION_REWOUND} 那一支。</li>
-   *   <li>{@code turn} 给回滚面板看：它是"到这儿为止完成了几次交互"，列表按它去重、
-   *       也按它去查"这一轮改了哪些文件"。</li>
-   * </ul>
+   * 回滚要把流截断到准确的位置，认的是这一条的 `seq`（由 {@link fold} 统一盖上），
+   * 见 {@link foldOne} 里 `SESSION_REWOUND` 那一支；`turn` 给回滚面板用：它表示
+   * "到这儿为止完成了几次交互"，列表按它去重，也按它查"这一轮改了哪些文件"。
    *
-   * <p>**不带 sha。**它一度带着（回滚从前是拿 sha 找目标的），而 sha 在一条会话里
-   * 会重复出现（一轮什么都没改时），拿它定位正是那个"退过头"的 bug。现在没有一处读它 ——
-   * 于是它不该在这里。
+   * 不带 sha：sha 在一条会话里会重复（一轮什么都没改时），不能用来定位。
    */
   | { kind: 'checkpoint'; turn: number }
   | {
@@ -435,31 +385,29 @@ export type StreamItem = {
     }
 )
 
-/** 小字的调性。**只有"异常"上色** —— 正常的事情不需要颜色。 */
+/** 小字的调性。只有异常上色，正常的事情不需要颜色。 */
 export type NoticeTone = 'plain' | 'good' | 'bad'
 
-/** 这一轮是怎么收的场。只有"没正常跑完"的两种 —— 正常收尾不需要标记。 */
+/** 这一轮怎么收场。只有没正常跑完的两种；正常收尾不需要标记。 */
 export type TurnEnd = 'failed' | 'stopped'
 
 /**
- * 一轮收尾时，**上下文有多大**。
+ * 一轮收尾时的上下文大小。
  *
- * <h2>它和 {@link StreamItem} 里那几个 token 数是两笔账</h2>
- * `input` / `output` 回答的是"这一轮花了多少"（一轮里可能调了好几次模型，它们是**和**）；
- * 而这个回答的是"当时送进去的那份上下文有多大"（**最后一次调用**的输入）。
- * 两者没有加减关系 —— 一次调用就完成的一轮里它们恰好相等，那也正是最容易搞混的地方。
+ * 它与 `StreamItem` 里的 input/output 是两笔账：input/output 是这一轮所有模型
+ * 调用的和，这里回答最后一次调用送进去的上下文有多大。两者没有加减关系；一次
+ * 调用就完成的一轮里恰好相等，那正是最容易搞混的地方。
  *
- * <p>数由**服务商亲口报出来**（`prompt_tokens`），不是按字符估的。
- * 没有读数的轮次是 {@code null} 而不是 0：两种情况（这一轮压根没调过模型 /
- * 这条事件是加这个字段之前落的）都该**什么都不画**，不是一个空环。
+ * 数由服务商报出（`prompt_tokens`），不是按字符估算。没有读数的轮次是 null 而
+ * 不是 0：没调过模型和字段尚未出现都应什么都不画，而不是一个空环。
  */
 export interface ContextReading {
   tokens: number
-  /** 当时的模型窗口。**跟着每一轮走**，因为换模型会让它变 */
+  /** 当时的模型窗口；跟着每一轮走，因为换模型会让它变 */
   window: number
 }
 
-/** 服务端推来的一帧。`seq` 只有已落库的事件才有（流式增量没有）。 */
+/** 服务端推来的一帧。`seq` 只有已落库的事件才有，流式增量没有。 */
 export interface Frame {
   seq?: number
   at?: string
@@ -467,7 +415,7 @@ export interface Frame {
   payload: Record<string, unknown>
 }
 
-/** 流式生成的正文/思考。**它不属于 items** —— 它是"正在长出来"的那一条。 */
+/** 流式生成的正文与思考。它不属于 items，是正在长出来的那一条。 */
 export interface Streaming {
   text: string
   reasoning: string
@@ -476,23 +424,15 @@ export interface Streaming {
 export const EMPTY_STREAMING: Streaming = { text: '', reasoning: '' }
 
 /**
- * 到眼下为止，这条流里**确实改过工作区**的动作有几条。
+ * 到眼下为止，这条流里确实改过工作区的动作有几条。
  *
- * <h2>为什么是一个数，而不是一条"变了"的事件</h2>
- * 因为这个投影是**纯函数**：同一条流永远算出同一个数。于是断线重连、切走再切回来
- * 那两次历史重放，算出来的数和原来一样 —— 看的人只要问"它涨了没有"就够了，
- * 既不会漏，也不会因为重放而重复。若改成"折进列表时顺手发一个通知"，
- * 这个性质立刻就没了：通知会跟着重放的每一帧重新发一遍。
+ * 返回计数而不是一条"变了"的事件，是因为这个投影必须是纯函数：断线重连、切走再
+ * 切回时历史会重放，计数结果不变，调用方只需看它有没有涨；若在这里发通知，通知
+ * 会随每一帧重放再发一遍。
  *
- * <p>数的是**后端报的那个事实**（`outcome.mutated`），不是"这个工具通常会改"。
- * 从前这里是 `TOOLS_THAT_WRITE.has(item.name)` —— 一张按工具名写死的名单，
- * 它有两处错：把"这一类工具通常会改"当成了"这一次真的改了"（`run_command`
- * 跑一条 `git status` 什么都没动，却会让树重拉一次），以及**加第八个工具的那天
- * 它不会跟着变**，症状是"树不刷新了"，没人会想到是这里。
- *
- * <p>也不再另外要求 `success`：那个字段说的是"结果好不好"，和"动没动过磁盘"是两件事
- * —— 退出码非零的命令完全可能已经写了文件（格式化器修完报错退出、编译产出部分产物）。
- * 后端在算这个字段时已经把这条想进去了，这里再叠一个判断等于把它推翻。
+ * 数的是后端报的 `outcome.mutated`，不是按工具名推测的名单。也不看 `success`：
+ * 退出码非零的命令仍可能写了文件，后端算 mutated 时已经考虑过这一条，这里再叠
+ * 一个判断等于推翻它。
  */
 export function workspaceWrites(items: StreamItem[]): number {
   let count = 0
@@ -504,18 +444,16 @@ export function workspaceWrites(items: StreamItem[]): number {
   return count
 }
 
-/** 把一帧折进条目列表，返回新的列表（不改原来的）。 */
+/** 把一帧折进条目列表，返回新列表，不改原来的。 */
 export function fold(items: StreamItem[], frame: Frame): StreamItem[] {
   const before = items.length
   const next = foldOne(items, frame)
 
-  // **新追加的每一条都盖上这一帧的 seq** —— 引用回复指向的就是它。
+  // 新追加的每一条都盖上这一帧的 seq，引用回复指向的就是它。统一在这里盖，
+  // 而不是让下面各分支各写一遍：漏掉的分支只会让那条无法引用，不会报错。
   //
-  // 在这里统一盖，而不是让下面八个分支各写一遍：那种写法迟早会漏掉一支，
-  // 而漏掉的那一支在界面上表现为"这一条没法引用"，不会报错。
-  //
-  // 只盖章**新追加**的：有些分支是"就地补上结果"（工具跑完了给它填 outcome），
-  // 那种长度没变，而那条工具第一次出现时就盖过了 —— 它的 seq 不该被后面的帧改掉
+  // 只盖新追加的：就地补结果的分支长度不变，那条工具第一次出现时已经盖过 seq，
+  // 不该被后面的帧改掉。
   if (next.length > before && frame.seq !== undefined) {
     return next.map((item, at) => (at >= before ? { ...item, seq: frame.seq } : item))
   }
@@ -530,8 +468,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       return [...items, { kind: 'user', text: str(p.text), at: nullableStr(frame.at) }]
 
     case 'ASSISTANT_MESSAGE':
-      // 完整回复到了：流式那一段到此为止，由调用方清空缓冲。
-      // **思考过程留一份** —— 见 agent 那条的注释：它从前就是在这里被丢掉的
+      // 完整回复到了：流式那一段到此为止，由调用方清空缓冲。思考过程也留一份。
       return [
         ...items,
         {
@@ -549,16 +486,10 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       ]
 
     case 'PLATFORM_INSTRUCTION': {
-      // **平台写给模型的原文不给人看。**
-      //
-      // 它不是"一句提示"，是**提示词**：里面带着对模型的命令（"不要道歉，
-      // 也不要复述已经说过的内容"），端到人的界面上读起来像界面在训人。
-      // Claude Code 也是这么处理的 —— 它把这类文本换成一句人话再显示
-      //（见它 UserTextMessage 里对中断消息的处理：原文一个字不露，
-      // 只显示"Interrupted · What should Claude do instead?"）。
-      //
-      // 按 `reason` 认，按正文认是靠不住的（那串字随时会改）。
-      // **认不出来就什么都不显示** —— 宁可少说一句，也不把提示词原文端上来
+      // 平台写给模型的原文不给人看。它不是一句提示，而是提示词：里面有对模型的
+      // 命令，端到人面前读起来像界面在训人。按 reason 认，不按正文认（那串字随时
+      // 会改）；认不出来就什么都不显示，宁可少说一句。见
+      // docs/decisions/feature/2026-10-02-platform-text-never-reaches-the-ui.md。
       const said =
         str(p.reason) === 'output-truncated'
           ? '上一步的输出被长度上限截断了，它正在拆成几步重做'
@@ -582,16 +513,16 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       ]
 
     case 'TOOL_RESULT': {
-      // ★ 回头把结果填进那条调用里，而不是新加一条 —— 见类注释
+      // 回头把结果填进那条调用里，而不是新加一条，见类注释。
       const callId = str(p.callId)
       const outcome: ToolOutcome = {
         success: p.success === true,
         output: str(p.output),
         truncated: p.truncated === true,
         exitCode: typeof p.exitCode === 'number' ? p.exitCode : null,
-        // 老事件里没有这一项（那时它还只是个没落库的事实）—— 缺失按"没改"处理
+        // 老事件没有这一项，缺失按"没改"处理。
         mutated: p.mutated === true,
-        // 同上：旧事件没有结构化结果，解析出来是 null，界面照旧渲染文本
+        // 旧事件没有结构化结果，解析出来是 null，界面照旧渲染文本。
         presentation: parsePresentation(p.presentation),
       }
       return items.map((item) =>
@@ -601,12 +532,9 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
 
     case 'TOOL_INTERRUPTED':
     case 'TOOL_CANCELLED': {
-      // 这两个是"那次调用没有结果"的**事实**：一轮在工具执行中途死了 / 被取消了。
-      //
-      // ★ 折回**那条调用自己**，而不是旁边加一条小字。从前是加小字，于是那条调用
-      //   永远停在 outcome 为空的样子 —— 而界面上 outcome 为空就等于"正在跑"，
-      //   于是它一直闪。这里填的是第三种结局：没跑完（**不是失败** —— 它没失败，
-      //   它是没跑成，而且模型的上下文里收到的也是这个区分）
+      // 这两个是"那次调用没有结果"的事实：一轮在工具执行中途死了 / 被取消。
+      // 折回那条调用本身，而不是旁边加一条小字：outcome 为空且没有结局就等于
+      // "正在跑"，会让那一行一直闪。这里填的是第三种结局：没跑完，不是失败。
       const callId = str(p.callId)
       const unfinished: Unfinished = frame.type === 'TOOL_INTERRUPTED' ? 'interrupted' : 'cancelled'
       return items.map((item) =>
@@ -647,11 +575,10 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
     }
 
     case 'TOOL_REJECTED': {
-      // 拒绝 = 这次调用**到此为止**（后端为它落的收尾事件，见 ToolRejected）。
-      //
-      // ★ **这一支不能少**：界面上"还在跑"的判据是"既没有结果、也没有'没跑完'"
-      //   （见 ToolLine），而拒绝之后那次调用永远不会有结果 —— 少了它，
-      //   那一行会一直闪。这个 bug 是实际用出来的：拒绝之后那行闪个不停
+      // 拒绝是这次调用的终局（后端落的 ToolRejected）。这一支不能少：判"还在跑"
+      // 要求既没有结果也没有"没跑完"，而拒绝之后那次调用永远不会有结果，缺了它
+      // 那一行会一直闪。见
+      // docs/decisions/bug-fix/2026-10-05-a-rejected-call-gets-its-own-event.md。
       const callId = str(p.callId)
       return items.map((item) =>
         item.kind === 'tool' && item.callId === callId ? { ...item, unfinished: 'rejected' } : item,
@@ -673,16 +600,15 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
     case 'SESSION_STATE_CHANGED': {
       const to = str(p.to)
       const reason = str(p.reason)
-      /** 状态本身也进流 —— 见 StreamItem 上那条 `state`。它不显示，只当事实来源 */
+      /** 状态本身也进流（见 StreamItem 的 state）。它不显示，只当事实来源。 */
       const stateItem = { kind: 'state' as const, to, reason }
 
-      // 这一轮**收尾了**没有 —— 谁算收尾由状态自己那张表说（见 lib/sessionState）。
-      // **等人批不算**：那条调用还在等一个人，它没结束
+      // 这一轮是否收尾由状态表决定（见 lib/sessionState）。等人批不算收尾：
+      // 那条调用还在等一个人。
       const settled = settlesDangling(to) ? closeDanglingCalls(items) : items
 
-      // 只显示"值得停一下"的那两个：出错了、或者挂在等人批。
-      // 其余状态变化（思考中、执行中、回到等用户）是过程的细节，
-      // 全列出来会把流变成一串状态日志
+      // 只显示值得停一下的两种：出错、挂在等人批。其余状态变化是过程细节，
+      // 全列出来会把流变成一串状态日志。
       if (to === 'FAILED') {
         return [
           ...settled,
@@ -690,9 +616,8 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
           stateItem,
         ]
       }
-      // **用户按 Esc 停的那一轮**：一行暗字，不是错误。Claude Code 里那句话是
-      // "Interrupted · What should Claude do instead?" —— 暗色、挂在被中断的消息后面、
-      // 而且接着问一句下一步。它是一条独立的事实（谁停的、什么时候），只是不冒充出错
+      // 用户按 Esc 停的那一轮：一行暗字，不是错误。它是一条独立的事实
+      // （谁停的、什么时候），只是不冒充出错。
       if (to === 'WAITING_USER' && reason === 'CANCELLED') {
         return [
           ...settled,
@@ -700,8 +625,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
           stateItem,
         ]
       }
-      // **拒绝且没留下指示**：那一轮也停住了（见后端的 ApprovalService），
-      // 和按 Esc 是同一个处境 —— 所以同一句话
+      // 拒绝且没留下指示：那一轮也停住了，与按 Esc 是同一处境，所以同一句话。
       if (to === 'WAITING_USER' && reason === 'REJECTED') {
         return [
           ...settled,
@@ -709,69 +633,55 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
           stateItem,
         ]
       }
-      // 等人批**不写小字** —— 那件事由**待批卡片自己**表达：它就在那次调用的下面，
-      // 写着"等你批准一次调用"、带批准/拒绝两个按钮，答复到了之后**那张卡片就收掉**
-      //（见 SessionStreamView 里 Item 的 approval 分支：不画"某某批准了"一行）。
-      //
-      // 从前这里另外追加一条"停下来等你批准一次调用"，两个后果都实际发生了：
-      // 等的时候同一句话出现两遍；批完之后那条小字还留在下面 ——
-      // **界面上读成"批准了…停下来等你批准"**，看着像个 bug（它确实是）。
-      //
-      // 教训：状态式的话（"停下来等你…"）不能写进追加式的流里 —— 流没有让话过期的机制，
-      // 而状态会过去。要进流的话，得写成一件**带时间的事实**（谁、什么时候做了什么）。
+      // 等人批不写小字：那件事由待批卡片自己表达（见 SessionStreamView 的 approval
+      // 分支）。状态式的话不能写进追加式的流：流没有让话过期的机制，答复之后那句
+      // "停下来等你批准"会留在原地，读起来像 bug。
       return [...settled, stateItem]
     }
 
     case 'CHECKPOINT_CREATED':
-      // checkpoint **不显示**：每一轮结束都有它，画出来就是每轮加一行噪音。
-      // 但它必须**留在列表里** —— 回滚要靠它把流截断到准确的位置（下一支）
+      // checkpoint 不显示：每轮结束都有它，画出来就是每轮加一行噪音。但它必须
+      // 留在列表里，回滚靠它把流截断到准确的位置（下一支）。
       return [...items, { kind: 'checkpoint', turn: num(p.turnIndex) }]
 
     case 'SESSION_SYNCED':
       return [...items, { kind: 'notice', tone: 'plain', text: '同步了主干的最新改动' }]
 
     case 'SESSION_REWOUND': {
-      // **回滚要连流一起截断。** Claude Code 就是这么做的：恢复对话 = 把选中的那句话
-      // 及其之后的全部删掉，对话从那儿重新往下长（它那边是
-      // `setMessages(prev.slice(0, messageIndex))`，顺带换一个对话 id 分叉出去）。
+      // 回滚要连流一起截断：恢复对话 = 把选中的那句话及其之后的内容删掉，对话
+      // 从那里重新往下长。
       //
-      // 截到**哪一条**：认**序号**（`toCheckpointSeq`），不认 sha。一轮什么都没改时
-      // 两条 checkpoint 的 sha 一模一样，按 sha 找只能猜 —— 而从前猜的方向恰好是
-      // "退最初那条"，于是"退到第三句之前"执行成了"整个对话清空"。
-      // 后端（`ContextAssembler` 的 `checkpointIndexes`）现在也认序号，两边算的是
-      // 各自投影上的同一个点。
+      // 截到哪一条认序号（toCheckpointSeq），不认 sha：一轮什么都没改时两条
+      // checkpoint 的 sha 相同，按 sha 找只能猜，曾把"退到第三句之前"执行成清空
+      // 整个对话。
       //
-      // 找不到就**不截断**：那意味着这个位置不在手上这段流里（比如流是从中间某处开始
-      // 读的）。那种时候清空整段是最坏的选择 —— 界面会凭空少掉一整段对话。
-      //
-      // 序号缺了（事件没记下退到哪儿）同样当成"找不到" —— 不去拿 sha 猜一条出来
+      // 找不到就不截断：那表示位置不在手上这段流里（例如从中间开始读），清空整段
+      // 会凭空少掉一整段对话。序号缺失同样当成找不到，不拿 sha 猜。
       const seq = p.toCheckpointSeq
       const at =
         typeof seq === 'number'
           ? items.findIndex((item) => item.kind === 'checkpoint' && item.seq === seq)
           : -1
       const kept = at < 0 ? items : items.slice(0, at + 1)
-      // 提示要念的那句话在**被截掉的那一段**里，所以传的是截断前的 `items` 而不是 `kept`
+      // 要念的那句话在被截掉的那一段里，所以传截断前的 items 而不是 kept。
       return [...kept, {
         kind: 'notice',
         tone: 'plain',
         text: rewindNotice(items, at),
-        // 谁退的：存 id，名字在渲染时查（见 Item 上那个字段的说明）
+        // 谁退的：存 id，名字在渲染时现查。
         actorId: idOf(p.byUserId) || null,
       }]
     }
 
     case 'WORKSPACE_CHANGES':
-      // 后端收尾时算好的"这一轮改了什么"。**哪些文件、各多少行**跟着流走，
-      // 于是读的人照着读就行 —— 不用再问 git，也不受"那个提交还在不在"的影响。
-      //
-      // 只有**正文**是按需去取的（点开某一个文件时，见 ProjectDiffView），
-      // 所以那个提交被回收之后正文会问不出来 —— 那时界面上要如实说，不编
+      // 后端收尾时算好的"这一轮改了什么"：哪些文件、各多少行随流走，读的人照着
+      // 读，不用再问 git。只有正文是按需取（点开文件时，见 ProjectDiffView），
+      // 所以提交被回收后正文会问不出来，那时界面要如实显示，不编。
       return [...items, {
         kind: 'changes',
         files: Array.isArray(p.files) ? p.files.map((file) => changedFile(file, str(p.commitSha))) : [],
         truncated: p.truncated === true,
-        // 缺字段就是"加这个字段之前落的" —— **不能默认成 0**：0 是一个合法的轮次号
+        // 缺字段表示"加这个字段之前落的"，不能默认成 0：0 是合法的轮次号。
         turnIndex: typeof p.turnIndex === 'number' ? p.turnIndex : null,
       }]
 
@@ -787,12 +697,12 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
     case 'TURN_TOKENS_USED': {
       const input = num(p.inputTokens)
       const output = num(p.outputTokens)
-      // 两个都是 0 就别铺了：那是个空事件，写出来只是一行噪音
+      // 两个都是 0 就别铺了：空事件写出来只是一行噪音。
       if (input === 0 && output === 0) {
         return items
       }
-      // 这两个数是**这一轮收尾时**的读数，不是前面那几个的和。缺一个就不画：
-      // 分母为零的环没有意义，而 0/64000 会画出一个"上下文是空的"的假象
+      // 这两个数是这一轮收尾时的读数，不是前面几次的和。缺一个就不画：
+      // 分母为零的环没有意义，0/64000 会画出"上下文是空的"假象。
       const tokens = num(p.contextTokens)
       const window = num(p.contextWindow)
       return [
@@ -801,8 +711,7 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
           kind: 'usage',
           input,
           output,
-          // 输入里**命中缓存**的那部分。它的单价低得多，所以在 BYOK 下
-          // 这一项直接是钱 —— 见 UsageRow
+          // 输入里命中缓存的部分。单价低得多，在 BYOK 下直接是钱（见 UsageRow）。
           cached: num(p.cachedInputTokens),
           context: tokens > 0 && window > 0 ? { tokens, window } : null,
           at: nullableStr(frame.at),
@@ -810,8 +719,8 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       ]
     }
 
-    // 流式增量和"正文被清过"这两类不在这里产生条目：
-    // 前者由调用方喂进 streaming 缓冲，后者只是给模型省的，人不需要知道
+    // 流式增量和"正文被清过"不在这里产生条目：前者由调用方喂进流式缓冲，
+    // 后者只给模型省，人不需要知道。
     case 'ASSISTANT_DELTA':
     case 'REASONING_DELTA':
     case 'TOOL_RESULTS_CLEARED':
@@ -819,13 +728,13 @@ function foldOne(items: StreamItem[], frame: Frame): StreamItem[] {
       return items
 
     default:
-      // 认不出来的类型**安静跳过**：后端加一种事件时，前端旧版本不该因此崩掉，
-      // 也不该冒出一行"未知事件" —— 那对读流的人没有意义
+      // 认不出来的类型安静跳过：前端旧版本遇到新事件不应崩溃，也不该冒出一行
+      // "未知事件"，那对读流的人没有意义。
       return items
   }
 }
 
-/** 把一帧折进流式缓冲。正文和思考分开，因为它们要显示在**不同的位置**。 */
+/** 把一帧折进流式缓冲。正文与思考分开，因为它们显示在不同位置。 */
 export function foldStreaming(current: Streaming, frame: Frame): Streaming {
   const p = frame.payload ?? {}
   if (frame.type === 'ASSISTANT_DELTA') {
@@ -834,14 +743,13 @@ export function foldStreaming(current: Streaming, frame: Frame): Streaming {
   if (frame.type === 'REASONING_DELTA') {
     return { ...current, reasoning: current.reasoning + str(p.text) }
   }
-  // 完整回复到了：缓冲交出去，重新开始。**这一步不能漏** ——
-  // 漏了的话，下一轮的流式内容会接在上一轮的屁股后面
+  // 完整回复到了：缓冲交出去并重新开始。漏了这一步，下一轮的流式内容会接在
+  // 上一轮后面。
   if (frame.type === 'ASSISTANT_MESSAGE') {
     return EMPTY_STREAMING
   }
-  // **一轮收了尾也要清。** 光等 ASSISTANT_MESSAGE 是不够的：**被打断的那一轮永远
-  // 不会有它**（模型没说完），于是缓冲一直挂着 —— 界面上就表现为"它还在跑"，
-  // 而它早就停了。哪些状态算"这截不会再长了"由状态自己那张表说（见 lib/sessionState）
+  // 一轮收尾也要清：被打断的那一轮永远不会有 ASSISTANT_MESSAGE，缓冲会一直挂着，
+  // 界面表现为它还在跑。哪些状态清理由 lib/sessionState 的表决定。
   if (frame.type === 'SESSION_STATE_CHANGED') {
     if (dropsStreaming(str(p.to))) {
       return EMPTY_STREAMING
@@ -853,14 +761,11 @@ export function foldStreaming(current: Streaming, frame: Frame): Streaming {
 /**
  * 一轮收尾之后，把还挂着的调用补成"没有结果"。
  *
- * <h2>它是兜底，不是正路</h2>
- * 正常路径上每条调用都有自己的收尾（结果 / 被取消 / 进程中断 / 被拒绝），所以这一扫
- * 什么都不做。而一旦哪条路**漏写了收尾**，界面上那一行就会一直闪 —— 这个 bug 真踩过，
- * 而且踩了两回（拒绝那条路），所以宁可多一道网。
+ * 这是兜底，不是正路：正常路径上每条调用都有自己的收尾（结果 / 取消 / 中断 /
+ * 拒绝），一旦哪条路漏写收尾，那一行会一直闪。
  *
- * <h2>批过的调用**不能扫**</h2>
- * 它没跑完是因为**马上要跑**：批准之后会话状态会短暂回到"等用户"，然后接着执行。
- * 扫了它，一条明明跑起来的调用会被说成"没有结果" —— 那就从"少报"变成了"错报"。
+ * 批过的调用不能扫：它没跑完是因为马上要跑（批准后状态短暂回到"等用户"，然后
+ * 继续执行），扫了会把一条即将运行的调用错报成"没有结果"。
  */
 function closeDanglingCalls(items: StreamItem[]): StreamItem[] {
   const approvedPending = new Set<string>()
@@ -879,34 +784,27 @@ function closeDanglingCalls(items: StreamItem[]): StreamItem[] {
 }
 
 /**
- * 回滚那条提示怎么说。
+ * 回滚提示的措辞。
  *
- * <h2>为什么不再说"回滚到第 N 轮"</h2>
- * 那个 N 是**计数器**（"完成过几次交互"），不是人眼里的位置。它从前就写在这儿，
- * 而真发生过的是这样：用户选的是"退到写斐波那契那句之前"，屏幕上出现的是
- * "回滚到第 0 轮"。那句话本身没错（计数器确实退到了 0），可它读起来像"退错了"，
- * 而**到底退到了哪儿一个字也没说**。
+ * 不说"回滚到第 N 轮"：N 是"完成过几次交互"的计数器，不是人眼里的位置，读起来
+ * 像退错了，却没说明到底退到哪儿。改为念出被截掉的第一句用户消息，即"从这儿
+ * 开始没有了"。
  *
- * <p>所以改成把人选的那句话念出来：被截掉的第一句，就是"从这儿开始没有了"那一句。
+ * @param before 回滚前那份完整列表：要念的话在被截掉的那一段里
+ * @param at     位置标记在 before 里的下标；-1 表示没找到（于是没截断）
  *
- * @param before 回滚发生**之前**那份完整的列表 —— 要念的那句话在**被截掉的那一段**里，
- *               所以这里收的必须是截断前的（收截断后的那份就永远念不出话来，
- *               只能落到"回滚了这条会话"那一支）
- * @param at     那个位置标记在 {@code before} 里的下标；-1 = 没找到（不截断，也就没退掉谁）
- *
- * <p>这条小字**不含"谁退的"** —— 名字在渲染时按 id 现查（见 {@link StreamItem} 上的 actorId）。
+ * 提示不包含"谁退的"：名字在渲染时按 id 现查（见 {@link StreamItem} 的 actorId）。
  */
 function rewindNotice(before: StreamItem[], at: number): string {
-  // at < 0 = 没找到那个位置，于是**什么都没截** —— 那种情况下"退掉了哪句话"这个问题
-  // 没有答案，不能拿"最后一条之后"来充数
+  // at < 0 表示没找到位置、什么都没截；此时"退掉了哪句话"没有答案，
+  // 不能拿"最后一条之后"充数。
   const dropped = at < 0 ? [] : before.slice(at + 1)
   const next = dropped.find((item) => item.kind === 'user')
-  // 一句都没退掉（退到最新那个位置 = 没动）时说"回滚了这条会话" —— 那时候
-  // 确实没有哪句话被退掉，硬要念一句出来反而是编的
+  // 一句都没退掉（退到最新位置）时说"回滚了这条会话"：硬念一句就是编的。
   return next?.kind === 'user' ? `回滚到「${next.text}」之前` : '回滚了这条会话'
 }
 
-/** 一条改动记录。字段缺了按"没有"算 —— 它从线上流里读来，不能假设一定完整。 */
+/** 一条改动记录。字段缺失按"没有"处理：数据从线上流里来，不能假设完整。 */
 function changedFile(raw: unknown, commitSha: string): ChangedFile {
   const file = (raw ?? {}) as Record<string, unknown>
   return {
@@ -926,8 +824,8 @@ function str(value: unknown): string {
 /**
  * 事件里的一个用户 id。
  *
- * <p>领域侧那是个值对象，序列化出来是 {@code {"value":"…"}}，不是裸字符串。
- * 两种都认 —— 于是哪天它改成裸串，这里不用跟着改。
+ * 领域侧是值对象，序列化出来是 `{"value":"…"}`；裸字符串也认，于是哪天形状改了
+ * 这里不用跟着改。
  */
 function idOf(raw: unknown): string {
   if (typeof raw === 'string') {
@@ -945,13 +843,10 @@ function num(value: unknown): number {
 }
 
 /**
- * 一个 token 数的写法：**带千位分隔符**。
+ * 一个 token 数的写法：带千位分隔符。
  *
- * <p>一轮的输入很容易到五位数，而 `123456` 和 `123,456` 对人的区别不是好看 ——
- * 是"一眼看得出量级"和"要数位数"的区别。
- *
- * <p>这里**不用** "12.2K" 那种缩写：那是给"上下文用了多少"这种几万几十万的量
- * 准备的，而一轮的用量就几千，缩写反而让人要换算一次。
+ * 一轮的输入常到五位数，分隔符让人一眼看出量级，不必数位数。不用 "12.2K" 这种
+ * 缩写：那是给几万几十万的上下文量准备的，几千的用量缩写反而要换算。
  */
 export function formatTokens(value: number): string {
   return value.toLocaleString('en-US')

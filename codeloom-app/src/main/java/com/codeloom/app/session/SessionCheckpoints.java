@@ -9,31 +9,17 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * 一条会话打过的 checkpoint —— 事件流上的一个投影。
+ * 一条会话打过的 checkpoint，是事件流上的投影。
  *
- * <h2>为什么值得单独一个类</h2>
- * {@code merge}（合到某个点）和 {@code rewind}（回到某个点）用的是**同一条规则**：
- * <strong>只接受这条会话真的打过的一个点</strong>。
+ * <p>合并（合到某个点）和回滚（回到某个点）共用一条规则：只接受这条会话真的打过的点。
+ * 不校验的话，任意 sha 都能把不认识的历史搬进主干，或 reset 到不属于这条会话的位置；
+ * 两边各写一遍则会有一天在一处放宽、另一处失去约束。
  *
- * <p>不查这条规则的话，客户端可以拿**任意**一个 sha 过来 —— 合并就是"把一个不认识的历史
- * 搬进主干"，回滚就是"reset 到一个不属于这条会话的位置"。两边各写一遍的话，
- * 某天有人在一处放宽了，另一处就失去了约束。
+ * <p>checkpoint 来自每轮结束的自动提交（见 {@code TurnExecutor}）和建会话时的第 0 号，
+ * 粒度天然是这条会话产出的一小步。
  *
- * <p>checkpoint 的来源是每轮结束那个自动提交（见 {@code TurnExecutor}），加上建会话时
- * 那个第 0 号 —— 所以它天然就是"这条会话产出的一小步"的粒度，正好是小步合并要的单位。
- *
- * <h2>同一个校验，两把键：sha 和序号</h2>
- * 两边要的东西不一样：
- *
- * <ul>
- *   <li><b>合并</b>要的是一个 <b>git 位置</b> —— 它就把那个 sha 交给 git 去 merge。
- *       好几条 checkpoint 撞同一个 sha 对合并**没有歧义**（撞车的几条本来就在同一个
- *       提交上，合哪条都是合那一个提交），所以 {@code require} 用 sha 是对的。</li>
- *   <li><b>回滚</b>要的是一个 <b>对话位置</b> —— "退到你选的那句话之前"。这个位置
- *       sha 定不了（同一轮没改文件就和上一条同 sha），所以 {@code requireAt} 用序号。</li>
- * </ul>
- *
- * <p>两把键各开一处，规则是同一条 —— 这才是这个类要守住的东西。
+ * <p>同一个校验用两把键：合并要 git 位置，用 sha（同 sha 的多条 checkpoint 指向同一提交，
+ * 没有歧义）；回滚要对话位置，用事件序号（一轮未改文件时 sha 会重复，序号不会）。
  */
 @Component
 public class SessionCheckpoints {
@@ -45,19 +31,26 @@ public class SessionCheckpoints {
     }
 
     /**
-     * 一条 checkpoint，连它在事件流里的序号。序号是回滚的定位键（见类注释）。
+     * 一条 checkpoint 及其在事件流里的序号。
      *
-     * @param seq 这条 {@code CheckpointCreated} 事件在流里的 seq
+     * @param seq        这条 {@code CheckpointCreated} 事件的 seq，是回滚的定位键
+     * @param checkpoint 事件本身
      */
     public record Pinned(long seq, CheckpointCreated checkpoint) {
     }
 
-    /** 全部 checkpoint，按发生顺序。 */
+    /**
+     * @param session 会话
+     * @return 全部 checkpoint，按发生顺序
+     */
     public List<CheckpointCreated> of(Session session) {
         return pinned(session).stream().map(Pinned::checkpoint).toList();
     }
 
-    /** 全部 checkpoint，带上序号，按发生顺序。 */
+    /**
+     * @param session 会话
+     * @return 全部 checkpoint 及序号，按发生顺序
+     */
     public List<Pinned> pinned(Session session) {
         return events.readAll(session.id()).stream()
                 .filter(stored -> stored.event() instanceof CheckpointCreated)
@@ -66,12 +59,14 @@ public class SessionCheckpoints {
     }
 
     /**
-     * 要求这个 sha 确实是这条会话打过的 checkpoint。**给合并用** —— 它要的是 git 位置。
+     * 要求这个 sha 是这条会话打过的 checkpoint；合并用，它要的是 git 位置。
      *
-     * <p>sha 撞车（一轮什么都没改）时取**最早**那条：撞车的几条指向同一个提交，
-     * 对合并来说它们就是同一个位置，取哪条都一样。
+     * <p>多条 checkpoint 同 sha（一轮没有改动）时取最早那条，它们指向同一个提交。
      *
-     * @throws IllegalArgumentException 不是 —— 那是客户端传错了，400
+     * @param session   会话
+     * @param commitSha 待校验的提交
+     * @return 对应的 checkpoint
+     * @throws IllegalArgumentException 不是这条会话的 checkpoint；调用方映射为 400
      */
     public CheckpointCreated require(Session session, String commitSha) {
         return of(session).stream()
@@ -82,12 +77,13 @@ public class SessionCheckpoints {
     }
 
     /**
-     * 要求这个序号确实是这条会话打过的一条 checkpoint。**给回滚用** —— 它要的是对话位置，
-     * 而那个位置只有序号定得住（见类注释里"两把键"那段）。
+     * 要求这个事件序号是这条会话打过的 checkpoint；回滚用，它要的是对话位置，
+     * 而该位置只有序号定得住。序号不重复，因此没有"取哪一条"的问题。
      *
-     * <p>序号不重复，所以这里不存在"取哪一条"的问题：要么就是它，要么没有。
-     *
-     * @throws IllegalArgumentException 不是 —— 那是客户端传错了，400
+     * @param session 会话
+     * @param seq     checkpoint 事件的 seq
+     * @return 对应的 checkpoint 与序号
+     * @throws IllegalArgumentException 这条会话没有该序号的 checkpoint；调用方映射为 400
      */
     public Pinned requireAt(Session session, long seq) {
         return pinned(session).stream()

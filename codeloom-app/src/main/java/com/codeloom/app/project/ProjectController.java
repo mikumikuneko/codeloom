@@ -33,12 +33,10 @@ import java.util.List;
 /**
  * 项目接口。
  *
- * <p>{@code @ConditionalOnWebApplication} 是这条规则的一部分：只在 servlet Web 应用里存在，
- * 于是那些不启容器的测试拿到的上下文里没有 Web 层。理由见 {@code SecurityConfig} 的类注释。
+ * <p>只在 servlet Web 应用里存在（{@code @ConditionalOnWebApplication}），因此不启容器的
+ * 测试拿到的上下文没有 Web 层；理由见 {@code SecurityConfig} 的类注释。
  *
- * <p>请求体是**控制器内部**的嵌套 record（只有这个控制器用它），
- * 而响应体是顶层的 record（服务层要负责组装它）。这条分工让"传输形状"和
- * "业务结果"各自待在该待的地方。
+ * <p>请求体是控制器内部的嵌套 record（只在这里使用），响应体是顶层 record（由服务层组装）。
  */
 @RestController
 @RequestMapping("/api/projects")
@@ -60,23 +58,28 @@ public class ProjectController {
         this.diffs = diffs;
     }
 
+    /**
+     * 建一个项目；创建者成为第一个成员和房主。
+     *
+     * @param request 项目名；为空时由领域校验拒绝，以 400 返回
+     * @return 新项目视图
+     */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public ProjectView create(Principal principal, @RequestBody CreateProjectRequest request) {
         User me = currentUser.require(principal);
-        // 名字的校验在领域里（Project 的紧凑构造器），这里不重复一遍 ——
-        // 重复的那一份迟早会和另一份不一致。空名字会以 400 出去，见 ApiExceptionHandler
+        // 名字校验在领域里（Project 的紧凑构造器），这里不重复，否则两份规则迟早不一致
         return projects.view(projects.create(me, request.name()));
     }
 
     /**
-     * 下载这个项目（**主干**那个版本，zip）。
+     * 下载这个项目的主干版本（zip）。
      *
-     * <p>响应用 {@code Content-Disposition: attachment}，交给浏览器自己那条下载通路 ——
-     * 前端只要一个链接就够了，不必先取回 blob 再存盘。
-     *
-     * <p>导出物是临时文件，所以由这里负责**发完就删**：流式响应体里 finally 那段，
+     * <p>响应用 {@code Content-Disposition: attachment}，由浏览器走自己的下载通路，
+     * 前端只需要一个链接。导出物是临时文件，由这里在流式响应体的 finally 里发完就删，
      * 成功和失败两条路都会走到。
+     *
+     * @return zip 流；文件在响应结束后删除
      */
     @GetMapping("/{projectId}/archive")
     public ResponseEntity<StreamingResponseBody> archive(Principal principal,
@@ -92,8 +95,7 @@ public class ProjectController {
                 archives.discard(archived);
             }
         };
-        // 文件名可能是中文：ContentDisposition 会写成 RFC 5987 那种带编码的形式，
-        // 浏览器拿到的仍是原来的名字
+        // 文件名可能是中文：ContentDisposition 写成 RFC 5987 的编码形式，浏览器仍拿到原名
         String disposition = ContentDisposition.attachment()
                 .filename(archived.downloadName(), StandardCharsets.UTF_8).build().toString();
         return ResponseEntity.ok()
@@ -103,13 +105,15 @@ public class ProjectController {
     }
 
     /**
-     * 某一轮里某个文件改了什么 —— 一段 diff 正文。
+     * 某一轮里某个文件改了什么，即一段 diff 正文。仅限成员。
      *
-     * <p>成员限定，和上面那条一样：这两个动作都是"读这个项目的仓库"。
+     * <p>{@code commitSha} 来自 {@code WorkspaceChanges} 事件，{@code path} 是项目相对路径
+     * （事件里记的就是这个形状）。提交取不到时返回 404：提交可能已被回收，而"问不出来"
+     * 和"没改过"是两件事。
      *
-     * <p>{@code commitSha} 来自 {@code WorkspaceChanges} 那条事件，{@code path} 是
-     * **项目相对**路径（事件里记的就是这个形状）。取不到就 404 —— 提交可能已经被回收，
-     * 而"问不出来"和"没改过"是两件事，界面上不该长得一样。
+     * @param commitSha 这一轮的提交
+     * @param path      项目相对路径
+     * @return diff 正文与是否被截断
      */
     @GetMapping("/{projectId}/diff")
     public FileDiffView diff(Principal principal,
@@ -123,14 +127,11 @@ public class ProjectController {
     }
 
     /**
-     * 「我的项目」——只列这个人参与的，不是全库的。
-     *
-     * <p>**分页**：这个列表没有上限，而不分页的话，某个用户攒够几千个项目之后
-     * 那一次请求就会把整张表扫出来。上限由服务端夹住，理由和事件流那边一样 ——
-     * 一个客户端不该能要求一次拉回无限多。
+     * 「我的项目」，只列这个人参与的。分页上限由服务端夹住，客户端不能要求一次拉回无限多。
      *
      * @param offset 跳过多少条；负数按 0 处理（MySQL 的 {@code OFFSET} 不接受负数）
-     * @param limit  这一页最多多少条
+     * @param limit  这一页最多多少条；夹在 1 到 {@link PageLimits#MAX} 之间
+     * @return 这一页项目
      */
     @GetMapping
     public List<ProjectView> mine(Principal principal,
@@ -140,6 +141,11 @@ public class ProjectController {
         return projects.listFor(me.id(), Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
     }
 
+    /**
+     * 单个项目；仅限成员。
+     *
+     * @return 项目视图
+     */
     @GetMapping("/{projectId}")
     public ProjectView one(Principal principal, @PathVariable String projectId) {
         User me = currentUser.require(principal);
@@ -148,19 +154,14 @@ public class ProjectController {
     }
 
     /**
-     * 退出项目。**每个成员都能做，房主也一样** —— 没有"删除项目"这个动作。
+     * 退出项目：每个成员都能做，房主也一样，没有"删除项目"这个动作。
      *
-     * <p>退出带走的是**他自己的**：名下会话（连同事件流和幂等键）、他那棵树
-     * （库里的行 + 磁盘上的目录）。聊天记录和邀请不动，它们挂在项目上。
+     * <p>带走他名下的会话（连同事件流和幂等键）和他那棵树（库里的行与磁盘目录）；
+     * 聊天记录和邀请挂在项目上，不动。房主退出时项目转给剩下的人；最后一个人退出时
+     * 项目连同仓库目录一起消失，界面靠 {@code ProjectView.ownerId} 判断该说哪一句。
      *
-     * <p>他是房主时项目转给剩下那个人；他是最后一个人时，项目本身跟着消失
-     * （连仓库目录一起）。所以同一句"退出"，对不同的人意味着不同的事 ——
-     * 而界面要能把这件事说出来（它靠 {@code ProjectView.ownerId} 判断该说哪一句）。
-     *
-     * <p>路径里的 {@code me} 不是啰嗦：这个动作只能对自己做。将来真要支持
-     * "把队友踢出去"，那条路径会长得不一样，而且它要过的是另一套权限判断。
-     *
-     * <p>204 而不是 200：没有内容要说。
+     * <p>路径里的 {@code me} 表示这个动作只能对自己做；支持"踢人"时是另一条路径，
+     * 权限判断也不同。返回 204，因为响应没有内容。
      */
     @DeleteMapping("/{projectId}/members/me")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -170,17 +171,18 @@ public class ProjectController {
         projects.leave(access.requireMember(me.id(), id), me.id());
     }
 
-    // 「把一个人拉进项目」不在这里 —— 它是**邀请链接**，见 InvitationController。
-    // **两条路做同一件事就会在某处不一致**（上限检查、留痕、谁能做），
-    // 所以只保留邀请链接这一条。
+    // 「把一个人拉进项目」不在这里，而是邀请链接（见 InvitationController）：
+    // 两条路做同一件事迟早会在上限检查、留痕或权限上不一致。
 
+    /**
+     * @param name 项目名；为空时由领域校验拒绝
+     */
     public record CreateProjectRequest(String name) {
     }
 
     /**
      * @param text      统一的 diff 正文
-     * @param truncated 正文被截断了。**必须让界面看得见** —— 一份截断的 diff 与
-     *                  "只改了这么多"长得一模一样
+     * @param truncated 正文被截断；界面必须显示这一点，否则截断的 diff 与"只改了这么多"无法区分
      */
     public record FileDiffView(String text, boolean truncated) {
     }

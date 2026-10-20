@@ -14,10 +14,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 这是安全边界的测试。
- *
- * <p>工具参数全部来自模型输出 —— 也就是不可信输入。没有这道守卫，
- * {@code read_file} 就是任意文件读取，{@code edit_file} 就是任意文件写入。
+ * 路径守卫的安全边界测试。工具参数来自模型输出；没有守卫，读文件和改文件工具
+ * 就是任意文件读写。
  */
 class WorkspacePathGuardTest {
 
@@ -68,7 +66,7 @@ class WorkspacePathGuardTest {
         assertThat(WorkspacePathGuard.resolve(worktree, "src/main/java/Foo.java"))
                 .isEqualTo(worktree.toAbsolutePath().normalize().resolve("src/main/java/Foo.java"));
 
-        // ./ 前缀与重复分隔符都会被 normalize 掉
+        // ./ 前缀与重复分隔符由 normalize 消除。
         assertThat(WorkspacePathGuard.resolve(worktree, "./src//main/java/Foo.java"))
                 .isEqualTo(WorkspacePathGuard.resolve(worktree, "src/main/java/Foo.java"));
     }
@@ -83,7 +81,7 @@ class WorkspacePathGuardTest {
     @Test
     @DisplayName("名字里带 .. 但【不是】路径穿越的，不能误伤")
     void doesNotOverBlockLegitimateNames() {
-        // "..foo" 是合法文件名，不是上级目录
+        // "..foo" 是合法文件名，不是上级目录。
         assertThat(WorkspacePathGuard.resolve(worktree, "..foo/bar.txt"))
                 .isEqualTo(worktree.toAbsolutePath().normalize().resolve("..foo/bar.txt"));
 

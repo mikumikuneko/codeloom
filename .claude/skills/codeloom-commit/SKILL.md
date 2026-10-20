@@ -19,7 +19,7 @@ description: Use when writing, rewriting or reviewing a git commit message in th
 
 ## 首行
 
-`<type>(<scope>): <主题>`
+`type(scope): 主题`
 
 - type 小写英文，主题用中文；scope 能点名范围就写，代表不了整个提交就省略。
 - 主题不超过 50 字符，说"这个提交做什么"（祈使语气），句尾不加句号。
@@ -81,17 +81,17 @@ emitter 的超时回调原来只关订阅，没管这次请求本身。于是超
 
 ## 提交与改写
 
-- 中文一律写进文件，用 `git commit -F <文件>` —— 控制台是 GBK，中文走命令行参数会乱。
+- 中文一律写进文件，用 `git commit -F MESSAGE_FILE` —— 控制台是 GBK，中文走命令行参数会乱。
 - 推之前把首行和正文给用户看，等他点头。
 - 重写既有提交（改消息、合并）之后核三样 —— 每条 tree、作者与提交者、两个时间戳 —— 改消息不该改内容：
 
   ```bash
-  git log --format='%T %an %ae %at %cn %ce %ct' <旧头> > /tmp/a
-  git log --format='%T %an %ae %at %cn %ce %ct' <新头> > /tmp/b
+  git log --format='%T %an %ae %at %cn %ce %ct' OLD_HEAD > /tmp/a
+  git log --format='%T %an %ae %at %cn %ce %ct' NEW_HEAD > /tmp/b
   diff /tmp/a /tmp/b    # 空 = 三样都没动
   ```
 
-  核对完用 `git push --force-with-lease`，并在推后用 `git ls-remote origin <分支>` 独立核一遍远端。
+  核对完用 `git push --force-with-lease`，并在推后用 `git ls-remote origin BRANCH` 独立核一遍远端。
 
 ## 判例
 

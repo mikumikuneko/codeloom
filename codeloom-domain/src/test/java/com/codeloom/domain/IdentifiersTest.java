@@ -11,15 +11,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 四个标识值对象：只做一件事 —— **拒绝不合法的自己**。
- *
- * <h2>为什么四个放在一个文件里</h2>
- * 它们是同一个模式（{@code record} + 构造器里一条校验 + 一个 {@code of} 工厂），
- * 各写一个测试类会得到四份几乎相同的文件。这里的价值在于把"每个 id 都拒空值"
- * 这件事**一次性钉住**：哪天新增第五个 id 类型时，读这个文件的人会知道它有这个义务。
- *
- * <p>校验之所以必须在这里，是因为它**没有第二个地方兜底**：从 HTTP 请求体里
- * 反序列化出来的 id 会直接进领域，没有一层 Spring 校验拦着。
+ * 四个标识值对象的构造校验。它们放在一起是因为同一模式（record、构造器校验、of 工厂）；
+ * 校验必须在这里，因为 HTTP 请求体反序列化出的 id 会直接进入领域，没有第二层拦截。
  */
 class IdentifiersTest {
 

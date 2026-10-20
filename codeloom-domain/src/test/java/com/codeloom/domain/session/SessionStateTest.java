@@ -16,8 +16,7 @@ import static com.codeloom.domain.session.SessionState.THINKING;
 import static com.codeloom.domain.session.SessionState.WAITING_USER;
 
 /**
- * 这个测试类不需要 Spring、不需要数据库、不需要 mock 任何东西 ——
- * 这正是把 domain 做成零依赖模块换来的。
+ * 状态机测试：不需要 Spring、数据库或 mock，这正是 domain 零依赖带来的。
  */
 class SessionStateTest {
 
@@ -61,8 +60,9 @@ class SessionStateTest {
     class EscapeHatch {
 
         @ParameterizedTest
-        @EnumSource(value = SessionState.class, names = {"IDLE", "THINKING", "EXECUTING_TOOL", "WAITING_USER"})
-        @DisplayName("四个非终态都能进 FAILED")
+        @EnumSource(value = SessionState.class,
+                names = {"IDLE", "THINKING", "EXECUTING_TOOL", "WAITING_USER", "AWAITING_APPROVAL"})
+        @DisplayName("五个非终态都能进 FAILED")
         void anyNonTerminalCanFail(SessionState from) {
             assertThat(from.canTransitionTo(FAILED)).isTrue();
         }

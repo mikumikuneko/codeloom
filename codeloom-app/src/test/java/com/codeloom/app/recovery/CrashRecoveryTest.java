@@ -65,7 +65,7 @@ class CrashRecoveryTest {
     void interruptedToolCallsAreRecordedAsFacts() {
         Session session = savedSession();
         appendToolCall(session, "call_1");
-        // 注意：**没有**对应的 ToolResult —— 模拟"进程在工具执行中途被杀"
+        // 注意：没有对应的 ToolResult —— 模拟"进程在工具执行中途被杀"
 
         recovery.recover(session);
 
@@ -91,15 +91,15 @@ class CrashRecoveryTest {
         Session session = savedSession();
         appendToolCall(session, "call_1");
         appendEvent(session, new ToolApprovalRequested("call_1", "测试：这条命令要人批一下"));
-        // 它就停在这儿等人 —— 没有 ToolResult，而且那是**刻意的**：
+        // 它就停在这儿等人 —— 没有 ToolResult，而且那是刻意的：
         // 那个调用压根还没跑，它的"结果"要等用户答复时那条 ToolApprovalResolved
 
         recovery.recover(session);
 
         // ★ 这一条守的不是"少写一条事件"，而是「重启之后那个批准还点得动」。
         //   从前这里会补一条 ToolInterrupted，它在 TurnStates 里映成 THINKING ——
-        //   而 AWAITING_APPROVAL → THINKING 是非法迁移，于是**重启一次，
-        //   那个等着你点的批准就变成了一个 FAILED**
+        //   而 AWAITING_APPROVAL → THINKING 是非法迁移，于是重启一次，
+        //   那个等着你点的批准就变成了一个 FAILED
         assertThat(interruptedCallIds(session)).isEmpty();
     }
 
@@ -142,7 +142,7 @@ class CrashRecoveryTest {
         recovery.recover(session);
 
         // 补写过的会从"待补"名单里划掉，所以第二次开始什么也不做。
-        // 这一点很重要：这条路径**没有**"只跑一次"的机制保证（比如启动标记），
+        // 这一点很重要：这条路径没有"只跑一次"的机制保证（比如启动标记），
         // 它的安全性来自"重复执行不产生额外效果"这件事本身
         assertThat(interruptedCallIds(session)).containsExactly("call_1");
     }
@@ -153,7 +153,7 @@ class CrashRecoveryTest {
         Session session = savedSession();
         appendToolCall(session, "call_1");
 
-        // 注意持的是**这棵树**的租约 —— 换个人（另一棵树）持锁不影响这条
+        // 注意持的是这棵树的租约 —— 换个人（另一棵树）持锁不影响这条
         LeaseToken heldElsewhere = leases.tryAcquire(session).orElseThrow();
         try {
             recovery.recover(session);

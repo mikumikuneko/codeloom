@@ -9,29 +9,29 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * {@code user_api_key} 表的读写。**每家一把**（主键是 user_id + provider）。
+ * {@code user_api_key} 表的读写。每家一把，主键是 {@code user_id + provider}。
  *
- * <h2>它故意不返回"行"对象</h2>
- * 别的表都有一个 Row 记录在中间转一手，这里没有 —— 因为这张表的形和领域对象
- * **没有对应关系**（领域里根本没有"密钥"这个东西，那正是设计的一部分）。
- * 一个只为了在两处之间搬运一个字符串的 Row 类型，只会让人以为那里有什么可映射的语义。
- *
- * <p>方法名用 {@code sealedKey} 而不是 {@code apiKey}，是提醒读代码的人：
- * **这一层碰到的永远只有密文**。明文只在 {@code SecretCipher} 的两端各出现一瞬间。
+ * <p>故意不返回行对象：这张表的形状和领域对象没有对应关系，领域里根本没有“密钥”。
+ * 方法名用 {@code sealedKey} 而不是 {@code apiKey}：这一层碰到的永远只有密文，
+ * 明文只出现在 {@code SecretCipher} 的两端。
  */
 @Mapper
 public interface ApiKeyMapper {
 
     /**
-     * 存下（或替换）某个端点的密文。
+     * 存下或替换某个服务商的密文。
      *
-     * <p><strong>{@code name} 和 {@code base_url} 是可空的，而 upsert 会把它们写成新的
-     * 值（包括写回 NULL）。</strong>那是有意的：这两个字段是用户在编辑界面上直接改的，
-     * "把名字清空"必须能生效。
+     * <p>{@code name} 和 {@code base_url} 可空，upsert 会把它们写成新值，包括写回 NULL：
+     * 用户要能把名字清空。{@code created_at} 只在插入时写，换 key 不会抹掉
+     * “什么时候开始用这家”。
      *
-     * <p>{@code created_at} 只在插入时写、更新时不碰 —— 和 {@code user} 表同一个道理：
-     * 它记的是"第一次在这个端点上配置"的时间，不是"最后一次写这一行"，所以换一把 key
-     * **不会**把"我什么时候开始用这家"这件事抹掉。
+     * @param userId    用户 id
+     * @param provider  服务商标识
+     * @param name      显示名，可以为 null
+     * @param baseUrl   自定义请求地址，预设服务商为 null
+     * @param sealedKey 密文
+     * @param now       本次写入时间
+     * @return 受影响行数
      */
     @Insert("""
             INSERT INTO user_api_key
@@ -52,17 +52,36 @@ public interface ApiKeyMapper {
              @Param("sealedKey") String sealedKey,
              @Param("now") Instant now);
 
+    /**
+     * 读某一家的密文。
+     *
+     * @param userId   用户 id
+     * @param provider 服务商标识
+     * @return 密文；没有配置时为 null
+     */
     @Select("SELECT sealed_key FROM user_api_key "
             + "WHERE user_id = #{userId} AND provider = #{provider}")
     String findSealedKey(@Param("userId") String userId,
                          @Param("provider") String provider);
 
+    /**
+     * 删除某一家的密钥。
+     *
+     * @param userId   用户 id
+     * @param provider 服务商标识
+     * @return 受影响行数
+     */
     @Delete("DELETE FROM user_api_key "
             + "WHERE user_id = #{userId} AND provider = #{provider}")
     int delete(@Param("userId") String userId,
                @Param("provider") String provider);
 
-    /** 配过哪几家。**不查 sealed_key** —— 这个方法没有任何理由碰密文。 */
+    /**
+     * 配过哪几家。不查 {@code sealed_key}，这个方法没有理由碰密文。
+     *
+     * @param userId 用户 id
+     * @return 已配置的服务商，按 provider 排序
+     */
     @Select("SELECT provider, base_url AS baseUrl, name,"
             + " updated_at AS configuredAt "
             + "FROM user_api_key WHERE user_id = #{userId} ORDER BY provider")

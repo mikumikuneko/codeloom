@@ -21,12 +21,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 跑**真的 git**，用真的临时目录。
+ * 用真 git 和真实临时目录验证仓库操作，不需要 Spring 或数据库。
  *
- * <p>不需要 Spring，也不需要数据库 —— 这正是把 workspace 做成只依赖 domain 的回报。
- *
- * <p>这里每个 {@code 【实验回归】} 标注的用例，都对应设计阶段那次实验里真实踩到的一个坑。
- * 它们存在的意义是：**别让同样的坑再踩第二次**。
+ * <p>标注"实验回归"的用例各自固定一个已知的回归场景。
  */
 class GitClientTest {
 
@@ -77,9 +74,23 @@ class GitClientTest {
         }
 
         @Test
+        @DisplayName("【安全约束】本地配置里的外部 diff 程序不会被执行")
+        void externalDiffConfiguredInTheRepoIsIgnored() throws IOException {
+            Files.writeString(repo.resolve("a.txt"), "第一行\n", StandardCharsets.UTF_8);
+            commit("base");
+            Files.writeString(repo.resolve("a.txt"), "第一行\n第二行\n", StandardCharsets.UTF_8);
+            String sha = commit("加一行");
+
+            // 设成一个必然失败的命令：少了 --no-ext-diff，git 会执行它并让整条命令失败
+            TestGit.run(repo, "config", "diff.external", "false");
+
+            assertThat(git.diffOfFile(repo, sha, "a.txt", 100_000).text()).contains("+第二行");
+        }
+
+        @Test
         @DisplayName("正文太大就截断并**如实标记**，不报错 —— 截一段仍然有用")
         void aHugeDiffIsTruncatedRatherThanRefused() throws IOException {
-            // 基点提交由 initRepo 打过了，这里不另打一次空的
+            // 基点提交已由 initRepo 打出，这里不再补空提交
             Files.writeString(repo.resolve("big.txt"), "x".repeat(2_000) + "\n",
                     StandardCharsets.UTF_8);
             String sha = commit("加一个大文件");
@@ -101,9 +112,8 @@ class GitClientTest {
         @Test
         @DisplayName("那个路径这一步没动过 → 空的正文。**git 不把这当错**")
         void aPathThatDidNotChangeGivesAnEmptyDiff() throws IOException {
-            // 这条钉的是实际行为：路径对不上时 git 退出码是 0、输出为空。
-            // 所以"取不到"和"没改过"在存储层是分不开的 —— 那种区分只能由调用方
-            // 拿着事件里记过的路径来保证（见 ProjectDiff）
+            // 路径对不上时 git 退出码为 0、输出为空，因此"取不到"和"没改过"在存储层
+            // 无法区分；该区分只能由调用方依据事件里记录的路径保证（见 ProjectDiff）
             Files.writeString(repo.resolve("a.txt"), "第一行\n", StandardCharsets.UTF_8);
             commit("base");
             Files.writeString(repo.resolve("a.txt"), "改了\n", StandardCharsets.UTF_8);
@@ -129,10 +139,9 @@ class GitClientTest {
         @Test
         @DisplayName("initRepo 把**已经躺在目录里**的东西一并打进基点，而不是留成未跟踪")
         void baseCommitIncludesWhatIsAlreadyInTheDirectory() throws IOException {
-            // 调用方会先放好新项目该有的内容（现在是那个 untitled/ 的占位文件）。
-            // 它们必须落在**基点**里：两棵树都是从基点 checkout 出来的，
-            // 未跟踪的文件不会被 checkout，于是两个人在自己的树里都看不到它 ——
-            // 而它在主仓库的磁盘上是存在的，那种"看得见目录、树里没有"最难查
+            // 调用方会先放好新项目该有的内容（untitled/ 的占位文件）。它们必须进入基点
+            // 提交：两棵树从基点 checkout，未跟踪文件不会被带过去，而它在主仓库磁盘上
+            // 又确实存在，这种"看得见目录、树里没有"最难排查
             Path seed = repo.resolve("untitled");
             Files.createDirectories(seed);
             writeFile(seed, "README.md", "");
@@ -173,8 +182,7 @@ class GitClientTest {
         void refsExistAfterInit() throws Exception {
             git.initRepo(repo, alice);
 
-            // 这里问的是 git 自己 —— 从前问的是 GitClient 自带的查询方法，
-            // 那是拿被测代码去断言被测代码：包装错了会一起错、一起绿
+            // 直接问 git：用 GitClient 自己查询等于用被测代码断言被测代码
             assertThat(TestGit.run(repo, "rev-parse", "-q", "--verify", "main^{commit}")).isNotEmpty();
             assertThat(TestGit.output(repo, "rev-parse", "-q", "--verify", "session/does-not-exist^{commit}")).isEmpty();
             assertThat(TestGit.output(repo, "branch", "--list", "session/does-not-exist")).isEmpty();
@@ -262,9 +270,8 @@ class GitClientTest {
         @Test
         @DisplayName("【大文件】冲突的一方大到超过输出上限时**报错**，而不是交出一份被截断的内容")
         void anOversizedConflictSideFailsInsteadOfShowingHalfAFile() {
-            // 4M 字符的上限对"一条提交改十万个文件"够宽，但对**一个被冲突的大文件**
-            // （锁文件、打包产物、生成出来的 JSON）正好不够。从前这里会把截断过的内容
-            // 交出去让人挑"留哪一边"，而没有任何地方会报错 —— 最坏的那种 bug
+            // 4M 字符对改十万个文件够宽，但对一个被冲突的大文件（锁文件、打包产物、
+            // 生成的 JSON）不够；交出一份截断内容让人裁决而无人报错，是最坏的行为
             git.initRepo(repo, alice);
             Path a = newSession("A");
             Path b = newSession("B");
@@ -377,9 +384,8 @@ class GitClientTest {
         @Test
         @DisplayName("能数出一段区间里有几个提交 —— 「先同步再合」那道顺序靠它守门")
         void countsCommitsInARange() {
-            // 它守的是合并前那道"我有没有落后于主干"的检查：落后就拒绝合并、让人先同步。
-            // 少算了会放行一次本可以避免的冲突（冲突于是撞在主干上），
-            // 多算了会让人不明不白地合不动
+            // 它支撑合并前"是否落后主干"的检查：少算会放行本可避免的冲突，
+            // 多算会让人无法合并
             git.initRepo(repo, alice);
             Path a = newSession("A");
             writeFile(a, "a.txt", "a\n");
@@ -401,7 +407,7 @@ class GitClientTest {
         return worktree;
     }
 
-    /** worktree 是主仓库的**兄弟目录**，不是子目录 —— 放里面会让仓库自己的 git 看见它。 */
+    /** worktree 是主仓库的兄弟目录，不是子目录；放在里面会被仓库自己的 git 看见。 */
     private Path sessionPath(String name) {
         return repo.getParent().resolve("ws-" + name);
     }

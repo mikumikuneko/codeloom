@@ -16,14 +16,11 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 /**
- * 按正则搜索工作区里的文件内容。
+ * 按正则搜索工作区里的文件内容，返回 {@code 文件:行号:内容}。
  *
- * <h2>这就是我们不做 RAG 的原因</h2>
- * 代码是**精确匹配**的、不是语义相似的。模型要找 {@code OrderService} 的定义，
- * grep 给的是确定的答案；embedding 给的是"看起来相关"的一堆东西。
- * 而且 grep 不需要建索引、不会过期、结果可复现。
- *
- * <p>遍历由 {@link WorkspaceFiles} 负责（含噪声目录剪枝），本类只管匹配。
+ * <p>代码检索需要精确匹配而不是语义相似；本工具不建索引、结果可复现。见
+ * {@code docs/decisions/architecture/2026-09-24-search-code-with-grep-not-embeddings.md}。
+ * 遍历与噪声目录剪枝由 {@link WorkspaceFiles} 负责。
  */
 public final class GrepTool implements Tool {
 
@@ -57,7 +54,7 @@ public final class GrepTool implements Tool {
                 """;
     }
 
-    /** 只读：可以和同一批里的其它只读调用并发跑，见 {@link Tool#concurrencySafe()}。 */
+    /** 只读，可与同一批的只读调用并发；见 {@link Tool#concurrencySafe()}。 */
     @Override
     public boolean concurrencySafe() {
         return true;
@@ -65,8 +62,7 @@ public final class GrepTool implements Tool {
 
     @Override
     public ToolSurface surface() {
-        // 主语取【被搜的那个模式】而不是搜在哪儿：人看这一行，想看的是"在找什么"。
-        // 搜的范围是这次调用的状语，不是主语 —— 而"在哪"由结果里的路径回答
+        // 主语是被搜索的模式；搜索范围由结果路径体现。
         return ToolSurface.of(ToolSurface.Shape.SEARCH, "搜索", "pattern");
     }
 
@@ -102,7 +98,7 @@ public final class GrepTool implements Tool {
         boolean[] reachedLimit = {false};
 
         try {
-            // 谓词返回 false = 够了，遍历立即终止 —— 不用先把整棵树收成 List
+            // 谓词返回 false 时立即终止遍历。
             WorkspaceFiles.walk(root, file -> {
                 if (!matchesInclude(includeMatcher, file)) {
                     return true;
@@ -126,13 +122,20 @@ public final class GrepTool implements Tool {
                 ToolOutcome.Failure.NONE, false);
     }
 
-    /** @return true 表示已经达到上限、该停了 */
+    /**
+     * 扫描一个文件。
+     *
+     * @param worktree   工作区根目录
+     * @param file       文件
+     * @param pattern    模式
+     * @param hits       命中收集器
+     * @param maxResults 上限
+     * @return true 表示达到上限、应当停止遍历
+     */
     private static boolean scan(Path worktree, Path file, Pattern pattern,
                                 List<String> hits, int maxResults) {
         String relative = WorkspacePathGuard.relativize(worktree, file);
-        // **逐行流式读**，不先把整个文件读成行的列表：一次搜索要为遍历到的每个文件
-        // 做这件事，而大多数文件整份都不匹配 —— 那就等于把它们全部物化一遍再丢掉。
-        // 达到上限时也要能立刻停下，而 readAllLines 已经把整份读完了
+        // 逐行读取，避免为每个文件物化整份内容；达到上限时也能立即停止。
         try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
             String line;
             int lineNumber = 0;
@@ -147,7 +150,7 @@ public final class GrepTool implements Tool {
                 }
             }
         } catch (IOException e) {
-            return false;   // 读不了就跳过（二进制或编码问题），不该让整个搜索失败
+            return false;   // 跳过不可读文件（二进制或编码问题），不让整个搜索失败
         }
         return false;
     }

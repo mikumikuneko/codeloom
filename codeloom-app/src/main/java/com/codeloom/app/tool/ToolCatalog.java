@@ -4,24 +4,14 @@ import com.codeloom.agent.tool.ToolRegistry;
 import org.springframework.stereotype.Component;
 
 /**
- * 进程里**唯一**那一份工具集。
+ * 进程里唯一的工具集。
  *
- * <h2>为什么要有这么一个东西</h2>
- * 每轮输入如果用现造的工具集（标准集七个、带联网九个，各自一份 schema 编译），有两个后果：
+ * <p>两套工具都在启动时构造一次：{@link ToolRegistry} 构造时逐个编译 schema 并核对
+ * "工具声明的主语真的在参数里"，这些是代码错误，应当启动即失败，而不是等第一条消息发出后
+ * 才炸。界面也从这里取同一份声明，不必按工具名自己维护一张表。
  *
- * <ol>
- *   <li><b>启动时的检查没人在启动时跑。</b>{@link ToolRegistry} 构造时会逐个编译 schema、
- *       并核对"工具声明的主语真的在它的参数里"，那些都是**写代码时的错**，
- *       本该在启动时就炸。现造的话，第一次真的炸是在第一条消息发出去的时候 ——
- *       那时你已经坐在界面前等结果了。</li>
- *   <li><b>界面要拿到同一份声明。</b>工具长什么样由工具自己声明（见 {@code ToolSurface}），
- *       而界面是另一个进程。它得从某个地方取到那份声明 —— 那个地方就是这里，
- *       而不是让界面自己按工具名再写一张表。</li>
- * </ol>
- *
- * <p>共享它是安全的：工具实现全是无状态的（它们只读参数、只写 {@code ToolContext}
- * 里交进来的东西），而 {@link ToolRegistry} 自己只持有不可变的映射。
- * 每轮会变的那些（读过哪些文件）在 {@code ReadLedger} 里，那是每轮一份的。
+ * <p>共享是安全的：工具实现无状态，{@link ToolRegistry} 只持有不可变映射；每轮变化的状态
+ * （读过哪些文件）在 {@code ReadLedger} 里，每轮一份。
  */
 @Component
 public class ToolCatalog {
@@ -29,16 +19,16 @@ public class ToolCatalog {
     private final ToolRegistry registry = ToolRegistry.standard();
     private final ToolRegistry withWeb = ToolRegistry.withWeb();
 
+    /** @return 不含联网工具的注册表 */
     public ToolRegistry registry() {
         return registry;
     }
 
     /**
-     * 带联网工具的那一套。
+     * 带联网工具的那一套。用哪一套由每轮输入决定（见 {@code TurnInputFactory}）：
+     * 没有联网能力的会话不该在工具列表里看到它们，否则模型会调用并拿到"没有联网能力"的失败。
      *
-     * <p>两套都在这里构造一次：启动检查照跑，界面也照旧从这儿取声明。
-     * **用哪一套由每轮输入决定**（见 {@code TurnInputFactory}）—— 没有联网能力的会话
-     * 不该在工具列表里看见它们，否则模型会去调、然后拿到一条"没有联网能力"的失败。
+     * @return 含联网工具的注册表
      */
     public ToolRegistry withWeb() {
         return withWeb;

@@ -2,17 +2,16 @@
 # codeloom 的中间件：MySQL + Redis
 # ================================================================
 #
-# 部署位置：一台机器上的 /etc/docker/（本项目是「应用在宿主机 + 中间件在另一台机器」
-#           的布局；那台机器在只有宿主机能访问的网段上）
+# 部署位置：目标机器的 /etc/docker/。本项目采用“应用在宿主机、中间件在另一台机器”
+# 的布局，那台机器位于只有宿主机能访问的网段。
 #
-# 本目录的结构刻意镜像目标机器上的 /etc/docker/，所以部署就是一次目录拷贝：
-#     scp -r docs/deploy/middleware/* root@<VM_IP>:/etc/docker/
+# 本目录结构镜像目标机器的 /etc/docker/，部署就是一次目录拷贝：
+#     scp -r docs/deploy/middleware/* root@VM_IP:/etc/docker/
 #
-# 下面的 bind mount 用的是【相对路径】：compose 在 /etc/docker/ 下运行时，
-# ./mysql/my.cnf 正好解析到 /etc/docker/mysql/my.cnf。
-# 写成绝对路径会让别人 clone 到别的目录后跑不起来。
+# bind mount 使用相对路径：compose 在 /etc/docker/ 下运行时，./mysql/my.cnf 解析到
+# /etc/docker/mysql/my.cnf。写成绝对路径会让别人 clone 到其他目录后无法运行。
 #
-# 口令写死在文件里（root）：本地开发用；对外部署前先改掉 —— 见 README 的最后一节。
+# 口令写死为 root，仅供本地开发；对外部署前先改掉，见 README 最后一节。
 
 name: codeloom-middleware
 
@@ -26,10 +25,10 @@ services:
       - "3306:3306"
     environment:
       MYSQL_ROOT_PASSWORD: root
-      # 【关键】不加这行，root 只能从容器内部登录，
-      # 宿主机上的应用会报 "Access denied for user 'root'@'<宿主机IP>'"
+      # 不加这行，root 只能从容器内部登录，宿主机上的应用会报
+      # "Access denied for user 'root'@'HOST_IP'"。
       MYSQL_ROOT_HOST: "%"
-      # 启动时自动建库，省掉手工 create database 那一步
+      # 启动时自动建库，省掉手工 create database。
       MYSQL_DATABASE: codeloom
       TZ: Asia/Shanghai
     volumes:

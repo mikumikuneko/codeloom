@@ -6,23 +6,17 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 /**
- * 轮询到条件成立为止 —— 用来取代测试里的 {@code Thread.sleep}。
+ * 轮询到条件成立为止，用来取代测试里的 {@code Thread.sleep}。
  *
- * <h2>固定睡一觉错在哪</h2>
- * 它把"等一个异步状态变化"写成了一个**猜测**：睡短了，慢机器上假失败；睡长了，
- * 快机器上白等。而这两种症状都只会在别人的机器或 CI 上出现 —— 本机永远是对的，
- * 所以是最难发现的那一类问题。
- *
- * <p>轮询两边都对：条件一成立就往下走，超时则如实报出**等的是哪个条件**
- * （而不是丢一句 "assertion failed"，让人回去猜）。
+ * <p>固定睡眠把等待异步变化写成猜测：睡短则慢机器上假失败，睡长则快机器上白等，
+ * 而且只在别人的机器或 CI 上出现。轮询两端都正确：条件成立立即继续，
+ * 超时则报出等待的是哪个条件，而不是只给一句 "assertion failed"。
  */
 public final class Await {
 
     /**
-     * 默认超时。
-     *
-     * <p>给得比"正常情况下需要的时间"宽得多：这些等待通常几十毫秒就成立了，
-     * 十秒是留给"机器正忙"的余量。超时**不代表慢**，代表条件真的没成立。
+     * 默认超时，远宽于正常所需：这类等待通常几十毫秒成立，十秒是留给机器繁忙的余量。
+     * 超时不代表慢，而代表条件确实没有成立。
      */
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(10);
 
@@ -47,11 +41,10 @@ public final class Await {
     }
 
     /**
-     * 反复尝试，直到**这一次**有结果。
+     * 反复尝试，直到某一次有结果。
      *
-     * <p>给"尝试本身有副作用"的场合用 —— 典型是抢锁：失败的尝试什么都没发生，
-     * 成功的那次才发号，所以不能先问"能抢到吗"再抢第二次（第二次会被自己挡住）。
-     * 调用方拿到的就是成功那一次的结果。
+     * <p>用于尝试本身有副作用的场合，典型是抢锁：失败尝试什么也没发生，成功那次才发号，
+     * 因此不能先问"能抢到吗"再抢第二次（会被自己挡住）。调用方拿到成功那次的结果。
      */
     public static <T> T untilPresent(String what, Supplier<Optional<T>> attempt) {
         return untilPresent(what, attempt, DEFAULT_TIMEOUT);

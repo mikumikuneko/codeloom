@@ -9,10 +9,8 @@ import org.springframework.http.ProblemDetail;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 一处状态码：**租约服务够不到是 503，不是 500**。
- *
- * <p>钉它是因为这两个码会把人带去完全不同的方向：500 是"我们坏了，去查缺陷"，
- * 503 是"稍后再来"。落到 500 时，客户端连退避重试都不会做。
+ * 租约服务不可达必须是 503 而不是 500：500 表示"我们坏了、去查缺陷"，
+ * 503 表示"稍后再来"；落到 500 时客户端连退避重试都不会做。
  */
 class ApiExceptionHandlerTest {
 

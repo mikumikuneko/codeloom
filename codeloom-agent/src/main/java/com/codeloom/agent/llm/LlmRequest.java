@@ -4,19 +4,15 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 一次模型调用的请求 —— IR 层，provider 无关。
+ * 一次模型调用的请求，provider 无关。
  *
- * <p>注意这里**没有 API Key**。密钥不属于领域对象，它由客户端在发起请求的最后一刻
- * 从密钥库里取（见 {@code OpenAiCompatibleClient} 的构造参数）。
+ * <p>不含 API Key：密钥由客户端在发请求前现取。也不含采样温度，请求体里不发该参数，
+ * 由服务商默认值决定（见 {@code docs/decisions/architecture/2026-10-04-temperature-is-not-sent.md}）。
  *
- * <h2>也**没有采样温度**</h2>
- * 请求体里不发这个参数，服务商的默认值说了算。理由见 {@code ModelConfig} 的类注释：
- * 发了就得挑一个值，而挑值没有依据；而"挑一个值"这件事本身也不该由我们替使用者决定。
- *
- * @param model       模型标识
- * @param messages    完整上下文。**顺序有意义**：前缀顺序稳定才能命中模型服务商的前缀缓存
- * @param tools       暴露给模型的工具；为空表示这次不提供工具
- * @param maxTokens   单次输出上限
+ * @param model    模型标识
+ * @param messages 完整上下文；顺序稳定才能命中服务商的前缀缓存
+ * @param tools    暴露给模型的工具；为空表示本次不提供工具
+ * @param maxTokens 单次输出上限
  */
 public record LlmRequest(String model,
                           List<LlmMessage> messages,
@@ -36,6 +32,9 @@ public record LlmRequest(String model,
         }
     }
 
+    /**
+     * @return 本次是否提供工具
+     */
     public boolean hasTools() {
         return !tools.isEmpty();
     }

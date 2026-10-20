@@ -23,12 +23,10 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 邀请链接，真 HTTP。
+ * 邀请链接的端到端测试（真 HTTP）。
  *
- * <h2>为什么它值得一个独立的测试类</h2>
- * 这一套的每一步都可能失败，而且失败方式各不相同：链接一次性、有保质期、能被撤销、
- * 项目还有人数上限 —— 而"点一下就进去了"这件事**看起来**太简单，
- * 简单到不会有人去想那些边界。所以边界要有名字。
+ * <p>链接一次性、有有效期、可撤销，项目还有人数上限，每种边界的失败方式都不同；
+ * "点一下就进去"看起来太简单，这些边界需要各自的用例。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -48,8 +46,8 @@ class InvitationApiTest {
 
     @AfterEach
     void cleanUp() {
-        // 真提交的东西得自己收（本类不加 @Transactional：请求跑在容器线程上，
-        // 用的是另一条连接，测试事务里的行它看不见）
+        // 真提交的数据必须自己清理。本类不加 @Transactional：请求跑在容器线程、用另一条连接，
+        // 看不见测试事务里的行
         for (ProjectId projectId : createdProjects) {
             jdbc.update("DELETE FROM project_invitation WHERE project_id = ?", projectId.value());
             jdbc.update("DELETE FROM project_member WHERE project_id = ?", projectId.value());
@@ -73,8 +71,7 @@ class InvitationApiTest {
 
         String token = issue(owner, projectId);
 
-        // 预览：**未登录**也该看得见自己在被邀请去哪 —— 否则他无从判断该不该注册。
-        // 连 cookie 都不带
+        // 预览不要求登录：未注册的人也要先看清被邀请去哪，才能决定是否注册。这里不带 cookie
         JsonNode preview = body(TestBrowser.at(port).get("/api/invitations/" + token));
         assertThat(preview.get("projectId").asText()).isEqualTo(projectId.value());
         assertThat(preview.get("usable").asBoolean()).isTrue();
@@ -98,7 +95,7 @@ class InvitationApiTest {
         TestBrowser second = newAccount();
         HttpResponse<String> again = second.post("/api/invitations/" + token + "/accept", "{}");
 
-        // 分享出去的链接会被转发、被截图。一次性是它的全部意义
+        // 分享出去的链接会被转发、截图，一次性是它的全部意义
         assertThat(again.statusCode()).isEqualTo(409);
         assertThat(again.body()).contains("已经被用过了");
     }
@@ -110,14 +107,9 @@ class InvitationApiTest {
         ProjectId projectId = createProject(owner);
         String token = issue(owner, projectId);
 
-        // 直接把它改成过期的：这是唯一能测到这条边界的办法，
-        // 而"改一条已经存在的邀请的过期时间"恰好是 schema 里**故意不允许**的事
-        // （upsert 只更新那三个列），所以只能直接写库。
-        //
-        // **两个时间要一起往前挪**：只把 expires_at 改到过去的话，
-        // `expiresAt > createdAt` 这条不变量当场就不成立了，而它是对的 ——
-        // 一张"在生成之前就过期"的邀请不是数据，是坏数据，
-        // 读回来时会被领域构造器拦下
+        // 只能直接写库：schema 刻意不允许更新已有邀请的时间（upsert 只更新那三列）。
+        // 两个时间必须一起前移，只改 expires_at 会违反 expiresAt > createdAt，
+        // 读回时被领域构造器拦下 —— 那才是坏数据
         Instant twoHoursAgo = Instant.now().minusSeconds(7200);
         jdbc.update("UPDATE project_invitation SET created_at = ?, expires_at = ? WHERE token = ?",
                 twoHoursAgo, Instant.now().minusSeconds(3600), token);
@@ -165,9 +157,8 @@ class InvitationApiTest {
         assertThat(rejected.statusCode()).isEqualTo(409);
         assertThat(rejected.body()).contains("2 名成员");
 
-        // ★ **链接没有被烧掉。** 这是刻意的：满员是可以修的
-        //（先把人移出去、或者另开一个项目），而烧掉一张凭据是修不回来的。
-        // 所以那条拒绝发生在"标记已接受"**之前**
+        // 链接没有被烧掉：满员可修（移走成员或另开项目），烧掉凭据则修不回来。
+        // 拒绝发生在标记已接受之前
         JsonNode preview = body(TestBrowser.at(port).get("/api/invitations/" + thirdToken));
         assertThat(preview.get("usable").asBoolean())
                 .as("满员被拒之后这张链接还该是能用的")
@@ -181,8 +172,7 @@ class InvitationApiTest {
         ProjectId projectId = createProject(owner);
         TestBrowser stranger = newAccount();
 
-        // 404 而不是 403：这个项目对"不是我的东西"一律装作不存在
-        //（装了的话，拿一批 id 挨个试就能枚举出系统里有哪些项目）
+        // 404 而不是 403：对"不是我的东西"一律装作不存在，否则可拿一批 id 枚举项目
         assertThat(stranger.post("/api/projects/" + projectId.value() + "/invitations", "{}")
                 .statusCode()).isEqualTo(404);
     }
@@ -202,13 +192,11 @@ class InvitationApiTest {
 
         String stillOut = issue(owner, projectId);
 
-        // 还在外面飘着的那张必须看得见 —— **看不见的凭据是最危险的**：
-        // 你忘了发过，而它还在有效期内
+        // 仍在有效期内的凭据必须可见：忘记发过的有效链接最危险
         assertThat(tokensOf(owner, projectId)).containsExactly(stillOut);
 
         owner.delete("/api/projects/" + projectId.value() + "/invitations/" + stillOut);
-        // 撤销之后它就不是凭据了 —— 清单里只该剩"现在还能用的"。
-        // 从前这里会留下一行"已撤销"，发一次攒一行，清单越看越长
+        // 撤销后不再是凭据，清单只保留当前可用的；否则每次生成都会攒下一行
         assertThat(tokensOf(owner, projectId)).isEmpty();
     }
 
@@ -221,10 +209,10 @@ class InvitationApiTest {
         String first = issue(owner, projectId);
         String second = issue(owner, projectId);
 
-        // 清单里只有新的那张（旧的不是"还在外面飘着"了）
+        // 清单里只有新的那张，旧的不再属于"仍在外面"
         assertThat(tokensOf(owner, projectId)).containsExactly(second);
 
-        // 而旧的那张**真的**死了：拿着它的人当场被告知原因，用它是进不去的
+        // 旧链接确实失效：预览给出原因，接受被拒绝
         JsonNode preview = body(TestBrowser.at(port).get("/api/invitations/" + first));
         assertThat(preview.get("usable").asBoolean()).isFalse();
         assertThat(preview.get("reason").asText()).contains("撤销");
@@ -239,19 +227,18 @@ class InvitationApiTest {
         ProjectId projectId = createProject(owner);
         String mine = issue(owner, projectId);
 
-        // 他本来就在里面，所以这一步是"成功"的（不是错误）—— 界面把他送进项目
+        // 他本来就在里面，所以这一步成功（不是错误），界面会把他送进项目
         assertThat(owner.post("/api/invitations/" + mine + "/accept", "{}").statusCode())
                 .isEqualTo(200);
 
-        // ★ **而那张链接还活着。** 它本来是发给对方的，发起人自己点一下不该把它毁掉：
-        // 从前这里会把自己记成"接受者"，于是凭据作废 —— 而清单里作废的不显示，
-        // 人会以为"对方已经加入了"
+        // 链接仍然有效：它本是发给对方的，发起人自己点一下不该毁掉凭据。
+        // 若把自己记成接受者，就看不到"对方已加入"的真实状态
         JsonNode preview = body(TestBrowser.at(port).get("/api/invitations/" + mine));
         assertThat(preview.get("usable").asBoolean())
                 .as("自己点过之后，这张链接还该是能用的")
                 .isTrue();
 
-        // 而且**真的还能用**：换个新账号点它，进得去
+        // 而且确实还能用：换一个新账号仍可加入
         assertThat(newAccount().post("/api/invitations/" + mine + "/accept", "{}").statusCode())
                 .isEqualTo(200);
     }
@@ -265,7 +252,7 @@ class InvitationApiTest {
         assertThat(member.post("/api/invitations/" + issue(owner, projectId) + "/accept", "{}")
                 .statusCode()).isEqualTo(200);
 
-        // 再发一张给第三个人，然后让**已经在里面的人**去点它
+        // 再生成一张给第三人，然后让已在项目里的成员去点它
         String forThird = issue(owner, projectId);
         assertThat(member.post("/api/invitations/" + forThird + "/accept", "{}").statusCode())
                 .isEqualTo(200);
@@ -284,14 +271,14 @@ class InvitationApiTest {
         TestBrowser member = newAccount();
         String forGuest = issue(owner, projectId);
 
-        // 没登录：一个纯粹的访客（他登录之后就进得去）
+        // 未登录：纯访客，登录后可加入
         assertThat(viewerOf(TestBrowser.at(port), forGuest)).isEqualTo("GUEST");
-        // 登录着、还没加入：同样是 GUEST —— 界面给他「加入项目」
+        // 已登录但尚未加入：同样是 GUEST，界面给「加入项目」
         assertThat(viewerOf(member, forGuest)).isEqualTo("GUEST");
-        // **发起人自己**：界面不能给他「加入项目」（按下去什么也不会发生）
+        // 发起人自己：界面不能给「加入项目」，按下去什么也不会发生
         assertThat(viewerOf(owner, forGuest)).isEqualTo("INVITER");
 
-        // 别人进来之后，同一个人再看这张链接就是"已经在内"了
+        // 加入之后，再看同一链接就是 MEMBER
         assertThat(member.post("/api/invitations/" + forGuest + "/accept", "{}").statusCode())
                 .isEqualTo(200);
         assertThat(viewerOf(member, forGuest)).isEqualTo("MEMBER");
@@ -317,7 +304,7 @@ class InvitationApiTest {
 
     // ------------------------------------------------------------------
 
-    /** 生成一张链接，返回 token。**客户端拼链接用的是它**（服务端不猜自己的对外地址）。 */
+    /** 生成一张链接并返回 token；客户端用它拼完整链接，服务端不猜自己的对外地址。 */
     private String issue(TestBrowser owner, ProjectId projectId) throws Exception {
         HttpResponse<String> created = owner.post(
                 "/api/projects/" + projectId.value() + "/invitations", "{}");

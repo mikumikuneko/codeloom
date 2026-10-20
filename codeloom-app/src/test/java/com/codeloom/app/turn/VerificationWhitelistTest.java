@@ -11,24 +11,16 @@ import org.springframework.boot.test.context.SpringBootTest;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 【跨模块不变量】自动验证会用到的可执行文件，必须全部被**生产配置里的**白名单放行。
+ * 跨模块不变量：自动验证用到的可执行文件，必须全部被生产配置里的白名单放行。
  *
- * <h2>这条守的是什么</h2>
- * 两个知识住在两个模块里，各自演化：
- * <ul>
- *   <li>{@link VerificationPlan#detect}（agent）决定"改完代码该跑什么"</li>
- *   <li>{@code codeloom.command-whitelist}（application.yml）决定"哪些程序不必问人"</li>
- * </ul>
+ * <p>两个知识分居两个模块：{@link VerificationPlan#detect}（agent）决定改完代码跑什么，
+ * {@code codeloom.command-whitelist}（application.yml）决定哪些程序不必问人；前者必须是
+ * 后者的子集。它守的不是"验证能否运行" —— 验证由平台直接调用执行器，不经过审批，
+ * 名单里有没有 {@code mvn} 对它没有影响；它守的是"平台自己会跑的名字也应当免审批"，
+ * 少放行一个，模型主动跑一次 {@code mvn} 就得等人点批准。
  *
- * <p>前者必须是后者的子集。注意它**不是**在守"验证跑不跑得起来" ——
- * 验证由平台直接调执行器，根本不经过审批那一道，名单里有没有 {@code mvn}
- * 对它没有影响。它守的是另一半：**平台自己会跑的那些名字，也应当是不必问人的那一类**
- * ——少放行一个，模型自己想跑一次 {@code mvn} 就得先等人点一下。
- *
- * <p>所以这里把它变成一条断言：直接拿**生产那个 {@code CommandPolicy} bean**
- * （由 yml 装配出来的）去问。
- *
- * <p>它要起容器才能拿到真正的白名单，所以连着中间件时才跑。
+ * <p>因此直接拿生产装配出的 {@code CommandPolicy} bean 断言。需要启动容器取得真实白名单，
+ * 所以只在中间件可达时运行。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")

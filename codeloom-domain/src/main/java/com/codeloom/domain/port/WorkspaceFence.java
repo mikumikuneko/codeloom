@@ -3,79 +3,45 @@ package com.codeloom.domain.port;
 import com.codeloom.domain.workspace.WorkspaceId;
 
 /**
- * fencing token 的**权威**：发号与校验。
- *
- * <h2>为什么它挂在「树」上，而不是会话上（这条是核心）</h2>
- * 号必须和**锁**守在同一个东西上。锁守的是一棵树（见 {@link ExecutionLease}），
- * 号要是还发在会话行上，就有这样一个洞：
- *
- * <pre>
- *   会话 A 拿到树锁，拿到号 5
- *   A 长时间停顿，锁到期
- *   会话 B（同一个人的另一条会话，同一棵树）拿到树锁，拿到号 1（B 那一行自己的计数）
- *   A 醒来，拿号 5 去写 —— 它那一行的号没变过，校验通过，照写不误
- * </pre>
- *
- * <p>A 和 B 同时改一棵树，而按会话发号的那套校验一次都没生效。所以发号与校验都必须落在
- * {@code workspace.fencing_token} 那一列上：**锁的键和号的键是同一个**，
- * 这条机制才有意义。
- *
- * <h2>为什么它是独立的一个端口，而不是塞进 ExecutionLease</h2>
- * 因为这两件事的存储不一样，而且必须不一样：
- *
- * <ul>
- *   <li>{@link ExecutionLease} 的锁在 Redis —— 它要的是快、有 TTL、过期即"实例已死"。
- *   <li>本端口在 MySQL —— 它要的是**持久且不可能回退**。锁可以是概率性的，
- *       而校验必须是确定性的：Redis 被清空导致计数器回退时，僵尸写入者仍要被挡住。
- * </ul>
- *
- * <p>如果发号也放 Redis，那个概率性的系统就会去决定确定性那一半的输入，
- * 正好把 {@link LeaseToken} 想划清的那条线搅浑。而如果一起放进 Redis，
- * 计数器一旦回退到低于 MySQL 里已受理的高水位，**这棵树会永久写不进去** ——
- * 一个不报错、不自愈、得先想到去 Redis 里捞计数器才能发现的故障。
- *
- * <h2>为什么它住在 domain 而不是 realtime</h2>
- * 它操作的是 {@code workspace} 表，而那张表归 {@code codeloom-workspace}。
- * 端口在 domain、实现在持有该表的模块，于是 **workspace 行只有一个写入者**。
- * 这不是洁癖：fencing token 的正确性正是"这一列只有一处会被推进"，
- * 让别处也能顺手写它，恰好破坏了它成立的前提。
+ * fencing token 的权威：发号与校验。号必须和锁保护同一个对象：锁保护一棵树（见
+ * {@link ExecutionLease}），号若发在会话行上，同一棵树的另一条会话会推进自己那行的号，
+ * 旧持有者醒来拿旧号仍能通过校验。所以发号与校验都落在 {@code workspace.fencing_token}
+ * 上。存储必须与锁不同：租约在 Redis，本端口在 MySQL，要持久且不回退 —— 锁可以是概率性
+ * 的，校验必须确定性。这一列只有一个写入者，定义在 domain 而不是 realtime，因为表归
+ * {@code codeloom-workspace}。见
+ * {@code docs/decisions/architecture/2026-09-24-lease-and-fencing-token.md}。
  */
 public interface WorkspaceFence {
 
     /**
-     * 抢到租约之后取一个新号。返回的值**严格大于**这棵树上发过的任何号。
+     * 抢到租约之后取一个新号。返回值严格大于这棵树上发过的任何号。
      *
-     * <p>实现必须是原子的（并发调用不能拿到同一个值），而且**必须持久** ——
-     * 它不回退这件事是整个机制成立的前提。
+     * <p>实现必须原子（并发调用不能拿到同一个值）而且持久 —— 不回退是整个机制成立的
+     * 前提。必须在成功抢到锁之后再发号：反过来做的话，一个抢锁失败的竞争者会把号推过
+     * 当前持有者的 token，持有者下一次写入会被写入校验拒掉。
      *
-     * <p>调用时机有要求：**必须在成功抢到锁之后**再发号。反过来做的话，
-     * 一个抢锁失败的竞争者会把号推过当前持有者的 token，于是持有者下一次写入
-     * 会被自己的守门拒掉（"活着的人被踢出局"）。
-     *
-     * @throws IllegalStateException 这棵树不存在（会话还没建出它的工作区）——
-     *         和 {@link WorkspaceRepository#require} 同一个判据、同一种异常：
-     *         这是库里的行少了，不是请求写错了
+     * @param workspaceId 哪棵树
+     * @return 新号
+     * @throws IllegalStateException 这棵树不存在（会话还没建出它的工作区）—— 判据和异常
+     *                               与 {@link WorkspaceRepository#require} 相同：是库里的行
+     *                               少了，不是请求写错了
      */
     long issue(WorkspaceId workspaceId);
 
     /**
      * 确认这个 token 仍是当前有效值。
      *
-     * <h2>三个不能改的实现约束</h2>
-     * <ol>
-     *   <li><b>必须是加锁读（{@code SELECT ... FOR UPDATE}），不能是普通查询。</b>
-     *       普通查询留下的窗口是：校验通过 → 另一个实例接管并推进了号 → 这里才插入。
-     *       僵尸写入者于是刚好从缝里钻过去。加锁读会把 workspace 行锁到这个事务结束，
-     *       顺带把**同一棵树上**的并发追加也串行化了 —— 这同时是
-     *       {@code event} 表 seq「无洞」的前提（自增值的分配顺序要等于提交顺序）。
-     *   <li><b>必须和它所保护的那次写入在同一个事务里。</b> 否则锁读完就释放了，
-     *       上面那条约束一条也不成立。
-     *   <li><b>校验的是 token 里的 {@code workspaceId}，不是 {@code sessionId}。</b>
-     *       那一列在 {@code workspace} 表上。见上面那段"为什么挂在树上"。
-     * </ol>
+     * <p>实现有三条不能改的约束。第一，必须加锁读（{@code SELECT ... FOR UPDATE}），
+     * 不能是普通查询：普通查询留下的窗口是「校验通过 → 另一个实例接管并推进了号 →
+     * 这里才插入」，僵尸写入者仍能通过校验；加锁读把 workspace 行锁到事务结束，顺带
+     * 把同一棵树上的并发追加串行化，使 {@code event} 表 seq 的分配顺序等于提交顺序。
+     * 删除整条会话会给 seq 留下空洞，读路径不以连续为前提。第二，必须和它所保护的那次
+     * 写入在同一个事务里，否则锁读完就释放了。第三，校验的是 token 里的
+     * {@code workspaceId}，不是 {@code sessionId} —— 那一列在 {@code workspace} 表上。
      *
-     * @throws StaleLeaseException token 已失效（说明这棵树已被别的执行者接管）。
-     *                             遇到它不要重试、不要吞掉，立刻中止本轮执行。
+     * @param token 待校验的租约凭据
+     * @throws StaleLeaseException token 已失效，说明这棵树已被别的执行者接管；遇到它不要重试、
+     *                             不要吞掉，立刻中止本轮执行
      */
     void assertValid(LeaseToken token);
 }

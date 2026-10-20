@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { parseUnifiedDiff } from './unifiedDiff'
 
 /**
- * 钉的是"跟位置走，不跟前缀走"这条契约：统一 diff 的正文**有歧义**
- * （正文里本来就有以 `--` 开头的行），所以只有 `@@` 之后的才算正文。
+ * 钉的是"跟位置走，不跟前缀走"这条契约：统一 diff 正文有歧义（正文里本来就有
+ * 以 `--` 开头的行），所以只有 `@@` 之后的才算正文。
  */
 
-/** 两段 hunk 的 diff，第二个文件的起始行号离得很远 —— 用来验"行号按文件数"。 */
+/** 两个文件的 diff，第二个文件的起始行号离得很远，用来验"行号按文件数"。 */
 const TWO_FILES = [
   'diff --git a/x.ts b/x.ts',
   'index 111..222 100644',
@@ -50,9 +50,9 @@ describe('parseUnifiedDiff', () => {
   it('**行号按文件数**：换了文件就归零，否则第二个文件会带着上一个的行号画一条假的跳过', () => {
     const rows = parseUnifiedDiff(TWO_FILES)
 
-    // 第二个文件从新文件第 10 行开始，前面 9 行没显示
+    // 第二个文件从新文件第 10 行开始，前面 9 行没显示。
     expect(rows).toContainEqual({ kind: 'gap', hidden: 9 })
-    // 第一个文件从第 1 行开始，一行都没跳过
+    // 第一个文件从第 1 行开始，一行都没跳过。
     expect(rows.some((row) => row.kind === 'gap' && row.hidden < 9)).toBe(false)
   })
 
@@ -92,7 +92,7 @@ describe('parseUnifiedDiff', () => {
     )
 
     expect(rows).toEqual([
-      // 这段 hunk 从第 5 行开始，前面 4 行没显示
+      // 这段 hunk 从第 5 行开始，前面 4 行没显示。
       { kind: 'gap', hidden: 4 },
       { kind: 'context', text: 'same', line: 5 },
       { kind: 'removed', text: 'old', line: 6 },

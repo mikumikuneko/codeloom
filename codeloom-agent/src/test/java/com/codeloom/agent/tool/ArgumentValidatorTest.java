@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ArgumentValidatorTest {
 
-    /** 一份把本类支持的全部类型都覆盖到的 schema。 */
+    /** 覆盖本类支持的全部类型的 schema。 */
     private static final String SCHEMA = """
             {
               "type": "object",
@@ -82,13 +82,7 @@ class ArgumentValidatorTest {
                     .hasMessageContaining("没写 type");
         }
 
-        /**
-         * 规矩是"认识的关键字要执行，不认识的要在**启动时**拒绝"。
-         *
-         * <p>{@code todo_write} 的 schema 里曾写着 {@code enum}，而这一层**从头到尾
-         * 没读过它** —— 等于向模型声明了一条平台根本不执行的约束。那比不声明更糟：
-         * 模型以为自己受着一条保护。
-         */
+        /** 认识的关键字要执行，不认识的在编译时拒绝；声明却不执行的约束比不声明更糟。 */
         @Test
         @DisplayName("不认识的关键字当场炸 —— 接受了却不执行，比不声明更糟")
         void rejectsKeywordsWeCannotEnforce() {
@@ -241,7 +235,7 @@ class ArgumentValidatorTest {
         void validatesAgainstThatToolsSchema() {
             ToolRegistry registry = ToolRegistry.standard();
 
-            // run_command 的 command 是必填的字符串
+            // run_command 的 command 是必填字符串。
             assertThat(registry.validateArguments("run_command", args("{}")).orElseThrow())
                     .contains("`command`");
             assertThat(registry.validateArguments("run_command", args("""
@@ -256,8 +250,8 @@ class ArgumentValidatorTest {
         }
 
         /**
-         * 这一条和下面那条一起，守的是**同一份约束只写一遍**：{@code todo_write} 的
-         * {@code state} enum 只在 schema 里写一次，工具不再手抄一遍，校验器照着 schema 执行。
+         * 与下一条共同守住 schema 是参数约束的权威：state enum 只在 schema 里声明并由校验器执行；
+         * 工具只负责把字符串映射成领域状态，不重复校验取值。
          */
         @Test
         @DisplayName("【数组里的对象】某一项缺字段时，点出是第几项、缺哪个")
@@ -279,11 +273,11 @@ class ArgumentValidatorTest {
         void enumInTheSchemaIsActuallyEnforced() {
             ToolRegistry registry = ToolRegistry.standard();
 
-            // 合法值一个都不能误伤
+            // 合法值必须通过。
             assertThat(registry.validateArguments("todo_write", args("""
                     {"todos":[{"content":"跑测试","state":"in_progress"}]}"""))).isEmpty();
 
-            // 不在声明里的值要**挡下来**，而且说清合法值是哪几个（声明了就得执行）
+            // 非法值必须拒绝，并列出合法值。
             String problem = registry.validateArguments("todo_write", args("""
                     {"todos":[{"content":"跑测试","state":"doing"}]}""")).orElseThrow();
 

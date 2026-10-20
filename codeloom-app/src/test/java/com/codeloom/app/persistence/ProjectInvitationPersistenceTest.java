@@ -16,10 +16,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@code project_invitation} 表的真库测试。
  *
- * <p>重点不是"写进去读出来还是同一个对象"（那是 Row 转换的事），而是
- * **拿着旧快照的 {@code save} 不能把已经发生的状态改回去**：
- * 撤销不能被写回 {@code NULL}，接受不能被撤销或被第二个接受者替换。
- * 服务层用项目锁串行化这些写入；这里的条件更新是最后一道防线。
+ * <p>重点不是往返映射，而是拿着旧快照的 {@code save} 不能把已经发生的状态改回去：
+ * 撤销不能被写回 NULL，接受不能被撤销或被第二个接受者替换。服务层用项目锁串行化
+ * 这些写入，这里的条件更新是最后一道防线。
  */
 class ProjectInvitationPersistenceTest extends AbstractPersistenceTest {
 

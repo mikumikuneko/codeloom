@@ -19,25 +19,18 @@ import { isCodeFile } from '@/lib/highlight'
 /**
  * 工作区左栏：项目树。
  *
- * <h2>一层一层拉，不递归</h2>
- * 后端只列**一层**（`GET /files?path=`），所以这里也是点开一层拉一层。
- * 一次性把整棵树拉下来在一个大仓库上要几秒，而**没点开的那些层永远是零成本** ——
- * 更要紧的是，你不会为了看一眼 `src/` 而读进 `node_modules/`。
+ * 一层一层拉，不递归：后端只列一层（`GET /files?path=`），点开一层拉一层。整树
+ * 一次拉在大仓库上要几秒，没点开的层零成本；更要紧的是不会为了看 `src/` 而读进
+ * `node_modules/`。
  *
- * <h2>展开状态放在这一层，不放在每个节点上</h2>
- * 一开始它是每个节点自己记的，理由是"展开就是拉、折叠就是留着，没有状态要推理"。
- * 那个理由在**没有整树动作**的时候成立 —— 而头上那两个按钮（刷新、全部折叠）
- * 恰恰是整树动作：它们要一次作用到所有已经展开的目录上，节点自己记的话够不着。
+ * 展开状态放在这一层，不放在每个节点上：头上的刷新、全部折叠是整树动作，要一次
+ * 作用到所有已展开目录，节点自己记够不着。
  *
- * <h2>它永远是**你自己那棵树**</h2>
- * 后端的写接口上没有 `owner`，读接口虽然支持，但界面不传 ——
- * 对方的树是唯一一块只有他能改的地方，这里也就没有"看别人的树"这条路。
+ * 它从不显示对方的工作树：后端写接口没有 `owner`，读接口虽支持但界面不传；对方的
+ * 树是唯一一块只有他能改的地方。
  *
- * <h2>刷新有两个来源</h2>
- * 一个是**这台组件自己**的：右键新建、改名、删除之后（那些动作就发生在这里，
- * 它当然知道自己刚改了什么）。另一个是**外面推进来的** {@link FileTree} 的 `reload`：
- * agent 在会话里改了工作区，而那件事发生在后端和磁盘上，这棵树看不见。
- * 两个来源合成一个数往下传（见下面 `reload` 那两行）。
+ * 刷新有两个来源：组件自己的（右键新建、改名、删除）与外面推进来的 `reload`
+ * （agent 改了工作区，发生在后端和磁盘上，这里看不见）。两者合成一个数往下传。
  */
 export function FileTree({
   projectId,
@@ -50,35 +43,33 @@ export function FileTree({
   reload: externalReload = 0,
 }: {
   projectId: string
-  /** 看**主干**而不是自己的树。中栏跟着它走 —— 两处必须看同一棵树 */
+  /** 看主干而不是自己的树。中栏跟着它走，两处必须看同一棵树 */
   onTrunk: (trunk: boolean) => void
   trunk?: boolean
 
-  /** 项目目录叫什么 —— 树的第一行。见 {@link PROJECT_ROOT} */
+  /** 项目目录名，即树的第一行。见 {@link PROJECT_ROOT} */
   rootName: string
-  /** 传 null 是"选中的那个文件没了"（刚被删掉），中栏要清空 */
+  /** 传 null 表示选中的文件没了（刚被删），中栏要清空 */
   onSelect: (path: string | null) => void
   selected: string | null
   /**
-   * 外面推来的"重新拉一遍"。**每变一次拉一次**（数本身没有含义）。
+   * 外面推来的"重新拉一遍"。每变一次拉一次，数本身没有含义。
    *
-   * <p>只增不减，而且是外部状态 —— 这里**不把它复制进自己的 state**：
-   * 复制就得写一个"prop 变了同步过去"的 effect，而那种 effect 一次同步晚了
-   * 就会让这次刷新凭空消失。
+   * 只增不减，是外部状态，这里不把它复制进自己的 state：复制就要写"prop 变了同步
+   * 过去"的 effect，而那种 effect 晚一次同步就会让这次刷新凭空消失。
    */
   reload?: number
 }) {
-  // 项目那一行**默认展开**：它是"这是项目"，不是"这里有个能收起来的东西"
+  // 项目那一行默认展开：它是"这是项目"，不是"这里有个能收起来的东西"。
   const [open, setOpen] = useState<ReadonlySet<string>>(() => new Set([PROJECT_ROOT]))
-  /** 这台组件自己触发的刷新次数。见上面"刷新有两个来源" */
+  /** 本组件自己触发的刷新次数，见上面"刷新有两个来源" */
   const [ownReload, setOwnReload] = useState(0)
   const [menu, setMenu] = useState<MenuTarget | null>(null)
   const [naming, setNaming] = useState<NameTask | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
 
-  // 两个来源**加起来**，而不是取较大者：两者各自只增不减，而每一层只在乎
-  // "这个数变了没有" —— 取较大者会把其中一个来源的连续两次刷新压成一次。
-  // 数本身没有含义，加法的结果也没有
+  // 两个来源相加而不是取较大者：两者各自只增不减，而每一层只在乎"这个数变了没有"；
+  // 取较大者会把其中一个来源的连续两次刷新压成一次。
   const reload = ownReload + externalReload
   const refresh = () => setOwnReload((n) => n + 1)
 
@@ -94,7 +85,7 @@ export function FileTree({
     })
   }
 
-  /** 一个路径没了（删掉或改名）：它自己、它的子孙，都从展开集合里划掉 */
+  /** 一个路径没了（删除或改名）：它自己与子孙都从展开集合里划掉。 */
   function forget(path: string) {
     setOpen((current) =>
       new Set([...current].filter((each) => each !== path && !each.startsWith(`${path}/`))),
@@ -104,8 +95,8 @@ export function FileTree({
   /**
    * 右键点上该给哪几项。
    *
-   * <p>**右键空白处只给"新建"**：那儿没有东西可以改名，也没有东西可以删。
-   * 给一个点了没反应的"重命名"比不给更糟。
+   * 右键空白处只给"新建"：那里没有东西可改名、可删除；给一个点了没反应的
+   * "重命名"比不给更糟。
    */
   function actionsFor(target: MenuTarget): MenuAction[] {
     const inDirectory = target.path === '' || target.directory
@@ -148,15 +139,13 @@ export function FileTree({
       <div className="pane-head px-3">
         <h2 className="text-xs text-muted-foreground">项目</h2>
 
-        {/* 三个动作都放在这里，是因为它们作用在**整棵树**上，而没有别的地方放得下：
-            一条导航上没有"当前项"可以挂右键菜单 */}
+        {/* 三个动作放这里，因为它们作用在整棵树上；一条导航上没有"当前项"可挂右键菜单 */}
         <div className="ml-auto flex items-center gap-0.5">
           {/*
-            看**哪棵树**：我的（自己改到哪儿了）还是主干（那条共享的线）。
+            看哪棵树：我的（自己改到哪儿了）还是主干（那条共享的线）。
 
-            <p>图标本身分两态（文件夹 / 分支），所以**当前在哪一棵扫一眼就知道** ——
-            这一点不能省：两边路径长得一模一样，看错一眼，你以为在看自己的改动，
-            其实在看主干。而 hover 才知道的状态在这件事上是不够的
+            图标本身分两态（文件夹 / 分支），当前在哪一棵扫一眼就知道。这一点不能省：
+            两边路径长得一模一样，看错一眼就以为在看自己的改动；hover 才显示不够
           */}
           <IconAction
             label={trunk ? '现在看的是主干，点一下切回我的' : '现在看的是我的，点一下看主干'}
@@ -171,14 +160,14 @@ export function FileTree({
             <ChevronsDownUp />
           </IconAction>
           {/*
-            下载放最后：前面三个都是"看这棵树"的开关，而它作用在**整个项目**上。
-            它下的是**主干**那个版本（不是你现在看的这棵树）—— 这一点必须写进 label：
-            按钮长在树的头部，不说清就会被当成"下载我正在看的这份"
+            下载放最后：前面三个是"看这棵树"的开关，它作用在整个项目上。它下的是
+            主干版本，不是你现在看的这棵树；这一点必须写进 label，否则会被当成
+            "下载我正在看的这份"
           */}
           <IconAction
             label="下载这个项目（主干，zip）"
             onClick={() => {
-              // 顶层导航触发下载：响应带 attachment，所以页面不会跳走
+              // 顶层导航触发下载：响应带 attachment，页面不会跳走。
               window.location.href = projectArchiveUrl(projectId)
             }}
           >
@@ -189,7 +178,7 @@ export function FileTree({
 
       <div
         className="min-h-0 flex-1 overflow-auto pb-4"
-        // 空白处右键 = 对着工作区根目录右键（target 是容器自己，不是某一行）
+        // 空白处右键 = 对着项目根目录右键（target 是容器自己，不是某一行）。
         onContextMenu={(event) => {
           if (event.target !== event.currentTarget) {
             return
@@ -198,7 +187,7 @@ export function FileTree({
           setMenu({ x: event.clientX, y: event.clientY, path: '', directory: true })
         }}
       >
-        {/* 下面那一大片是"点得动的空白"，让根目录的右键有个地方落 */}
+        {/* 下面一大片是点得动的空白，让根目录的右键有地方落 */}
         <div className="min-h-full py-2">
           <ProjectRow
             name={rootName}
@@ -210,7 +199,7 @@ export function FileTree({
             <Level
               projectId={projectId}
               path=""
-              // 缩进从 1 起：**项目是第 0 层**，文件在它里面
+              // 缩进从 1 起：项目是第 0 层，文件在它里面。
               depth={1}
               selected={selected}
               onSelect={onSelect}
@@ -242,7 +231,7 @@ export function FileTree({
             const to = naming.parent ? `${naming.parent}/${name}` : name
             try {
               if (naming.from !== null) {
-                // 名字没改就别发请求：后端会说"那里已经有一个同名的了"（那个同名的就是它自己）
+                // 名字没改就别发请求：后端会说"那里已经有一个同名的了"（就是它自己）。
                 if (to !== naming.from) {
                   await files.move(projectId, naming.from, to)
                   forget(naming.from)
@@ -261,10 +250,9 @@ export function FileTree({
       )}
 
       {removing !== null && (
-        // 删一个文件也要问一句，因为工作区里**没有回收站**：已经提交过的还能靠回滚找回来，
-        // 而还没提交的那些 —— 手工刚建的、agent 这一轮刚写的 —— 删掉就真的没有了。
-        // 目录这里刻意不说"里面有 N 个文件"：那要额外问一次后端，
-        // 而且它会让人把注意力放在"几个"上，而不是"要不要"
+        // 删一个文件也要问，因为工作区里没有回收站：提交过的还能靠回滚找回，还没
+        // 提交的（手工刚建的、agent 这一轮刚写的）删掉就真没了。目录刻意不说
+        // "里面有 N 个文件"：那要额外问后端，也会让人把注意力放在"几个"上。
         <ConfirmDialog
           title={`删除「${nameOf(removing)}」`}
           description="目录的话，里面的东西会一起没。还没提交过的部分找不回来。"
@@ -273,8 +261,8 @@ export function FileTree({
           onConfirm={async () => {
             try {
               await files.remove(projectId, removing)
-              // 选中和展开的东西可能就在被删的那一棵里 —— 不清的话中栏会停在一个
-              // 已经不存在的文件上，而它显示的是"读不到这个文件"
+              // 选中和展开的东西可能就在被删的那一棵里；不清的话中栏会停在
+              // 一个已不存在的文件上，显示"读不到这个文件"。
               if (selected === removing || selected?.startsWith(`${removing}/`)) {
                 onSelect(null)
               }
@@ -293,40 +281,32 @@ export function FileTree({
 }
 
 /**
- * 缩进一格多少像素。**和下面 paddingLeft 用的是同一个数**。
+ * 缩进一格多少像素，与下面的 paddingLeft 用同一个数。
  *
- * <p>**不画缩进参考线。** 层级靠缩进本身表达；浅目录里那条线只是噪音，
- * 项目根那一根尤其没有信息量（每一行都有，说的只是"这些都在项目里"）。
- * 要加回去之前先想清楚它解决的是哪个具体问题 —— 深目录里"看不出属于谁"
- * 才值得画线，而那不是现在这棵树的样子。
+ * 不画缩进参考线：层级靠缩进本身表达。浅目录里那条线只是噪音，项目根那根尤其
+ * 没有信息量（每行都有，只说明"这些都在项目里"）。要加回来先想清楚它解决哪个
+ * 具体问题：深目录里"看不出属于谁"才值得画线，而那不是现在这棵树的样子。
  */
 const INDENT = 12
-/** 一行的内容从哪儿开始（也就是缩进 0 那一层的位置）。 */
+/** 一行内容从哪儿开始（也就是缩进 0 那一层的位置）。 */
 const ROW_PAD = 8
 
 /**
- * 项目那一行在 {@code open} 里用的键。
+ * 项目那一行在 `open` 里用的键。
  *
- * <p>它同时是**项目根的路径**（{@code ""}）—— 而根不是任何一条 {@code FileEntry}，
- * 所以这个键不会和某个目录撞上。展开状态复用同一套机制，不另起一份。
+ * 它同时是项目根的路径（`""`），而根不是任何一条 `FileEntry`，所以不会和某个目录
+ * 撞上。展开状态复用同一套机制，不另起一份。
  */
 const PROJECT_ROOT = ''
 
 /**
- * 树的第一行：**项目本身**。
+ * 树的第一行：项目本身。
  *
- * <h2>为什么文件上面非得有这一行</h2>
- * 因为**先有项目，才有文件**。一棵从文件开始的树，看的人不知道这些文件属于哪儿 ——
- * 而"属于哪儿"在两个人协作的时候是要紧的：下一次打开，你未必记得这个工作区
- * 是哪个项目。这一条是照 IDEA 学的，它的项目树第一行永远是项目节点。
+ * 文件上面非得有这一行：先有项目才有文件，一棵从文件开始的树让人不知道这些文件
+ * 属于哪儿，而协作时这点要紧。它长得和目录行一模一样，因为它就是一个目录；位置
+ * 已经说清了"它在最上面"，加粗或换色只会说"它和别人不一样"。
  *
- * <h2>它长得和目录行一模一样</h2>
- * 因为它**就是**一个目录，而且是这一层唯一的目录。给它加粗、加底色、
- * 换个颜色，都是在说"这个和别的目录不一样" —— 而它唯一的特别之处是"它在最上面"，
- * 而那件事位置已经说清楚了。
- *
- * <p>它的右键菜单就是根目录的菜单（新建文件 / 新建目录）——
- * 和点在下面那片空白上是同一个目标。
+ * 它的右键菜单就是根目录的菜单（新建文件 / 新建目录），与点在下面空白处是同一个目标。
  */
 function ProjectRow({
   name,
@@ -363,18 +343,18 @@ function ProjectRow({
 interface MenuTarget {
   x: number
   y: number
-  /** 空字符串 = 工作区根目录 */
+  /** 空字符串表示项目根目录 */
   path: string
   directory: boolean
 }
 
-/** 正在命名的那一件事：新建，或者改名。 */
+/** 正在命名的那件事：新建或改名。 */
 interface NameTask {
-  /** 放进哪个目录。改名时不看它 */
+  /** 放进哪个目录；改名时不看它 */
   parent: string
-  /** 建的是不是目录。改名时不看它 */
+  /** 建的是否目录；改名时不看它 */
   directory: boolean
-  /** 改的是哪一个；新建时是 null */
+  /** 改的是哪一个；新建时为 null */
   from: string | null
   initial: string
 }
@@ -388,7 +368,7 @@ function nameOf(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1)
 }
 
-/** 一层的加载状态：**加载中、出错、空**是三件不同的事，不能都渲染成空白。 */
+/** 一层的加载状态：加载中、出错、空是三件不同的事，不能都渲染成空白。 */
 function Level({
   projectId,
   path,
@@ -406,7 +386,7 @@ function Level({
   depth: number
   selected: string | null
   onSelect: (path: string | null) => void
-  /** 看**主干**，而不是自己那棵树 */
+  /** 看主干，而不是自己那棵树 */
   trunk?: boolean
   open: ReadonlySet<string>
   onToggle: (path: string) => void
@@ -418,8 +398,8 @@ function Level({
 
   useEffect(() => {
     let cancelled = false
-    // **不在这里把 entries 清成 null**：刷新时清掉的话整棵树会闪一下"正在读取"，
-    // 而拉回来的东西多半和原来一样。让旧内容留到新内容到位为止
+    // 不在这里把 entries 清成 null：刷新时清掉会让整棵树闪一下"正在读取"，
+    // 而拉回来的东西多半一样。旧内容留到新内容到位为止。
     files
       .list(projectId, path, trunk)
       .then((list) => {
@@ -451,8 +431,7 @@ function Level({
     )
   }
   if (entries.length === 0) {
-    // 空目录在树里显示出来而不是藏掉：藏掉的话，一个刚建的空项目
-    // 看起来和"加载失败"一模一样
+    // 空目录在树里显示而不是藏掉：藏掉的话，刚建的空项目看起来和"加载失败"一模一样。
     return (
       <Plain depth={depth} muted>
         （空）
@@ -498,7 +477,7 @@ function Node({
   depth: number
   selected: string | null
   onSelect: (path: string | null) => void
-  /** 看**主干**，而不是自己那棵树 */
+  /** 看主干，而不是自己那棵树 */
   trunk?: boolean
   open: ReadonlySet<string>
   onToggle: (path: string) => void
@@ -507,7 +486,7 @@ function Node({
 }) {
   const isSelected = entry.path === selected
 
-  /** 右键：停在哪儿，就在哪儿开菜单。**不选中它** —— 右键是"要动它"，不是"要看它" */
+  /** 右键：停在哪儿就在哪儿开菜单。不选中它：右键是"要动它"，不是"要看它" */
   function openMenu(event: React.MouseEvent) {
     event.preventDefault()
     onMenu({
@@ -526,13 +505,13 @@ function Node({
           type="button"
           onClick={() => onToggle(entry.path)}
           onContextMenu={openMenu}
-          // **文字是白的，颜色只给图标**（见 index.css 里那两条 loom-folder / loom-code）。
-          // 白字 + 彩色小图标，满屏撒着一点点颜色 —— 那是 IDEA 的树好看的真正原因，
-          // 而"给文字也上色"正好是它的反面：同一屏上会出现两组有颜色的字
+          // 文字是白的，颜色只给图标（见 index.css 的 loom-folder / loom-code）：
+          // 白字加彩色小图标，满屏只撒一点颜色；给文字也上色会让同一屏出现两组
+          // 有颜色的字。
           className="flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent"
           style={{ paddingLeft: depth * INDENT + ROW_PAD }}
         >
-          {/* 箭头保持灰：它是"这一行能展开"的记号，不是一个标题 */}
+          {/* 箭头保持灰：它是"这一行能展开"的记号，不是标题 */}
           <ChevronRight
             className={`size-3.5 shrink-0 text-loom-faint transition-transform ${expanded ? 'rotate-90' : ''}`}
           />
@@ -563,16 +542,15 @@ function Node({
       type="button"
       onClick={() => onSelect(entry.path)}
       onContextMenu={openMenu}
-      // 和目录同一个亮度、同一个悬停 —— 两行的区别全在图标上（形状 + 颜色）。
-      // **"这一行是不是选中的"由那块填充回答**，不再靠"从暗变亮"回答第二次：
-      // 一个信号只回答一个问题
+      // 和目录同一亮度、同一悬停，两行区别全在图标上（形状 + 颜色）。
+      // "是否选中"由那块填充回答，不再用"从暗变亮"回答第二次。
       className={`flex w-full items-center gap-1.5 py-1 pr-2 text-left text-sm text-foreground hover:bg-accent ${
         isSelected ? 'bg-selected' : ''
       }`}
       style={{ paddingLeft: depth * INDENT + ROW_PAD + 12 }}
     >
-      {/* 代码是暖色、其余保持中性 —— 三种状态里有一种"没有颜色"，
-          这样"有颜色"才是一句有用的话，而不是到处都在喊 */}
+      {/* 代码是暖色、其余中性：三种状态里有一种"没有颜色"，"有颜色"才是一句
+          有用的话，而不是到处都在喊 */}
       <FileIcon
         className={`size-3.5 shrink-0 ${isCodeFile(entry.name) ? 'text-loom-code' : 'text-loom-faint'}`}
       />
@@ -581,7 +559,7 @@ function Node({
   )
 }
 
-/** 树里那些不是节点的行（读取中 / 读不到 / 空目录）。缩进和节点行用同一套。 */
+/** 树里不是节点的行（读取中 / 读不到 / 空目录），缩进和节点行同一套。 */
 function Plain({
   depth,
   muted,
@@ -602,14 +580,13 @@ function Plain({
 }
 
 /**
- * 命名：新建时的名字，或者改名后的名字。
+ * 命名：新建时的名字，或改名后的名字。
  *
- * <p>用弹窗而不是树里就地编辑（IDEA 是就地编辑）：就地编辑要处理输入框和行
- * 抢焦点、要处理"编到一半点到别处"、要处理缩进对齐 —— 那是一整套交互，
- * 而它换来的只是"少一次弹窗"。等这一栏值得那么讲究了再说。
+ * 用弹窗而不是树里就地编辑：就地编辑要处理焦点争抢、"编到一半点到别处"、缩进
+ * 对齐，换来的只是少一次弹窗。
  *
- * <p>{@code onSubmit} **返回一句话就是失败**：那句话显示在输入框下面，弹窗不关。
- * 失败时把弹窗关掉的话，用户刚打的字就没了，而他正要做的是改一下再试。
+ * `onSubmit` 返回一句话就是失败：那句话显示在输入框下面，弹窗不关；关掉会让用户
+ * 刚打的字消失，而他正要做的是改一下再试。
  */
 function NameDialog({
   task,
@@ -621,10 +598,10 @@ function NameDialog({
   onClose: () => void
 }) {
   const title = task.from !== null ? '重命名' : task.directory ? '新建目录' : '新建文件'
-  const parent = task.parent === '' ? '工作区根目录' : `「${task.parent}」`
+  const parent = task.parent === '' ? '项目根目录' : `「${task.parent}」`
 
-  // 表单本身**和新建项目共用一份**（见 NameInputDialog）：一个输入框、一句说明、
-  // 一句就地错误，两个地方不该各有一套状态机
+  // 表单与新建项目共用 NameInputDialog：一个输入框、一句说明、一句就地错误，
+  // 两个地方不该各有一套状态机。
   return (
     <NameInputDialog
       title={title}
@@ -644,7 +621,7 @@ function NameDialog({
   )
 }
 
-/** 表头上那种只有图标的小按钮。名字进 title 和 aria-label，屏幕上不占地方。 */
+/** 表头上只有图标的小按钮。名字进 title 和 aria-label，屏幕上不占地方。 */
 function IconAction({
   label,
   onClick,
@@ -666,13 +643,3 @@ function IconAction({
     </button>
   )
 }
-
-/**
- * 这个文件名看着像不像代码。
- *
- * <p>只用来决定图标上不上色。判据就是一张扩展名清单，**不假装能认全**：
- * 认不出来的一律当"不是代码"，于是它保持中性。
- *
- * <p>宁可偏保守：把一张图片标成橙色没人会做错事，但把配置标成代码会让
- * "颜色 = 代码"这句话变得不可信 —— 而一个不可信的信号不如没有信号。
- */

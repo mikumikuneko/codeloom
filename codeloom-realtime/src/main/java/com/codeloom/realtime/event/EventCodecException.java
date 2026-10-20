@@ -3,10 +3,9 @@ package com.codeloom.realtime.event;
 /**
  * 事件编解码失败。
  *
- * <p>反序列化这一支几乎只有两种原因：{@code payload} 被人手工改过，或者某个事件类型的
- * 字段被改名/删除了 —— 对 append-only 的日志来说，后者是**破坏性操作**，
- * 因为它会让历史行读不出来。所以这里给一个专门的类型，而不是笼统的
- * {@code IllegalStateException}：它值得在日志里被一眼认出来。
+ * <p>反序列化失败通常只有两种原因：payload 被手工改过，或者事件字段被改名或删除。
+ * 对 append-only 日志来说后者是破坏性操作，会让历史行读不出来。使用专门的异常类型，
+ * 是为了让这种情况在日志里能被一眼认出，而不是混在笼统的运行时异常中。
  */
 public class EventCodecException extends RuntimeException {
 

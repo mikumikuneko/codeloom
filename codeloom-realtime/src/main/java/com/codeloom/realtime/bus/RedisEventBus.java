@@ -22,40 +22,26 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
- * {@link EventBus} 的 Redis 实现：本地扇出 + 跨实例扇出。
+ * {@link EventBus} 的 Redis 实现：本实例和跨实例的订阅者都经 Redis Pub/Sub 收到事件。
  *
- * <h2>为什么本地的订阅者也经过 Redis</h2>
- * 直接的做法是 {@code publish} 里先扇给本地订阅者、再 PUBLISH 给别的实例。这里刻意不那么做：
+ * <p>本地订阅者也走 Redis，而不是在 {@code publish} 里直接扇出：Pub/Sub 本来就会把消息
+ * 递给发布者自己，直连再加一次会让本实例收到两遍；而走同一条路径，所有订阅者看到的
+ * 顺序也与 Redis 交付顺序一致。代价是本实例多一次局域网往返。
  *
- * <ol>
- *   <li><b>不重复投递。</b> Redis 的 Pub/Sub 会把消息发给**所有**订阅者，包括发布的那个实例。
- *       本地先扇一次的话，本实例的订阅者就会收到两遍，而要去重就得给消息打上实例标记、
- *       再写一套"是不是我自己发的"判断 —— 那是一整类只在多实例下才暴露的 bug。
- *   <li><b>顺序一致。</b> 走一条路径出去，所有订阅者看到的顺序就是 Redis 交付的顺序。
- *       两条路径的话，本实例的订阅者可能先收到 42（直接扇的）再收到 41（经 Redis 回来的）。
- * </ol>
+ * <p>Redis 保证投递顺序不代表处理顺序；处理顺序由 {@code BusConfig} 的单线程派发器保证，
+ * 两处要一起看。
  *
- * <p><strong>但只做上面这一条还不够。</strong> Redis 按顺序投递，不等于我们按顺序处理 ——
- * 那条保证在 {@code BusConfig} 的单线程派发器里（乱序的成因与实测都在那里），两处要一起看。
- *
- * <p>代价是本实例的订阅者多等一次局域网往返（通常一两毫秒），换来上面两类问题不会出现。
- * 将来真觉得本地延迟碍眼，正确的做法是加实例标记去重，而不是把本地扇出补回来。
- *
- * <h2>单频道 + 本地过滤</h2>
- * 所有会话共用一个频道，消息里带 {@code sessionId}，收到之后只投给订阅了该会话的人。
- * 好处是订阅关系不用跟着连接动态增减（Redis 那边的订阅数是常数）。
- * 代价是每个实例都会收到**全部**会话的事件 —— 在这个规模下无所谓，
- * 会话量上来之后应该改成按会话分频道（{@code codeloom:events:<sessionId>}），
- * 那时才需要为连接做订阅的引用计数。
+ * <p>所有会话共用一个频道，消息里带 {@code sessionId}，收到后只投给订阅该会话的连接。
+ * 这样 Redis 的订阅数不随连接增减。代价是每个实例都会收到全部会话的事件；
+ * 会话量上来后可改为按会话分频道，那时才需要为连接维护订阅引用计数。
  */
 @Component
 public class RedisEventBus implements EventBus, MessageListener {
 
     /**
-     * 所有会话共用。改这个字符串会让新旧实例互相听不见 —— 滚动发布时要留意。
+     * 所有会话共用的频道名。滚动发布时新旧实例必须使用同一个值，否则互相听不见。
      *
-     * <p>公开是为了排障能对得上：出问题时你会想在 {@code redis-cli} 里
-     * {@code SUBSCRIBE codeloom:events} 看着它（和 {@code keyFor} 同理）。
+     * <p>公开是为了排障时能在 {@code redis-cli} 里直接 {@code SUBSCRIBE codeloom:events}。
      */
     public static final String CHANNEL = "codeloom:events";
 
@@ -78,11 +64,15 @@ public class RedisEventBus implements EventBus, MessageListener {
 
     @Override
     public void publishEphemeral(SessionId sessionId, EphemeralEvent event) {
-        // 落库时间由存储层盖，而这里没有存储层 —— 传输时间就取当下。
-        // 它不参与任何游标（没有 seq），只用来让客户端知道"这段字是什么时候吐出来的"
+        // 没有存储层来盖落库时间，用发送时刻；它不参与游标（没有 seq）。
         send(EventEnvelope.ephemeral(sessionId, Instant.now(), event));
     }
 
+    /**
+     * @param sessionId 订阅的会话
+     * @param listener  该会话的每条事件
+     * @return 取消订阅的句柄；关闭后不再调用该监听器
+     */
     @Override
     public Subscription subscribe(SessionId sessionId, Consumer<EventEnvelope> listener) {
         subscribers.computeIfAbsent(sessionId, id -> new CopyOnWriteArrayList<>()).add(listener);
@@ -96,8 +86,7 @@ public class RedisEventBus implements EventBus, MessageListener {
         try {
             envelope = codec.read(json);
         } catch (RuntimeException e) {
-            // 一条坏消息不该让整个扇出停摆。丢掉它、记下来 —— 能让消息坏掉的场景
-            // （新旧版本格式不一致之类）本来就需要人去看，而不是让连接断掉
+            // 一条坏消息不能让整个扇出停摆；记录后丢弃，等人工排查。
             log.warn("收到无法解码的事件消息，已丢弃：{}", json, e);
             return;
         }
@@ -113,15 +102,14 @@ public class RedisEventBus implements EventBus, MessageListener {
     private void dispatch(EventEnvelope envelope) {
         List<Consumer<EventEnvelope>> listeners = subscribers.get(envelope.sessionId());
         if (listeners == null) {
-            // 很正常：本实例上没有人在看这条会话
+            // 本实例上没有人订阅这条会话，正常情况。
             return;
         }
         for (Consumer<EventEnvelope> listener : listeners) {
             try {
                 listener.accept(envelope);
             } catch (RuntimeException e) {
-                // 一个订阅者出错不该影响别人 —— 比如某个浏览器连接已经断了，
-                // 往它写会抛异常，但其他人还在看
+                // 一个订阅者失败不影响其他订阅者，例如某个浏览器连接已经断开。
                 log.warn("一个订阅者处理事件时出错，已跳过：会话 {}", envelope.sessionId(), e);
             }
         }
@@ -130,7 +118,7 @@ public class RedisEventBus implements EventBus, MessageListener {
     private void unsubscribe(SessionId sessionId, Consumer<EventEnvelope> listener) {
         subscribers.computeIfPresent(sessionId, (id, listeners) -> {
             listeners.remove(listener);
-            // 空了就把键也删掉 —— 留着空列表的话，这个表会随着"看过的会话数"一直长
+            // 空列表要删键，否则表会随“本实例看过的会话数”持续增长。
             return listeners.isEmpty() ? null : listeners;
         });
     }

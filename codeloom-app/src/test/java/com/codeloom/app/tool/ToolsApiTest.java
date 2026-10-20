@@ -26,13 +26,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 工具目录接口。
  *
- * <h2>它守的是什么</h2>
- * 界面渲染每一条工具调用全靠这份数据 —— 用哪个组件、动作词、主语在参数里的哪一项。
- * 那份形状一变，界面就是"这条显示得糙"，**不会报错**。所以它值得一个测试
- * 把线拉住：接口上的字段名和取值，就是前端 `ToolView` 依赖的那几个。
- *
- * <p>另一半是它**要登录**：工具目录里没有用户数据，但它也不需要对外公开 ——
- * 这是安全配置里"其余一律要登录"那条的默认结果，顺手验一下别哪天被放开。
+ * <p>它守的是：界面渲染每条工具调用全靠这份数据，包括组件、动作词、主语在参数里的哪一项。
+ * 形状一变，界面只会“显示得糙”而不会报错，所以测试把线上的字段名和取值拉住，和前端
+ * {@code ToolView} 依赖的一致。另一半是它要登录：工具目录没有用户数据，但也不需要公开，
+ * 这是安全配置“其余一律要登录”的默认结果。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isEverythingReachable")
@@ -84,7 +81,7 @@ class ToolsApiTest {
         assertThat(byName.get("run_command").get("subjectIsPath").asBoolean()).isFalse();
 
         // 清单没有主语：它的参数是一整个列表，不是"某一样东西"。
-        // 注意**字段是缺席的，不是 null** —— 全项目按 `default-property-inclusion: non_null`
+        // 注意字段是缺席的，不是 null —— 全项目按 {@code default-property-inclusion: non_null}
         // 走，所以"没有"在线上就是"这一项不存在"。前端要按可选读它
         assertThat(byName.get("todo_write").get("shape").asText()).isEqualTo("plan");
         assertThat(byName.get("todo_write").has("subjectKey")).isFalse();

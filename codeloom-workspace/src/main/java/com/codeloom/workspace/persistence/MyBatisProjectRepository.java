@@ -19,9 +19,8 @@ import java.util.Set;
 /**
  * {@link ProjectRepository} 的持久化实现。
  *
- * <p>麻烦的地方全在成员上：{@code Project} 是一个带 {@code Set<UserId>} 的聚合，
- * 而数据库里它是两张表。所以每个读方法都是「查项目行 → 一次批量查成员 → 拼回聚合」，
- * 批量查那步是为了不出现「按项目逐个查成员」的 N+1。
+ * <p>{@link Project} 是带成员集合的聚合，数据库里是两张表；读方法都按"查项目行 →
+ * 一次批量查成员 → 拼回聚合"进行，避免按项目逐个查成员的 N+1。
  */
 @Repository
 public class MyBatisProjectRepository implements ProjectRepository {
@@ -33,13 +32,12 @@ public class MyBatisProjectRepository implements ProjectRepository {
     }
 
     /**
-     * 保存项目本身与它的成员，同一个事务。
+     * 保存项目与成员，同一事务。
      *
-     * <p>成员同步用「先全删再全插」，而不是算差集。理由很实在：
-     * {@code project_member} 只有 {@code (project_id, user_id)} 两列，删掉不会丢任何
-     * 别的东西；而成员上限是 {@code Project.MAX_MEMBERS} = 2，整轮操作就是几行。
-     * 算差集能省下的那点写，不值得多一段「谁被删了、谁被加了」的逻辑 ——
-     * 那是一段只要写错就会静默丢成员、而丢成员又不会被立刻发现的东西。
+     * <p>成员采用"先全删再全插"：表只有两列，成员上限是
+     * {@code Project.MAX_MEMBERS} = 2，整轮只有几行；差集逻辑一旦写错会静默丢成员。
+     *
+     * @param project 要保存的项目
      */
     @Override
     @Transactional
@@ -60,9 +58,8 @@ public class MyBatisProjectRepository implements ProjectRepository {
     /**
      * {@inheritDoc}
      *
-     * <p><strong>先成员后项目。</strong>这个项目里没有外键也没有级联（见 schema.sql 开头
-     * 那条约定），顺序写反的话会留下一堆"没有项目的成员行" —— 而那种行在任何一条查询里
-     * 都不会出现（每条查成员的路都先要知道项目 id），只会慢慢堆积。
+     * <p>先删成员行再删项目行。这里没有外键与级联（见 schema.sql 开头的约定），顺序
+     * 写反会留下无法被任何查询看到的孤儿成员行。
      */
     @Override
     @Transactional
@@ -79,10 +76,8 @@ public class MyBatisProjectRepository implements ProjectRepository {
     /**
      * {@inheritDoc}
      *
-     * <p>{@code MANDATORY} 是在**强制**那条"调用方必须有事务"的要求：
-     * 没有事务时它直接抛 {@code IllegalTransactionStateException}，
-     * 而不是自己开一个 —— 后者会让这次加锁读完就释放，然后调用方在毫无互斥的情况下
-     * 去改主干，而且一切看起来正常。这和 {@code MyBatisWorkspaceFence} 是同一个套路。
+     * <p>{@code MANDATORY} 强制调用方提供事务：没有事务时直接抛出，而不是自己开一个
+     * 读锁旋即释放的事务，否则调用方会在无互斥的情况下修改主干。
      */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
@@ -95,8 +90,8 @@ public class MyBatisProjectRepository implements ProjectRepository {
     /**
      * {@inheritDoc}
      *
-     * <p>项目行和成员行都用锁定读，而不是先 {@code lock} 再 {@link #findById}：
-     * 后者的普通查询会用事务开始时的快照，锁拿到了、读到的却还是旧成员。
+     * <p>项目行和成员行都用锁定读：先 {@code lock} 再 {@link #findById} 会读到事务
+     * 开始时的快照，锁拿到了而成员还是旧的。
      */
     @Override
     @Transactional(propagation = Propagation.MANDATORY)
@@ -113,11 +108,10 @@ public class MyBatisProjectRepository implements ProjectRepository {
     }
 
     /**
-     * 项目行 + 成员 → 聚合。三个读方法共用。
+     * 项目行与成员拼成聚合，三个读方法共用。
      *
-     * <p>成员缺失时传空集，让 {@code Project} 的紧凑构造器抛「项目至少要有一名成员」。
-     * 不在这里兜底成「一个没有成员的项目」：那说明写入路径漏了，静默容忍只会让它
-     * 一直错下去。
+     * <p>成员缺失时传空集，让 {@link Project} 的构造器抛出"项目至少要有一名成员"；
+     * 那说明写入路径漏了，不在这里静默兜底。
      */
     private List<Project> assemble(List<ProjectRow> rows) {
         if (rows.isEmpty()) {
@@ -129,7 +123,7 @@ public class MyBatisProjectRepository implements ProjectRepository {
                 .toList();
     }
 
-    /** 一次查出这些项目的全部成员，按项目分组。用 {@code LinkedHashSet} 保证顺序稳定。 */
+    /** 一次查出这些项目的全部成员并按项目分组；成员集合保持稳定顺序。 */
     private Map<String, Set<UserId>> membersOf(Collection<String> projectIds) {
         Map<String, Set<UserId>> grouped = new HashMap<>();
         for (ProjectMemberRow row : mapper.findMembers(projectIds)) {

@@ -25,38 +25,32 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 直接调用 {@code git} 可执行文件，把实验里踩到的坑全部固化成默认行为。
+ * 通过 {@code git} 子进程操作仓库。
  *
- * <h2>为什么 shell 调 git 而不是用 JGit</h2>
- * 本项目的并发一致性模型压在 {@code git worktree} 上，而 git 的 **linked worktree**
- * （独立 HEAD、独立索引、{@code .git} 是个指向主仓库的**文件**）在 JGit 里支持不完整 ——
- * JGit 的 {@code WorkTree} 类指的是"仓库的工作区"，不是同一个东西。用 JGit 就得自己实现
- * worktree 语义，而那正是这套并发模型赖以成立的核心。
+ * <p>不使用 JGit：项目依赖 linked worktree（独立 HEAD、独立索引、{@code .git} 是文件），
+ * JGit 对它的支持不完整。每次调用都带硬化的 {@code -c} 参数，中和
+ * {@code core.hooksPath}、{@code core.fsmonitor} 与凭据 helper 等能执行命令或改变行为的
+ * 配置；{@code diff} 子命令另带 {@code --no-ext-diff}、{@code --no-textconv}，关掉本地配置
+ * 或 {@code .gitattributes} 指定的外部 diff 与 textconv 命令。
  *
- * <h2>为什么每一处调用都带一长串 {@code -c} 硬化参数</h2>
- * worktree 里的内容对 agent 可写，而 git 有一堆能执行任意命令的配置项
- * （{@code core.hooksPath}、{@code core.fsmonitor}、{@code diff.external}、
- * {@code filter.*.clean}）。虽然 worktree 的 {@code .git} 是个文件、agent 碰不到主仓库配置，
- * 但这里仍然显式中和一遍 —— 纵深防御的成本是一行参数。
+ * <p>{@code filter.*.clean} 不在保证内：git 没有能一次关掉全部 filter driver 的配置项，
+ * 而 {@code .gitattributes} 可以给任意 driver 名挂上本地配置里的命令。要挡住它，得在
+ * 工作区之外再隔离 git 配置，单靠这里的参数做不到。
  *
- * <h2>实验固化的五条</h2>
- * <ol>
- *   <li>新建仓库后立刻打一个空提交作基点，否则两条会话分支"历史不相关"、无法合并</li>
- *   <li>{@code git init} 必须显式 {@code -b main}，默认分支名依赖版本和配置</li>
- *   <li>每次提交**和每次 merge** 都要传身份；不设仓库级身份，忘了会响亮失败
- *       （代码里就是 {@code runAs*} 那一对入口：身份只出现在会产生提交的命令上）</li>
- *   <li>退出码 1（冲突）和 128（致命）必须分开处理</li>
- *   <li>{@code core.autocrlf=false}，否则每次改动在 diff 里显示成全文变化</li>
- * </ol>
+ * <p>新建仓库立刻打基点提交并固定分支名为 {@link WorkspaceManager#MAIN_BRANCH}；
+ * 不设仓库级提交身份，身份只出现在会产生提交的入口上。退出码由调用方解释：merge 的 1
+ * 是冲突，128 是致命错误。理由见
+ * {@code docs/decisions/architecture/2026-09-24-git-as-a-subprocess-with-per-commit-identity.md}。
  */
 public final class GitClient {
 
-    /** git 卡住时的兜底时限。正常操作都在毫秒级，只有大仓库的首次 checkout 会慢。 */
+    /** git 卡住时的兜底时限；正常操作是毫秒级，大仓库首次 checkout 会慢。 */
     public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(120);
 
+    /** 单次 git 调用的输出字符上限。 */
     private static final int MAX_OUTPUT_CHARS = 4 * 1024 * 1024;
 
-    /** 会被持久化进仓库配置的项 —— 让用户自己用 IDE 或命令行碰这个仓库时行为也一致。 */
+    /** 同时写入仓库配置的项，使用户用 IDE 或命令行操作该仓库时行为一致。 */
     private static final List<String> PERSISTENT_CONFIG = List.of(
             "core.autocrlf=false",
             "core.longpaths=true",
@@ -69,16 +63,23 @@ public final class GitClient {
     private final Charset outputCharset;
     private final Duration timeout;
 
+    /**
+     * 使用本机编码和 {@link #DEFAULT_TIMEOUT}。
+     *
+     * @param gitExecutable git 可执行文件名或路径
+     * @param sandboxDir 沙箱目录，存放空 hooks 目录与空全局配置
+     */
     public GitClient(String gitExecutable, Path sandboxDir) {
-        // 和 LocalCommandExecutor 同一条规则：先按 UTF-8 解，解不出来按本机编码兜底。
-        // 对 git 来说重要的是**文件内容**（合并冲突时那些中文行），它们是什么编码
-        // 取决于用户的仓库，不是我们说了算 —— 所以更不该在这里固定成 UTF-8
+        // 与 LocalCommandExecutor 同一规则：先按 UTF-8 解，失败后按本机编码；
+        // 冲突时的文件内容编码取决于用户仓库，不能固定成 UTF-8
         this(gitExecutable, sandboxDir, ProcessRunner.nativeCharset(), DEFAULT_TIMEOUT);
     }
 
     /**
-     * @param fallbackCharset 输出**不是合法 UTF-8** 时的兜底字符集。规则见 {@link ProcessRunner}：
-     *                        先按 UTF-8 解，解不出来再用它重解一遍
+     * @param gitExecutable git 可执行文件名或路径
+     * @param sandboxDir 沙箱目录，存放空 hooks 目录与空全局配置
+     * @param fallbackCharset 输出不是合法 UTF-8 时的兜底字符集，规则见 {@link ProcessRunner}
+     * @param timeout 单次 git 调用的超时
      */
     public GitClient(String gitExecutable, Path sandboxDir, Charset fallbackCharset, Duration timeout) {
         this.gitExecutable = Objects.requireNonNull(gitExecutable, "gitExecutable");
@@ -100,12 +101,17 @@ public final class GitClient {
     // ------------------------------------------------------------------
 
     /**
-     * 执行一条 git 子命令，**永远返回结果，不对非零退出码抛异常**。
+     * 执行一条 git 子命令，永远返回结果，不对非零退出码抛异常。
      *
-     * <p>退出码的含义由调用方解释 —— 见 {@link GitCommandException} 的说明。
+     * <p>退出码含义由调用方解释，见 {@link GitCommandException}。不带提交身份：读命令
+     * 以及 {@code add}、{@code checkout}、{@code reset}、{@code clean} 等不写作者信息的
+     * 写命令都走它。
      *
-     * <p>这条入口不带身份：读命令，以及 {@code add}、{@code checkout}、{@code reset}、
-     * {@code clean} 这类不写作者信息的写命令，都走它。
+     * @param workingDirectory 工作目录
+     * @param args git 子命令及参数
+     * @return 执行结果，包括非零退出码
+     * @throws GitCommandException 进程被超时终止
+     * @throws com.codeloom.workspace.exec.ProcessException 进程无法启动或等待时被中断
      */
     public ProcessOutcome run(Path workingDirectory, List<String> args) {
         return execute(buildCommand(workingDirectory, null, args), workingDirectory);
@@ -123,22 +129,32 @@ public final class GitClient {
     }
 
     /**
-     * 带身份执行：{@code -c user.name=… -c user.email=…} 会加在命令前面。
+     * 带提交身份执行：{@code -c user.name=… -c user.email=…} 加在命令前面。
      *
-     * <h2>只有会产生提交的命令该用它</h2>
-     * 仓库级身份是**故意不设**的（见类注释第 3 条），所以谁产生提交谁把身份带上 ——
-     * 眼下就是 {@code commit} 和 {@code merge} 这两条。**其余命令一律用 {@link #run} /
-     * {@link #runOrThrow}**：给一条读命令多带一份身份不会报错，只会让人从代码上看不出
-     * "那次提交是谁写的"，而这件事正是身份这套东西存在的全部理由。
+     * <p>只有会产生提交的命令使用它；不设仓库级身份，其余命令一律用 {@link #run} 或
+     * {@link #runOrThrow}。与 {@link #run} 一样不因非零退出码抛异常：提交失败由调用方
+     * 解释退出码，见 {@link #commitStaged}。
      *
-     * <p>它和 {@link #run} 一样**不抛**：提交失败（没有改动、被 hook 拦下）由调用方
-     * 按退出码解释 —— 见 {@link #commitStaged}。
+     * @param workingDirectory 工作目录
+     * @param identity 提交署名
+     * @param args git 子命令及参数
+     * @return 执行结果，包括非零退出码
+     * @throws GitCommandException 进程被超时终止
+     * @throws com.codeloom.workspace.exec.ProcessException 进程无法启动或等待时被中断
      */
     public ProcessOutcome runAs(Path workingDirectory, CommitIdentity identity, List<String> args) {
         return execute(buildCommand(workingDirectory, identity, args), workingDirectory);
     }
 
-    /** 同 {@link #runAs}，但非零退出码直接抛 {@link GitCommandException}。 */
+    /**
+     * 同 {@link #runAs}，但非零退出码直接抛 {@link GitCommandException}。
+     *
+     * @param workingDirectory 工作目录
+     * @param identity 提交署名
+     * @param args git 子命令及参数
+     * @return 执行结果
+     * @throws GitCommandException 非零退出码或进程被超时终止
+     */
     public ProcessOutcome runAsOrThrow(Path workingDirectory, CommitIdentity identity, List<String> args) {
         List<String> command = buildCommand(workingDirectory, identity, args);
         ProcessOutcome outcome = execute(command, workingDirectory);
@@ -149,26 +165,16 @@ public final class GitClient {
     }
 
     /**
-     * 同 {@link #runOrThrow}，但**要求输出是完整的** —— 被截断过就直接失败。
+     * 同 {@link #runOrThrow}，但要求输出完整：被截断过就直接失败。
      *
-     * <h2>用在哪</h2>
-     * 用在"输出会被解析成数据"的地方：{@link #numstatOf} 数行数和文件名、
-     * {@link #conflictedFiles} 列冲突文件、{@link #countCommits} 读一个数、
-     * {@link #conflictSide} 取整份文件内容。展示性的命令（比如 {@code git log}）
-     * 不需要它 —— 那种地方少显示一截是能接受的。
-     *
-     * <h2>为什么宁可失败</h2>
-     * 这些地方被截断的后果不是"少显示一点"，而是**一个看上去正常、其实是错的答案**：
-     * 少列一个冲突文件、少算几行、把一份被拦腰截断的代码摆出来让人挑"留哪一边"。
-     * 而没有任何地方会因此报错 —— 最坏的那种 bug。
-     *
-     * <p>4M 字符的上限对"一条提交改十万个文件"来说够宽，但对**一个被冲突的大文件**
-     * （锁文件、打包产物、生成出来的 JSON）正好不够 —— 所以这不是假想。
+     * <p>用于输出会被解析成数据的地方（文件清单、行数、冲突文件内容）。截断在这里不是
+     * "少显示一点"，而是一个看上去正常、其实错误的答案；展示性命令不需要它。
+     * 4M 字符对一个被冲突的大文件同样可能不够。
      */
     private ProcessOutcome runWhole(Path directory, List<String> args) {
         List<String> command = buildCommand(directory, null, args);
         ProcessOutcome outcome = execute(command, directory);
-        // 先看截断，再看退出码：被截断的输出**即使退出码是 0** 也不可信
+        // 先看截断，再看退出码：被截断的输出即使退出码为 0 也不可信
         if (outcome.truncated()) {
             throw new GitCommandException(command, outcome,
                     "git 的输出超过 " + MAX_OUTPUT_CHARS + " 字符被截断了，"
@@ -181,17 +187,12 @@ public final class GitClient {
     }
 
     private ProcessOutcome execute(List<String> command, Path workingDirectory) {
-        // git 操作是我们自己发起的、参数可信、耗时可预期，所以不接取消信号，
-        // 只靠类级超时兜底。用户按 Esc 影响的应该是 agent 的工具调用，不是仓库维护操作。
+        // git 操作由我们自己发起，不接取消信号，只靠类级超时兜底
         ProcessOutcome outcome = ProcessRunner.run(command, workingDirectory, environment(), timeout,
                 MAX_OUTPUT_CHARS, outputCharset, CancellationToken.none());
 
-        // **我们把它杀掉的，不是它自己结束的 —— 在这里就断掉。**
-        //
-        // 这一层必须显式判断：那两种终止是**返回值**（因为部分输出得还给调用方），
-        // 不会再以异常形式冒出来。少了它的后果很具体：下面 commitStaged 和 merge 都拿
-        // "退出码 1"当正常业务路径（没有改动 / 有冲突），而一条**超时的** merge 会被读成
-        // "有冲突"—— 那会让人去解决一堆不存在的冲突。
+        // 被杀掉的终止是返回值，必须在这里显式拦截：commitStaged 与 merge 都把
+        // "退出码 1" 当正常业务路径，超时的 merge 否则会被读成"有冲突"
         if (outcome.termination() != CommandTermination.COMPLETED) {
             throw new GitCommandException(command, outcome,
                     "git 命令超过 " + timeout + " 没有结束，已强制终止进程树");
@@ -203,7 +204,7 @@ public final class GitClient {
         List<String> command = new ArrayList<>();
         command.add(gitExecutable);
         command.add("--no-pager");
-        // 不为了刷新索引而顺手拿锁：后台进程不该干扰前台操作
+        // 不为刷新索引而顺手拿锁：后台进程不应干扰前台操作
         command.add("--no-optional-locks");
         if (workingDirectory != null) {
             command.add("-C");
@@ -224,10 +225,7 @@ public final class GitClient {
     }
 
     private List<String> hardening() {
-        // **从 PERSISTENT_CONFIG 起头**，不把那三条再抄一遍：它们本来就要两边都生效
-        //（写进仓库配置是让用户自己碰这个仓库时行为一致，每次再给一遍是防它被改回去）。
-        // 抄成两份的话，改一处就会让"codeloom 自己跑 git"和"用户手动跑 git"分成两套行为
-        // —— 而那正是 PERSISTENT_CONFIG 想避免的事
+        // 从 PERSISTENT_CONFIG 起头，避免抄成两份导致两套行为；每次再给一遍是防它被改回去
         List<String> settings = new ArrayList<>(PERSISTENT_CONFIG);
         settings.addAll(List.of(
                 "core.hooksPath=" + hooksDir,
@@ -242,13 +240,13 @@ public final class GitClient {
 
     private Map<String, String> environment() {
         Map<String, String> env = new LinkedHashMap<>();
-        // 绝不能让 git 等待输入 —— 一个等密码的命令会把执行线程永远挂住
+        // git 绝不能等待输入：等密码的命令会挂住执行线程
         env.put("GIT_TERMINAL_PROMPT", "0");
         env.put("GIT_ASKPASS", "echo");
-        // 不读系统级与用户级配置：行为完全由我们传的 -c 决定，不受机器上别的配置影响
+        // 不读系统级与用户级配置：行为只由传入的 -c 决定
         env.put("GIT_CONFIG_NOSYSTEM", "1");
         env.put("GIT_CONFIG_GLOBAL", emptyGlobalConfig.toString());
-        // 输出不本地化。这不只是好看 —— 我们靠 "nothing to commit" 这类英文串做判断
+        // 输出不本地化：代码依赖 "nothing to commit" 这类英文串做判断
         env.put("LC_ALL", "C");
         return env;
     }
@@ -258,17 +256,16 @@ public final class GitClient {
     // ------------------------------------------------------------------
 
     /**
-     * 新建项目仓库，并**立刻打一个基点提交**。
+     * 新建项目仓库并立刻打一个基点提交。
      *
-     * <p>那个提交不是可有可无的形式：没有它，两条会话分支就是两段互不相关的历史，
-     * 第一次合并时 git 会直接拒绝（{@code refusing to merge unrelated histories}）。
-     * 而"项目从空目录起步"正意味着创建时没有任何提交 —— 所以必须由我们补上这个基点。
+     * <p>没有基点提交，两条会话分支就是互不相关的历史，第一次合并会被 git 拒绝。调用方
+     * 事先放进目录的内容也会一并进入这个提交；晚一个提交放进去，从基点 checkout 的两棵树
+     * 都看不到它。
      *
-     * <p>开始之前已经躺在目录里的东西<strong>一并进这个基点提交</strong>：调用方有时会
-     * 先放好新项目该有的文件（见 {@code LocalWorkspaceManager.initializeRepository}）。
-     * 晚一个提交放进去的话，从基点 checkout 出来的两棵树里都没有它。
-     *
+     * @param repoPath 项目仓库目录
      * @param creator 基点提交的署名，用项目创建者
+     * @throws UncheckedIOException 无法创建仓库目录
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void initRepo(Path repoPath, CommitIdentity creator) {
         try {
@@ -276,10 +273,8 @@ public final class GitClient {
         } catch (IOException e) {
             throw new UncheckedIOException("无法创建仓库目录: " + repoPath, e);
         }
-        // -b 必须显式给：默认分支名依赖 git 版本和 init.defaultBranch 配置。
-        // **名字取常量，不在这儿另写一个字面量** —— 合并、同步、归档都是拿
-        // `WorkspaceManager.MAIN_BRANCH` 去找分支的，这里写死一个和它不同的名字，
-        // 新建的仓库就落在另一个分支上，而那些操作全都找不到它
+        // -b 必须显式给出：默认分支名依赖 git 版本和 init.defaultBranch 配置。
+        // 名字取 WorkspaceManager.MAIN_BRANCH，合并、同步、归档都按它找分支
         runOrThrow(repoPath, List.of("init", "-q", "-b", WorkspaceManager.MAIN_BRANCH));
 
         for (String setting : PERSISTENT_CONFIG) {
@@ -287,11 +282,17 @@ public final class GitClient {
             runOrThrow(repoPath, List.of("config", setting.substring(0, eq), setting.substring(eq + 1)));
         }
 
-        // 先登记再提交。目录里什么都没有时这条不产生任何改动，下面照样是一笔空提交
+        // 先登记再提交；目录为空时下面照样产生一笔空提交
         runOrThrow(repoPath, List.of("add", "-A"));
         runAsOrThrow(repoPath, creator, List.of("commit", "-q", "--allow-empty", "-m", "chore: 初始化空项目"));
     }
 
+    /**
+     * @param directory 工作目录
+     * @param ref 要解析的 ref
+     * @return 解析出的对象 id
+     * @throws GitCommandException ref 不存在、命令失败或被超时终止
+     */
     public String revParse(Path directory, String ref) {
         return runOrThrow(directory, List.of("rev-parse", ref)).stdout().strip();
     }
@@ -300,7 +301,16 @@ public final class GitClient {
     // worktree
     // ------------------------------------------------------------------
 
-    /** {@code git worktree add <target> -b <branch> <baseRef>} */
+    /**
+     * {@code git worktree add TARGET -b BRANCH BASE_REF}。
+     *
+     * @param repoPath 主仓库路径
+     * @param target 新工作区目录
+     * @param branch 新分支名
+     * @param baseRef 分支的起点
+     * @throws UncheckedIOException 无法创建工作区父目录
+     * @throws GitCommandException git 命令失败或被超时终止
+     */
     public void worktreeAdd(Path repoPath, Path target, String branch, String baseRef) {
         try {
             Files.createDirectories(target.getParent());
@@ -312,31 +322,39 @@ public final class GitClient {
     }
 
     /**
-     * {@code git worktree remove --force <path>}：删掉一棵树的工作区目录，并从主仓库的
-     * 工作区名册里注销它。
+     * {@code git worktree remove --force PATH}：删除工作区目录并从主仓库的工作区名册
+     * 注销它。
      *
-     * <h2>为什么必须走 git 而不是直接删目录</h2>
-     * 主仓库的 {@code .git/worktrees/<名字>} 里留着这个工作区的记录（HEAD、索引、
-     * 各种管理文件）。只删目录的话，那条记录还在，于是 {@code git worktree list}
-     * 会一直列出一个不存在的路径，而**同一个键再建一次会失败**（"已经注册过"）。
+     * <p>必须走 git：主仓库的 {@code .git/worktrees} 里留有记录，只删目录会让
+     * {@code git worktree list} 一直列出不存在的路径，同一个键再次注册也会失败。
+     * {@code --force} 是必需的，工作区通常有未提交内容。目录已经不存在的调用方走
+     * {@link #pruneWorktrees}。
      *
-     * <p>{@code --force} 是必需的：工作区里通常有未提交的东西，没有它 git 会拒。
-     *
-     * <p>目录已经不在了的调用方走 {@link #pruneWorktrees} ——
-     * 对它用这条会以一个"路径不存在"的错误结束，而那只是个需要清理的名册。
+     * @param repoPath 主仓库路径
+     * @param worktree 要删除的工作区目录
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void worktreeRemove(Path repoPath, Path worktree) {
         runOrThrow(repoPath, List.of("worktree", "remove", "--force", worktree.toString()));
     }
 
-    /** 清掉名册里那些路径已经不存在的记录。 */
+    /**
+     * 清掉工作区名册里路径已经不存在的记录。
+     *
+     * @param repoPath 主仓库路径
+     * @throws GitCommandException git 命令失败或被超时终止
+     */
     public void pruneWorktrees(Path repoPath) {
         runOrThrow(repoPath, List.of("worktree", "prune"));
     }
 
     /**
-     * 删掉一条分支。**失败不抛**：调用方要的是"这条分支别再挡着"，
-     * 而它本来就不存在时，目的已经达到了。
+     * 删掉一条分支；失败不抛。
+     *
+     * <p>调用方要的是"这条分支别再挡着"，分支本来就不存在时目的已经达到。
+     *
+     * @param repoPath 主仓库路径
+     * @param branch 要删除的分支
      */
     public void branchDelete(Path repoPath, String branch) {
         run(repoPath, List.of("branch", "-D", branch));
@@ -349,49 +367,63 @@ public final class GitClient {
     /**
      * 删掉未跟踪的文件与目录（{@code git clean -fd}）。
      *
-     * <p>回滚必须带上它：{@code reset --hard} **不碰未跟踪的文件**，而 agent 刚写出来、
-     * 还没被任何 checkpoint 收进去的那些文件恰恰就是未跟踪的。只 reset 的话，
-     * "回滚"在最需要它的那个场景里恰好什么都没回滚 —— 用户看着文件还在，会以为功能坏了。
+     * <p>回滚必须带上它：{@code reset --hard} 不碰未跟踪文件，而 agent 刚写、还没进入
+     * checkpoint 的文件正是未跟踪的。刻意不加 {@code -x}，否则被 gitignore 的
+     * {@code node_modules}、{@code target/} 也会被删，回滚一次就要重装依赖。
      *
-     * <p>刻意**不加 {@code -x}**：那会连被 gitignore 的文件一起删（{@code node_modules}、
-     * {@code target/} 之类），回滚一次就要重装一次依赖。不加则只删"本该进版本库、
-     * 却还没进去"的东西 —— 那正好是我们要撤销的那些。
+     * @param worktree 工作区
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void cleanUntracked(Path worktree) {
         runOrThrow(worktree, List.of("clean", "-fd", "-q"));
     }
 
     /**
-     * 把某个提交导出成 zip（{@code git archive}）—— 界面上那个"下载"。
+     * 把某个提交导出成 zip（{@code git archive}）。
      *
-     * <p>为什么不自己遍历文件打包：**"这个提交里有什么" git 比我们清楚** —— 忽略规则、
-     * {@code .gitattributes} 里的 {@code export-ignore}、子模块都算在内，而"下载这个项目"
-     * 要的正是这个语义。它读的是那个提交，不是现在磁盘上有什么。
+     * <p>由 git 判断"这个提交里有什么"，忽略规则、{@code .gitattributes} 的
+     * {@code export-ignore} 和子模块都算在内；导出的是该提交的内容，不是当前磁盘内容。
      *
-     * @param treeish   导出的对象：提交（{@code main}），或者它的某棵子树（{@code main:untitled} ——
-     *                  只导那个目录，zip 里就不会多出那一层前缀）
-     * @param outputZip 输出文件。**必须走文件**：这条路吐的是二进制，而另外几个入口会把
-     *                  stdout 按字符集解码 —— 二进制过一趟字符集就是坏数据。{@code --output}
-     *                  让 git 自己写文件，stdout 保持空，那条文本通路就绕开了
+     * @param repoPath 项目仓库路径
+     * @param treeish 提交（{@code main}）或子树（{@code main:untitled}，zip 中不会多出
+     *                那一层前缀）
+     * @param outputZip 输出文件；必须走文件而不是 stdout，因为 zip 是二进制，文本入口会
+     *                  按字符集解码
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void archive(Path repoPath, String treeish, Path outputZip) {
         runOrThrow(repoPath, List.of("archive", "--format=zip",
                 "--output=" + outputZip.toAbsolutePath(), treeish));
     }
 
-    /** {@code add -A} 后提交。工作区没有改动时返回当前 HEAD，不报错。 */
+    /**
+     * {@code add -A} 后提交；工作区没有改动时返回当前 HEAD，不报错。
+     *
+     * @param worktree 工作区
+     * @param message 提交信息
+     * @param identity 提交署名
+     * @return 新提交的 sha，或没有改动时的当前 HEAD
+     * @throws GitCommandException 提交失败或被超时终止
+     */
     public String commitAll(Path worktree, String message, CommitIdentity identity) {
-        // 这条 add 不带身份：它不写作者信息，产生提交的是下面那一步
+        // add 不写作者信息，因此不带身份；产生提交的是下一步
         runOrThrow(worktree, List.of("add", "-A"));
         return commitStaged(worktree, message, identity);
     }
 
-    /** 只提交已暂存的内容（合并完成后用这个，索引已经是对的，不能再 add）。 */
+    /**
+     * 只提交已暂存的内容；用在合并收尾，此时索引已经是裁决结果，不能再 add。
+     *
+     * @param worktree 工作区
+     * @param message 提交信息
+     * @param identity 提交署名
+     * @return 新提交的 sha，或没有改动时的当前 HEAD
+     * @throws GitCommandException 提交失败或被超时终止
+     */
     public String commitStaged(Path worktree, String message, CommitIdentity identity) {
         ProcessOutcome outcome = runAs(worktree, identity, List.of("commit", "-q", "-m", message));
         if (!outcome.succeeded()) {
-            // 没有改动时 git commit 以退出码 1 结束 —— 那是正常情况，不是冲突也不是错误。
-            // 靠 LC_ALL=C 保证这句英文串稳定可匹配。
+            // 没有改动时 git commit 以退出码 1 结束，这是正常情况；LC_ALL=C 保证英文串稳定
             if (outcome.exitCode() == 1 && outcome.combinedOutput().contains("nothing to commit")) {
                 return revParse(worktree, "HEAD");
             }
@@ -408,12 +440,15 @@ public final class GitClient {
     /**
      * 把 {@code ref} 合并进当前分支。
      *
-     * <p>用 {@code --no-commit} 是为了**在产生合并提交之前停下来看一眼**：
-     * 这样能区分"快进""需要合并提交""有冲突"三种情况，而不是让 git 一口气做完。
+     * <p>{@code --no-commit} 让调用发生在合并提交之前，从而区分快进、需要合并提交与
+     * 有冲突三种情况。
      *
-     * @return 四种状态之一；{@code CONFLICT} 时**不改动工作区之外的状态**，
-     *         但工作区里会留下冲突标记 —— 调用方必须接着调 {@link #mergeAbort}
-     *         或走解决流程，不能放着不管
+     * @param worktree 目标工作区
+     * @param ref 源 ref
+     * @param identity 提交署名；git 在冲突检测前就需要它
+     * @return 合并结果；{@link MergeResult.Status#CONFLICT} 时工作区留下冲突标记，调用方必须继续走
+     *         {@link #mergeAbort} 或解决流程
+     * @throws GitCommandException 非冲突的失败，或进程被超时终止
      */
     public MergeResult merge(Path worktree, String ref, CommitIdentity identity) {
         String beforeHead = revParse(worktree, "HEAD");
@@ -421,8 +456,7 @@ public final class GitClient {
                 List.of("merge", "--no-commit", "--no-edit", ref));
 
         if (outcome.exitCode() == 1) {
-            // 冲突是正常业务路径，不是异常。
-            // headCommit 报的是**合并前**那个 —— 冲突时 HEAD 本来就没动
+            // 冲突是正常业务路径；headCommit 是合并前的 HEAD，冲突时它本来就没动
             return new MergeResult(MergeResult.Status.CONFLICT, conflictedFiles(worktree), beforeHead);
         }
         if (!outcome.succeeded()) {
@@ -442,43 +476,64 @@ public final class GitClient {
         return new MergeResult(MergeResult.Status.MERGED, List.of(), mergeCommit);
     }
 
-    /** 是否正处于合并中途（有未提交的合并）。 */
+    /**
+     * @param worktree 要检查的工作区
+     * @return 正处于合并中途时为 true
+     */
     public boolean mergeInProgress(Path worktree) {
         return run(worktree, List.of("rev-parse", "-q", "--verify", "MERGE_HEAD")).succeeded();
     }
 
-    /** 放弃本次合并，把工作区恢复到合并前。 */
+    /**
+     * 放弃本次合并，把工作区恢复到合并前。
+     *
+     * @param worktree 合并所在的工作区
+     * @throws GitCommandException git 命令失败或被超时终止
+     */
     public void mergeAbort(Path worktree) {
         runOrThrow(worktree, List.of("merge", "--abort"));
     }
 
     /**
-     * {@code git add -- <path>}：把一个已经解决好的冲突文件标记为已解决。
+     * {@code git add -- PATH}：把一个已经解决好的冲突文件标记为已解决。
      *
-     * <p>在 git 的语义里，"add 一个冲突文件"就是"这个文件我处理完了" ——
-     * 冲突的标志存在**索引**里（stage 1/2/3 那几份），而不在工作区的文件内容里。
-     * 所以人工裁决完之后必须这一步，光把文件改成对的内容是不够的。
+     * <p>冲突状态记录在索引里；人工裁决后必须 add，只改工作区文件内容不够。
+     * {@code --} 不能省：文件名以 {@code -} 开头时会被当成选项。
      *
-     * <p>{@code --} 不能省：文件名以 {@code -} 开头时，不隔开会被当成选项。
+     * @param worktree 冲突所在的工作区
+     * @param path 冲突文件路径
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void stageFile(Path worktree, String path) {
         runOrThrow(worktree, List.of("add", "--", path));
     }
 
-    /** 冲突文件清单 —— 就是 UI 上要交给用户裁决的那份列表。 */
+    /**
+     * 冲突文件清单，即 UI 上交给用户裁决的列表。
+     *
+     * @param worktree 要检查的工作区
+     * @return 冲突文件路径
+     * @throws GitCommandException git 命令失败、输出被截断或被超时终止
+     */
     public List<String> conflictedFiles(Path worktree) {
         String output = runWhole(worktree,
-                List.of("diff", "--name-only", "--diff-filter=U", "-z")).stdout();
+                List.of("diff", "--no-ext-diff", "--no-textconv",
+                        "--name-only", "--diff-filter=U", "-z")).stdout();
         return splitNul(output);
     }
 
     /**
      * 取出冲突中某一方的文件内容。
      *
-     * <p>索引里的 stage 2 是"我方"，stage 3 是"对方"。**从索引取比解析工作区文件里的
-     * {@code <<<<<<<} 标记可靠得多**，而且这正是前端并排 diff 需要的两份数据。
+     * <p>从索引取，而不是解析工作区里的 {@code <<<<<<<} 标记；两份内容正是前端并排
+     * diff 所需的两个版本。
      *
-     * @param stage 2 = ours，3 = theirs
+     * @param worktree 冲突所在的工作区
+     * @param stage 2 表示我方，3 表示对方
+     * @param path 冲突文件路径
+     * @return 该侧的完整内容
+     * @throws IllegalArgumentException stage 不是 2 或 3
+     * @throws GitCommandException git 命令失败、输出被截断或被超时终止
      */
     public String conflictSide(Path worktree, int stage, String path) {
         if (stage != 2 && stage != 3) {
@@ -490,8 +545,12 @@ public final class GitClient {
     /**
      * 按文件粒度裁决冲突：整份文件取某一方的版本。
      *
-     * <p>这是 MVP 的最小可行裁决方式 —— 前端是只读查看器，用户没法在界面上手工编辑
-     * 冲突文件。用户选完之后必须再调 {@link #commitStaged} 把合并收尾。
+     * <p>裁决后必须再调 {@link #commitStaged} 收尾合并。
+     *
+     * @param worktree 冲突所在的工作区
+     * @param path 冲突文件路径
+     * @param ours true 取我方，false 取对方
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void resolveConflictByChoosingSide(Path worktree, String path, boolean ours) {
         runOrThrow(worktree, List.of("checkout", ours ? "--ours" : "--theirs", "--", path));
@@ -503,15 +562,14 @@ public final class GitClient {
     // ------------------------------------------------------------------
 
     /**
-     * 硬回滚到某个 commit。
+     * 硬回滚到某个提交；只作用于调用方指定的工作区及其分支。
      *
-     * <h2>它只动调用方指定的那个工作区，所以不会波及任何人</h2>
-     * 每条会话都在一棵**属于某个人**的树里干活（见 {@code WorkspaceId}），
-     * 而 reset 只在这棵树的分支上做。主干和别人的工作区都不在这条路径上。
+     * <p>同步带进来的别人的提交会一起从这棵树的分支上退掉，主干和对方的树不受影响，
+     * 下次同步可以重新取回；代价是回不到同步前的状态。
      *
-     * <p>把主干同步进来确实会让这棵树上带一批别人的提交，但把它们从**我的**分支上退掉，
-     * 丝毫不动他们在主干里的代码、也不动他们自己那棵树 —— 我下次同步就能拿回来。
-     * 代价是我再也回不到同步前的状态。
+     * @param worktree 要重置的工作区
+     * @param commitSha 目标提交
+     * @throws GitCommandException git 命令失败或被超时终止
      */
     public void resetHard(Path worktree, String commitSha) {
         runOrThrow(worktree, List.of("reset", "--hard", commitSha));
@@ -520,29 +578,25 @@ public final class GitClient {
     /**
      * 这一个提交引入的改动。
      *
-     * <h2>为什么是 {@code <sha>^!}，不是 {@code <from> <to>}</h2>
-     * 前半句的理由见 {@code WorkspaceManager#changesIntroducedBy}：中间夹过一次同步进来的
-     * 合并时，"两个提交之间"会把别人的改动也算进来，而"这个提交相对它第一父的改动"不会。
+     * <p>用 {@code SHA^!} 而不是两个提交之间：后者在同步合并之后会把别人的改动算进来；
+     * 前者等于"相对第一父的改动"，并且对根提交也成立（两个参数的写法在根提交上会报
+     * {@code fatal: ambiguous argument}）。区间约定见
+     * {@link WorkspaceManager#changesIntroducedBy}。
      *
-     * <p>{@code ^!} 和写成两个参数（{@code <sha>^ <sha>}）是同一个意思，但它**对根提交也成立** ——
-     * 而两个参数那种写法在根提交上直接 {@code fatal: ambiguous argument}。它**每一轮收尾都要
-     * 跑一次**（协作提醒要报新建的文件），所以"项目刚建出来、第一轮还没产生新提交"这种最平常的
-     * 情况也会走到这里。
+     * <p>{@code core.quotepath=false} 避免中文文件名被转义成八进制串。
      *
-     * <p>{@code core.quotepath=false}：不加的话，中文文件名会被 git 转义成
-     * `"\344\275\240\345\245\275.txt"` 这种八进制串 —— 而那正是这个项目里最常见的路径。
-     *
+     * @param directory 工作区
      * @param commitSha 提交 sha
-     * @return 改动的文件，按路径排序（git 自己就是按路径出的）
+     * @return 改动的文件，按路径排序
+     * @throws GitCommandException git 命令失败、输出被截断或被超时终止
      */
     public List<FileChange> numstatOf(Path directory, String commitSha) {
         String output = runWhole(directory, List.of(
                         "-c", "core.quotepath=false",
-                        "diff", "--numstat", commitSha + "^!"))
+                        "diff", "--no-ext-diff", "--no-textconv", "--numstat", commitSha + "^!"))
                 .stdout();
 
-        // **状态要单独问一次** —— `--numstat` 只说行数，不说"这是新建还是修改"。
-        // 而"新建"是个不同强度的信号（见 FileChange.created），拿行数去猜是不准的
+        // 状态单独问一次：--numstat 只有行数，新建是不同强度的信号（见 FileChange.created）
         Set<String> created = newNameStatusOf(directory, commitSha);
 
         List<FileChange> changes = new ArrayList<>();
@@ -550,7 +604,7 @@ public final class GitClient {
             if (line.isBlank()) {
                 continue;
             }
-            // 每行是「增<TAB>删<TAB>路径」。二进制文件的增删是 `-`，不是数字
+            // 每行是「增、删、路径」三列，制表符分隔；二进制文件的增删列是 -
             String[] parts = line.split("\t", 3);
             if (parts.length < 3) {
                 continue;
@@ -563,31 +617,29 @@ public final class GitClient {
     }
 
     /**
-     * 这个提交里某个文件改了什么 —— 一段统一的 diff 正文。
+     * 这个提交里某个文件改了什么，返回一段 diff 正文。
      *
-     * <p><strong>区间和 {@link #numstatOf} 取的是同一个</strong>：那边写的是简写
-     * {@code <sha>^!}，在普通提交上与这里这两参数等价（实测过）。两者只在**根提交**上分岔，
-     * 而分岔的原因是两边**问的时机不同**：
-     * <ul>
-     *   <li>{@code numstatOf} 是**在轮内**问的，那一刻工作树正好就是这一轮的现状，
-     *       所以"根提交 vs 工作树"恰是答案（项目刚建出来、第一轮还没产生提交时就是它）；</li>
-     *   <li>这里是**事后**问的，工作树早往前走了，那种写法会变成"从起点到现在的全部"——
-     *       一份看着像答案、其实多算了很多东西的正文。所以这里写两个参数，
-     *       让它在根提交上**明确失败**：那时如实说"查不到"，不编。</li>
-     * </ul>
-     * 取同一个区间，是为了让"这里说改了 3 行、点开却有 40 行"这种不一致不可能发生。
+     * <p>与 {@link #numstatOf} 在普通提交上取同一区间（{@code SHA^ SHA}），因此两者的
+     * 统计与正文不会对不上。两者只在根提交上分岔：{@code numstatOf} 在轮内问，工作树
+     * 正是这一轮的现状；这里是事后问，两个参数的写法在根提交上明确失败，而不是给出
+     * "从起点到现在"的错误正文。
      *
-     * <p>**允许截断**，所以不走 {@link #runWhole}（那条路把截断当失败）。
-     * 这里的正文是给人看的：少一截仍然有用，而一份被截断的 diff 会由
-     * {@link FileDiff#truncated()} 如实说出来。
+     * <p>允许截断，所以不走 {@link #runWhole}；{@link FileDiff#truncated()} 如实报告。
+     *
+     * @param directory 工作区
+     * @param commitSha 提交
+     * @param gitPath 仓库根相对路径
+     * @param maxChars 正文字符上限
+     * @return 文件 diff
+     * @throws GitCommandException 提交取不出，或进程被超时终止
      */
     public FileDiff diffOfFile(Path directory, String commitSha, String gitPath, int maxChars) {
         List<String> command = buildCommand(directory, null, List.of(
                 "-c", "core.quotepath=false",
-                "diff", commitSha + "^", commitSha, "--", gitPath));
-        // **不能走 execute**：它用的是类上那个"输出要拿来解析"的大上限，
-        // 而这里要的正是调用方给的那一份 —— 走它的话，`maxChars` 会被静默丢掉，
-        // "截断了"永远为假（这条是测试抓出来的，不是我想到的）
+                "diff", "--no-ext-diff", "--no-textconv",
+                commitSha + "^", commitSha, "--", gitPath));
+        // 不能走 execute：它使用类级大上限，会静默丢掉调用方给的 maxChars，
+        // 使 truncated 永远为假
         ProcessOutcome outcome = ProcessRunner.run(command, directory, environment(), timeout,
                 maxChars, outputCharset, CancellationToken.none());
         if (outcome.termination() != CommandTermination.COMPLETED) {
@@ -602,21 +654,21 @@ public final class GitClient {
     }
 
     /**
-     * 这个提交里**新建**了哪些文件（git 的 {@code A}）。
+     * 这个提交里新建了哪些文件（git 的 {@code A}）。
      *
-     * <p>同一次 diff 分两次问是有意的：`--numstat` 和 `--name-status` 是两个开关，
-     * 合不到一条命令里，而 `--summary` 给的又是另一种格式（不好稳地解析）。
-     * 两次 git 进程换一段直白的代码，值得。
+     * <p>{@code --numstat} 与 {@code --name-status} 合不到一条命令里，{@code --summary}
+     * 又是另一种不易解析的格式，因此分两次询问。
      */
     private Set<String> newNameStatusOf(Path directory, String commitSha) {
         String output = runWhole(directory, List.of(
                         "-c", "core.quotepath=false",
-                        "diff", "--name-status", commitSha + "^!"))
+                        "diff", "--no-ext-diff", "--no-textconv",
+                        "--name-status", commitSha + "^!"))
                 .stdout();
 
         Set<String> created = new HashSet<>();
         for (String line : output.split("\n")) {
-            // 每行是「状态<TAB>路径」。`A` 是新增；`M`/`D`/`R100` 之类都不是
+            // 每行是「状态、路径」两列，制表符分隔；A 表示新增，M、D、R100 等都不是
             String[] parts = line.split("\t", 3);
             if (parts.length >= 2 && "A".equals(parts[0])) {
                 created.add(parts[1]);
@@ -625,7 +677,7 @@ public final class GitClient {
         return created;
     }
 
-    /** git 的 numstat 里除了 `-` 都是十进制数。读不动就当 0 —— 少一个数字不该让整页打不开。 */
+    /** numstat 里除 {@code -} 外都是十进制数；读不动按 0 处理，不让一个数字导致整页失败。 */
     private static int parseInt(String value) {
         try {
             return Integer.parseInt(value.strip());
@@ -634,7 +686,14 @@ public final class GitClient {
         }
     }
 
-    /** {@code main..<branch>} 之间有多少提交（用于"你的会话落后主干 N 个"）。 */
+    /**
+     * 数一段区间里的提交数，例如 {@code main..BRANCH}。
+     *
+     * @param directory 工作区
+     * @param range git 的区间表达式
+     * @return 提交数；输出为空时为 0
+     * @throws GitCommandException git 命令失败、输出被截断或被超时终止
+     */
     public int countCommits(Path directory, String range) {
         String output = runWhole(directory, List.of("rev-list", "--count", range)).stdout().strip();
         return output.isEmpty() ? 0 : Integer.parseInt(output);

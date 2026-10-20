@@ -12,15 +12,11 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 把 {@link ScriptedLlm} 包成一个 {@link LlmClientProvider} —— app 这边的接口测试用它替掉真实模型。
+ * 把 {@link ScriptedLlm} 包装成 {@link LlmClientProvider}，供 app 侧接口测试替代真实模型。
  *
- * <h2>为什么是包装，而不是另写一份</h2>
- * "按脚本出结果、把真实请求记下来、脚本用完了怎么办"这一整套行为只该定义一次，
- * 而那一次在 {@link ScriptedLlm} 里。这里只多做一件事：**同一个客户端给所有用户、
- * 所有模型用** —— 接口测试关心的是剧本，不是密钥（密钥有它自己的测试）。
- *
- * <p>它曾是独立的第二实现，与 agent 那份各自演化（连"脚本用完了"抛什么话都不同）——
- * 夹具漂移的代价是改一边不影响另一边，而两边都还在跑绿。
+ * <p>脚本出结果、记录真实请求、脚本耗尽后的行为只在 {@link ScriptedLlm} 定义一次；这里只
+ * 额外做一件事：同一个客户端供所有用户和模型使用，因为接口测试关心剧本而不是密钥。
+ * 不再维护独立实现，否则两边会各自演化（连脚本耗尽的报错都不同）而测试仍各自为绿。
  */
 public class ScriptedLlmClientProvider implements LlmClientProvider {
 
@@ -36,7 +32,7 @@ public class ScriptedLlmClientProvider implements LlmClientProvider {
         return client.requests();
     }
 
-    /** 每次模型调用**之前**跑一下（传 null 取消）。见 {@link ScriptedLlm#onCall}。 */
+    /** 每次模型调用之前执行一下（传 null 取消）。见 {@link ScriptedLlm#onCall}。 */
     public void onCall(Runnable hook) {
         client.onCall(hook);
     }

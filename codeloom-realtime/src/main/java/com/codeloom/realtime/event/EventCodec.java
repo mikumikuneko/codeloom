@@ -37,48 +37,29 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.util.Objects;
 
 /**
- * {@link Event} 与「{@link EventType} + JSON payload」之间的双向映射。
+ * {@link Event} 与 {@link EventType} 加 JSON payload 之间的双向映射。
  *
- * <h2>手写穷尽 switch，而不是让 Jackson 自己认多态</h2>
- * Jackson 有多态反序列化（{@code @JsonTypeInfo}），一行注解就能自动分派。不用它，有三个理由：
+ * <p>两个方向的 switch 都穷尽且没有 {@code default}：新增事件类型时这里编译不过。
+ * 不用 Jackson 多态注解，是因为注解得加在 domain 的 sealed 接口上，会让零依赖的领域
+ * 模型依赖序列化框架；而且手写映射的字段名就是 record 组件名，不受全局 Jackson 配置影响。
  *
- * <ol>
- *   <li><b>注解写不进 domain。</b> {@code @JsonTypeInfo} 得加在 sealed 接口上，而 domain
- *       模块是零依赖的 —— 加 Jackson 注解就等于让领域模型依赖序列化框架，
- *       以后换格式还得改领域代码。这是六边形最不想出现的那条反向依赖。
- *   <li><b>编译器替我们记着。</b> 下面两个 switch 都没有 {@code default}。
- *       新增一个事件类型，这里**编译不过**，逼着人做决定。用注解自动分派就丢掉了这道防线：
- *       新类型会被安静地接受，然后在某个字段上以错误的方式序列化。
- *   <li><b>落库格式要稳定。</b> 手写的映射里，字段名就是 record 的组件名，不受全局
- *       Jackson 配置（命名策略、非空省略之类）影响。见下面对 {@code MAPPER} 的说明。
- * </ol>
- *
- * <h2>无状态，可共享</h2>
- * 实例不持有任何可变状态，{@code ObjectMapper} 本身也是线程安全的（配置完成后只读），
- * 所以可以安全地在多线程/多虚拟线程间共用。
+ * <p>实例无可变状态，配置完成后的 {@link ObjectMapper} 只读，可跨线程共用。
+ * 理由见 {@code docs/decisions/architecture/2026-09-24-handwritten-exhaustive-switch-in-event-codec.md}。
  */
 public final class EventCodec {
 
     /**
-     * 编解码用的 mapper，**刻意不复用 Spring 容器里那个**。
+     * 落库与传输共用的 mapper，刻意不复用 Spring 容器里的那个。
      *
-     * <p>容器里那个是给 Web 层用的，它的配置（比如 {@code default-property-inclusion}）
-     * 会随接口需求变化。而这里是**落库的持久化格式**：某天有人为了「让响应体更瘦」
-     * 把全局的 null 省略一开，历史事件就会以另一种形式被重新编码 —— 同一个事实两种字节，
-     * 那是 append-only 日志最不该出现的事。所以这里自己配一份，配置只服务于这一个用途。
+     * <p>容器里那个面向 Web 层，配置会随接口需求变化；这里编码的是持久化格式，
+     * 全局配置一变，同一事实就会被重新编码成另一种字节。所以单独配一份，只服务编解码。
      *
-     * <p>两条具体的设置：
-     * <ul>
-     *   <li>{@code ALWAYS}：null 组件也写出去，不省略。「没有 baseCommit」（空项目起步）
-     *       在 JSON 里就应该看得见是 null，而不是靠"这个键不存在"来暗示。
-     *   <li>{@code FAIL_ON_UNKNOWN_PROPERTIES} 关掉：事件表是 append-only 的，
-     *       里面的行要能一直读得出来。将来某个 record 删掉一个组件，旧行里多出来的键
-     *       不该让它直接报错 —— 那是「历史读不出来」，比一个字段丢失严重得多。
-     * </ul>
+     * <p>{@code ALWAYS} 让 null 组件显式写出，例如空项目起步时的 {@code baseCommit}；
+     * 关闭 {@code FAIL_ON_UNKNOWN_PROPERTIES} 让旧行里多出来的键被忽略，保证 append-only
+     * 日志里的历史始终读得出来。
      *
-     * <p>包级可见而不是私有：{@link EventEnvelopeCodec} 要在它外面再包一层信封
-     * （会话、seq、时间）。那一层和这一层是**同一个 wire format 的两部分**，
-     * 各配一份 mapper 只会让两层的编码设置有机会走岔。
+     * <p>包级可见：{@link EventEnvelopeCodec} 在同一 wire format 外面再包一层信封，
+     * 两层必须共用一套编码设置。
      */
     static final ObjectMapper MAPPER = JsonMapper.builder()
             .defaultPropertyInclusion(JsonInclude.Value.ALL_ALWAYS)
@@ -91,10 +72,12 @@ public final class EventCodec {
     /**
      * 一次编码的结果：判别字段与内容分开。
      *
-     * <p>之所以是两条信息一起返回，是因为两个调用方都要这一对：
-     * 写库时要填 {@code event} 表的 {@code type} 与 {@code payload} 两列；
-     * SSE 下行时把这一对写进帧的 {@code data:}（那个 JSON 的 {@code type} 与
-     * {@code payload} 两个键）—— **不用** {@code event:} 字段。
+     * <p>两个调用方都需要这一对：写库时填入 {@code event} 表的 {@code type} 与
+     * {@code payload} 两列；SSE 下行时写进帧的 {@code data:} JSON，键名同为
+     * {@code type} 与 {@code payload}，不使用 {@code event:} 字段。
+     *
+     * @param type    事件类型
+     * @param payload 事件本体的 JSON
      */
     public record EncodedEvent(EventType type, String payload) {
 
@@ -105,11 +88,16 @@ public final class EventCodec {
     }
 
     /**
-     * 事件 → 类型 + payload。
+     * 事件转换为类型加 payload。
      *
-     * <p>对易失事件（{@link AssistantDelta}）同样有效 —— SSE 下行要把流式增量发给浏览器，
-     * 用的就是这个格式。它只是不该进 {@code event} 表，而那件事由
-     * {@code EventStore.append(...)} 的形参类型（{@code PersistentEvent}）在编译期拦住。
+     * <p>也接受易失事件（例如 {@link AssistantDelta}），SSE 下行需要这个格式。易失事件
+     * 不能落库，这一条由 {@code EventStore.append} 的形参类型
+     * {@link com.codeloom.domain.event.PersistentEvent} 在编译期拦住，见
+     * {@code docs/decisions/architecture/2026-09-24-events-split-persistent-and-ephemeral.md}。
+     *
+     * @param event 任意事件
+     * @return 类型与 JSON payload
+     * @throws EventCodecException 序列化失败
      */
     public EncodedEvent encode(Event event) {
         Objects.requireNonNull(event, "event");
@@ -146,14 +134,18 @@ public final class EventCodec {
     }
 
     /**
-     * 类型 + payload → 事件，**全类型、双向对称**。
+     * 类型加 payload 转换为事件；{@link EventType} 的每一种类型都能解。
      *
-     * <h2>为什么 {@link EventType#ASSISTANT_DELTA} 也解得了</h2>
-     * 因为编解码现在服务**两条**线：{@code event} 表，和 Redis Pub/Sub 的消息体。
-     * 流式增量不走数据库，但要跨实例推送给正在看的人 —— 反序列化端必须认它。
+     * <p>包括 {@link EventType#ASSISTANT_DELTA}：编解码服务两条线，{@code event} 表和
+     * Redis Pub/Sub 消息体。流式增量不落库，但要跨实例推送，所以反序列化端必须认得它。
      *
-     * <p>"谁能落库"这条规则不在 codec 里，而在 {@code MyBatisEventStore}：它读出一行之后
-     * 检查 {@code instanceof EphemeralEvent}。codec 是一个纯粹的映射，不该知道这件事。
+     * <p>“谁能落库”不归 codec 管：{@link com.codeloom.realtime.persistence.MyBatisEventStore}
+     * 从表里读出一行后才检查它是不是 {@link com.codeloom.domain.event.EphemeralEvent}。
+     *
+     * @param type    事件类型
+     * @param payload 事件本体的 JSON
+     * @return 对应事件
+     * @throws EventCodecException payload 无法反序列化
      */
     public Event decode(EventType type, String payload) {
         Objects.requireNonNull(type, "type");

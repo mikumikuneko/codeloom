@@ -29,42 +29,18 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 项目内聊天室。**纯人类通道，agent 看不见它。**
+ * 项目内聊天室，纯人类通道，agent 不可见。
  *
- * <h2>三条安全约定</h2>
- * <ol>
- *   <li><b>说话的人来自连接上的已认证身份，不是消息体里的字段。</b>
- *       从消息体里取等于让谁都能冒充别人 —— 聊天室最容易出的那种问题。
- *       {@link ChatInbound} 里干脆没有 authorId 这个字段。
- *   <li><b>没有身份或没有 projectId 的连接直接关掉</b>，而不是让它挂着。
- *       身份由 Spring Security 在握手阶段落到 {@code session.getPrincipal()} 上
- *       （见 {@code SecurityConfig}：{@code anyRequest().authenticated()}），
- *       所以这一支是**防御性的**，不是主路径 —— 一条不知道"谁在说话"的聊天连接没有意义。
- *   <li><b>必须是这个项目的成员</b>（见 {@link #afterConnectionEstablished}）。
- *       URL 里的 {@code projectId} 是**调用方给的**，光有它什么都证明不了。
- * </ol>
+ * <p>说话的人取自连接上的已认证身份，{@link ChatInbound} 没有 authorId 字段；
+ * 没有身份或没有 {@code projectId} 的连接直接关闭；成员校验走 {@link ProjectAccess}，
+ * 非成员与不存在的项目在客户端看来完全一样。
  *
- * <h2>广播回发送者自己，不给它单独的 ack</h2>
- * 前端只有一条渲染路径：收到广播就渲染。分两条路径的话，自己的消息和别人的消息会走两段
- * 代码，而它们迟早会长得不一样。
+ * <p>广播回发送者自己，不另发 ack，前端只保留一条渲染路径。订阅表只在本实例内存里
+ * （项目 → 本实例上的连接）；跨实例依赖消息已落库、客户端刷新。
  *
- * <h2>单实例内存里的订阅表</h2>
- * 每个实例各记各的（谁在本实例上看着这个项目）。跨实例要投递的话，得把每条聊天消息
- * 也过一遍 Redis Pub/Sub —— 而聊天消息本来就落库了，另一个实例上的客户端刷新一下就拿到了。
- * 为聊天室引入一条广播链路，换来的是"另一台机器上的两个人能看到对方打字"这种**没有实际需求**
- * 的能力。
- *
- * <h2>为什么这个类住在 app 而不是 realtime</h2>
- * 和 {@code SessionStreamController} 是同一条理由：**授权是 Web 层的事**。
- * 它要过 {@link ProjectAccess}，而那个类住在 app，依赖方向是 {@code app → realtime} ——
- * realtime 够不到它，放在 realtime 的话这道成员校验就无处可写，
- * 任何人都能 {@code ?projectId=<随便一个 uuid>} 进别人的聊天室。
- *
- * <p>而"搬进 app"这件事附带一条义务：**app 层这套服务/控制器图整体是
- * Web 有条件的**（见 {@code SecurityConfig} 的类注释），所以这个类也得挂上同一个条件 ——
- * 它现在依赖 {@link ProjectAccess}，而那个 bean 只在 Web 上下文里存在。
- * 漏挂的表现很直白：**所有非 Web 的测试一起起不来**，报的是
- * "找不到 ProjectAccess 这个 bean"，而真正的原因是这个类没挂条件。
+ * <p>类住在 app 而不是 realtime：成员校验要用 {@link ProjectAccess}，依赖方向是
+ * {@code app → realtime}，realtime 够不到它。它也因此必须挂上
+ * {@code @ConditionalOnWebApplication}，否则所有非 Web 测试会一起起不来。
  */
 @Component
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -74,21 +50,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     public static final String PATH = "/ws/project-chat";
 
     /**
-     * 用**查询参数**而不是路径变量 {@code /ws/projects/{projectId}/chat}：
-     * 路径变量要从 Spring 塞进 session attributes 的那个 map 里取（一个字符串常量 + 一次强转），
-     * 而那是 Spring 的内部约定；查询参数读的是 URI 本身，是我们自己的约定。
+     * 用查询参数而不是路径变量：路径变量要从 Spring 塞进 session attributes 的 map 里取，
+     * 那是框架的内部约定；查询参数读的是 URI 本身，是我们自己的约定。
      */
     public static final String PROJECT_ID_PARAM = "projectId";
 
     private static final Logger log = LoggerFactory.getLogger(ChatWebSocketHandler.class);
 
     private final ChatMessageRepository messages;
-    /** principal → 用户走这一份，不再自己查一次库（见 CurrentUser） */
+    /** principal → 用户统一走 {@link CurrentUser}，不再自己查库。 */
     private final CurrentUser currentUser;
     private final ProjectAccess access;
     private final ObjectMapper mapper;
 
-    /** 项目 → 正在本实例上看着它的连接。用并发 Set：连接建立与断开来自不同的线程。 */
+    /** 项目 → 正在本实例上看着它的连接。连接建立与断开来自不同线程，所以用并发 Set。 */
     private final Map<ProjectId, Set<WebSocketSession>> watchers = new ConcurrentHashMap<>();
 
     public ChatWebSocketHandler(ChatMessageRepository messages,
@@ -103,33 +78,33 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     // ------------------------------------------------------------------
 
+    /**
+     * 连接建立后校验身份与项目成员资格，通过才登记到本实例的订阅表。
+     *
+     * <p>登录了不等于能进这个聊天室：{@code projectId} 是调用方写在 URL 里的，
+     * 不过 {@link ProjectAccess#requireMember} 的话，任何登录用户填一个 uuid 就能读
+     * 别人的聊天记录。拒绝与“项目不存在”都表现为关闭连接，枚举不出东西。
+     * 在建立时关闭而不是握手时拦截，是为了让拒绝只有一处判定；代价是浏览器会先
+     * {@code onopen} 再 {@code onclose}，前端对两者都只能显示“连不上”。
+     *
+     * @param session 已建立的连接
+     * @throws Exception 关闭连接失败时由框架处理
+     */
     @Override
     public void afterConnectionEstablished(WebSocketSession session) throws Exception {
         ProjectId projectId = projectIdOf(session);
         UserId author = authorOf(session);
         if (projectId == null || author == null) {
-            // 不知道"看哪个项目"或"谁在看"的连接没有意义。关掉，别让它挂着占资源，
-            // 也别让它有机会在后面的消息里蒙混过关
+            // 不知道看哪个项目或谁在看的连接没有意义，也不能让它在后续消息里蒙混过关。
             session.close(CloseStatus.POLICY_VIOLATION);
             return;
         }
 
-        // ★ **登录了不等于能进这个聊天室。**
-        //
-        //   projectId 是**调用方写在 URL 里**的，光有它什么都证明不了 ——
-        //   不过这一道的话，任何一个登录用户随手填一个 uuid 就能读到别人的聊天记录。
-        //   和别的接口一样走 ProjectAccess，于是"不是成员"和"这个项目不存在"
-        //   在客户端看来完全一样（都只是一条被关掉的连接），枚举不出东西来。
-        //
-        //   为什么在这里关而不是在握手时拦（那样能给一个干净的 403）：
-        //   下面那一支已经在做"这条连接不接受"的判定，多开一处会让两条规矩有机会走岔。
-        //   代价是浏览器会先 onopen 再 onclose —— 可这个区别前端也用不上，
-        //   两种情况它都只能显示"连不上"。
         try {
             access.requireMember(author, projectId);
         } catch (RuntimeException rejected) {
-            // 不往上抛：抛出去会让这条连接以一个含混的服务端错误收场，
-            // 而"这不是你的项目"是一个**正常的拒绝**，用 POLICY_VIOLATION 说清楚
+            // 不往上抛：“这不是你的项目”是正常拒绝，用 POLICY_VIOLATION 说清楚，
+            // 而不是让它以含混的服务端错误收场。
             log.debug("拒绝一条聊天连接：用户 {} 不是项目 {} 的成员", author, projectId);
             session.close(CloseStatus.POLICY_VIOLATION);
             return;
@@ -147,15 +122,15 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * 收到一条消息：落库，然后广播给**这个项目**的所有连接。
+     * 收到一条消息：落库，然后广播给这个项目的所有连接，包括发送者。
      *
-     * <p>可见性从 {@code protected} 放宽到 {@code public}：父类是 protected，
-     * 而 {@code ChatWebSocketHandlerTest} 要能直接喂一条消息进来 ——
-     * 那几条测的是"拿到身份之后怎么处理"，用桩驱动比每次架一条真连接快得多。
+     * <p>可见性从父类的 {@code protected} 放宽到 {@code public}，只为了让
+     * {@code ChatWebSocketHandlerTest} 能直接喂消息；真握手那一半由
+     * {@code ChatWebSocketHandshakeTest} 覆盖。时间由服务端盖，不用客户端给的。
      *
-     * <p>端到端那一半（真握手拿不拿得到身份、消息能不能真的回到连接上）由
-     * {@code ChatWebSocketHandshakeTest} 覆盖 —— **两边都要有**：桩测不了握手，
-     * 真连接也测不齐每一条分支。
+     * @param session 发来消息的连接
+     * @param message 消息体，JSON，形状见 {@link ChatInbound}
+     * @throws Exception 向连接写入失败时由框架处理
      */
     @Override
     public void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
@@ -166,24 +141,19 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // 这里**不再查一次成员身份**。连接是长命的，所以"成员后来被移出项目"理论上
-        // 会让一条旧连接继续说话 —— 但**移出成员这个功能现在不存在**（只有加成员）。
-        // 真要做它的时候，必须在一处一起处理：踢掉那个人已建立的连接。
-        // 那是一条要连带想清楚的改动，不是在这里偷偷加一道"每条消息查一次库"的保险 ——
-        // 那种保险守着一个当前不可能发生的场景，代价是每条消息一次查询。
+        // 这里不重新查成员身份：连接是长命的，但“移出成员”这个功能还不存在。
+        // 将来加入它时，必须同时踢掉该用户已建立的连接，而不是在每条消息上加一次查库。
         ChatInbound inbound;
         try {
             inbound = mapper.readValue(message.getPayload(), ChatInbound.class);
         } catch (JsonProcessingException e) {
-            // 一条坏消息不值得把连接掐了（客户端可能只是发了个半截的），
-            // 但也不能一声不吭 —— 那样前端只能表现为"消息发出去了但没人看见"
+            // 坏消息不值得断开连接（客户端可能只发了半截），但必须回一个错误帧，
+            // 否则前端只会表现为“消息发出去了，但没人看见”。
             log.debug("收到无法解析的聊天消息：{}", message.getPayload(), e);
             send(session, write(Map.of("error", "消息格式不对，应为 {\"text\":\"…\"}")));
             return;
         }
 
-        // 时间是**服务端**盖的，不用客户端给的：客户端的钟不可信，
-        // 而聊天记录按时间排序是它最基本的用法
         ChatMessage saved = messages.append(
                 projectId, author, inbound.text(),
                 inbound.anchorEventSeq(), inbound.anchorText(), Instant.now());
@@ -194,7 +164,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     // ------------------------------------------------------------------
 
     private void broadcast(ProjectId projectId, Object payload) {
-        // 序列化一次发给所有人。每人都序列化一遍的话，一条消息有多少人看就做多少次
+        // 只序列化一次，再发给所有人。
         String json = write(payload);
         for (WebSocketSession watcher : watchers.getOrDefault(projectId, Set.of())) {
             try {
@@ -209,9 +179,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     /**
      * 往一个连接上写一帧。
      *
-     * <p><strong>{@code WebSocketSession} 不是线程安全的。</strong> 两个线程同时往一个连接上
-     * {@code sendMessage}，两帧文本可能在底层交错成半截 —— 表现为前端偶尔收到一段坏 JSON，
-     * 而那是偶发的、难复现的那种。这个锁不能省。
+     * <p>{@code WebSocketSession} 不是线程安全的。两个线程同时 {@code sendMessage}，
+     * 两帧文本可能在底层交错成半截，表现为前端偶发收到坏 JSON。这个锁不能省。
      */
     private void send(WebSocketSession session, String json) throws IOException {
         synchronized (session) {
@@ -233,13 +202,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     /**
      * 说话的人。
      *
-     * <p>{@code principal.getName()} 是**账号**（Spring 的 UserDetails 约定），
-     * 所以这里要查一次库换成 UserId —— 认证那一层拿到的本来可以是 id，
-     * 但那是 Security 那一步才能定的细节，这里按"账号 → 用户"来取，
-     * 不提前假设认证层会给出什么。
+     * <p>{@code principal.getName()} 是账号（Spring 的 UserDetails 约定），所以要查一次库
+     * 换成 {@link UserId}；不假设认证层会直接给出 id。
+     *
+     * @return 对应用户；查不到时为 null，调用方据此关闭连接（这条通道没有 HTTP 状态码）
      */
     private UserId authorOf(WebSocketSession session) {
-        // 查不到就返回 null（调用方据此关连接）—— 这条通道没有 HTTP 状态码可用
         return currentUser.find(session.getPrincipal()).map(User::id).orElse(null);
     }
 

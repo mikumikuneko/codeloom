@@ -13,25 +13,20 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * 连库测试的共同前提：起真 Spring 上下文、真连 MySQL、跑完回滚。
+ * 连库测试的共同前提：启动真 Spring 上下文、真连 MySQL、跑完回滚。
  *
- * <h2>为什么起的是完整上下文，而不是手搭一个 SqlSessionFactory</h2>
- * 手搭的话测试用的 MyBatis 配置和生产的就不是一份 —— 比如
- * {@code map-underscore-to-camel-case} 这个默认值两边可能不同，
- * 于是「测试过了但线上映射错位」这种事就有了发生的余地。
- * 起完整上下文等于顺便验了 {@code @MapperScan} 有没有生效、事务代理有没有装上。
+ * <p>必须启动完整上下文而不是手搭 SqlSessionFactory：手搭的 MyBatis 配置可能与生产不同
+ *（例如 {@code map-underscore-to-camel-case} 的默认值），会出现"测试通过但线上映射错位"；
+ * 完整上下文也顺带验证 {@code @MapperScan} 和事务代理确实生效。
  *
- * <h2>为什么 {@code webEnvironment = NONE}</h2>
- * 测的是持久化，不需要 servlet 容器。副作用是 Spring Security 的自动配置
- * 因为没有 web 上下文而不参与，省掉一堆和本测试无关的过滤器链。
+ * <p>{@code webEnvironment = NONE}：测试持久化不需要 servlet 容器，附带好处是
+ * Spring Security 自动配置不参与，省掉无关的过滤器链。
  *
- * <h2>为什么整个类 {@code @Transactional}</h2>
- * 跑完自动回滚，不往开发库里留垃圾。所以断言写的是
- * {@code contains / doesNotContain} 而不是精确相等 —— 库里可能有别人手工造的会话。
- * 需要精确断言的测试（比如聊天室的「最近 N 条」）改用**每次生成新 projectId** 来隔离，
- * 那样这个项目下的消息必然只有本测试自己插的。
+ * <p>整个类 {@code @Transactional}：跑完回滚，不往开发库留数据。因此断言使用
+ * {@code contains}/{@code doesNotContain} 而非精确相等 —— 库里可能有别人手工造的数据。
+ * 需要精确断言的测试改用每次生成新 projectId 来隔离。
  *
- * <p>连不上库（或表没建）时整个类跳过，见 {@link MiddlewareAvailability}。
+ * <p>连不上库或表未建时整个类跳过，见 {@link MiddlewareAvailability}。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @EnabledIf("com.codeloom.app.support.MiddlewareAvailability#isDatabaseReachable")

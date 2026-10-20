@@ -8,25 +8,17 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 「丢弃一条会话」那三下删除，**在一个事务里**。
+ * 丢弃一条会话时删除事件流、幂等键和会话行，三者在同一个事务里。
  *
- * <h2>为什么是一个独立的 bean</h2>
- * 因为 Spring 的 {@code @Transactional} 只在**跨 bean 调用**时生效 ——
- * 在同一个类里自己调自己拿不到代理，事务不会开。这和 {@code SessionWriter}、
- * {@code ProjectMerger} 是同一条理由：给事务边界一个明确的落点，
- * 而不是散落在调用方的自觉里。
+ * <p>拆成独立 bean 是因为 {@code @Transactional} 只在跨 bean 调用时生效，与
+ * {@code SessionWriter}、{@code ProjectMerger} 同理。
  *
- * <h2>三样东西为什么必须一起</h2>
- * 一条会话在库里留下的东西有三处：事件流、幂等键、它自己那一行。
- * 只删掉一部分会留下**没有任何路径能修回来**的状态 ——
- * 会话都没了，谁也不会再去碰它的事件或幂等键，那些行于是永远住在那里，
- * 而且看上去像"某个会话还活着"。
+ * <p>三者必须一起删：只删一部分会留下无法修复的残留 —— 会话行没了，再也没有入口会去碰
+ * 它的事件或幂等键，那些行会永远留着，看上去像某条会话还活着。顺序只是"先清痕迹、
+ * 最后删身份"，事务使顺序不影响结果。
  *
- * <p>顺序是"先清痕迹、最后抹掉身份"。事务保证它和别的顺序等价，所以这个顺序只是为了好读。
- *
- * <h2>它不碰工作区</h2>
- * 树属于「人 + 项目」（见 {@code WorkspaceId}），不属于任何一条会话 ——
- * 这正是"丢掉对话但代码留着"能成立的地方。
+ * <p>不碰工作区：树属于「人 + 项目」（见 {@code WorkspaceId}），"丢掉对话但代码留着"
+ * 由此成立。
  */
 @Component
 public class SessionErasure {
@@ -43,6 +35,9 @@ public class SessionErasure {
         this.sessions = sessions;
     }
 
+    /**
+     * @param sessionId 要抹掉的会话
+     */
     @Transactional
     public void erase(SessionId sessionId) {
         events.bySession(sessionId);

@@ -11,11 +11,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/**
- * 验证命令的探测。
- *
- * <p>不需要中间件，也不需要容器 —— 它只认几个文件是否存在。
- */
+/** 验证命令探测：只依据工作区里是否存在若干构建文件。 */
 class VerificationPlanTest {
 
     /** 探测会认的构建文件，以及各自该用哪个可执行文件。 */
@@ -40,10 +36,8 @@ class VerificationPlanTest {
     @Test
     @DisplayName("【跨模块不变量】探测出来的可执行文件，一个不落全在 REQUIRED_EXECUTABLES 里")
     void everyDetectedCommandUsesADeclaredExecutable() throws IOException {
-        // 这条守的是"探测出来的命令"和"命令白名单"之间的耦合：两边住在不同模块、
-        // 各自演化，而少放行一个的表现是**自动验证永远以"命令被拒"告终**。
-        // 宣言在 VerificationPlan.REQUIRED_EXECUTABLES，白名单那一侧由
-        // codeloom-app 的 VerificationWhitelistTest 断言
+        // 守住探测结果与命令白名单的跨模块耦合；白名单一侧由 app 模块的
+        // VerificationWhitelistTest 断言。
         for (String marker : MARKERS) {
             Files.writeString(worktree.resolve(marker), "");
             String executable = VerificationPlan.detect(worktree).orElseThrow().command().getFirst();

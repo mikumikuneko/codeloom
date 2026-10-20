@@ -10,21 +10,21 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * {@code project} / {@code project_member} 两张表的读写。
+ * {@code project} 与 {@code project_member} 两张表的读写。
  *
- * <p>成员相关的语句也放在这里，而不是另开一个 {@code ProjectMemberMapper}：两张表没有
- * 独立的生命周期，任何一处提到成员都是「某个项目的成员」，拆开只会让调用方每次都要
- * 同时拿着两个 mapper。
+ * <p>成员语句放在同一接口：两张表没有独立生命周期，成员总是"某个项目的成员"。
  */
 @Mapper
 public interface ProjectMapper {
 
     /**
-     * 新建或整体更新项目本身。成员是另一张表，不在这条语句里。
+     * 新建或整体更新项目本身；成员在另一张表，不在这条语句里。
      *
-     * <p><strong>{@code owner_id} 在 {@code UPDATE} 那一半里</strong>，这和别的字段
-     * 不一样：房主是**会变**的 —— 他退出时项目转给剩下那个人
-     * （见 {@code Project.withMemberRemoved}）。少了这一半，房主易主就只在内存里成立。
+     * <p>{@code owner_id} 也在 {@code UPDATE} 中：房主会变化，他退出时项目转给剩下的
+     * 成员（见 {@code Project.withMemberRemoved}）。少了这一半，易主只在内存里成立。
+     *
+     * @param row 要保存的项目
+     * @return 影响行数
      */
     @Insert("""
             INSERT INTO project (id, owner_id, name, repo_path)
@@ -35,24 +35,36 @@ public interface ProjectMapper {
             """)
     int save(ProjectRow row);
 
+    /**
+     * @param id 项目 id
+     * @return 项目行；不存在时为 null
+     */
     @Select("SELECT " + ProjectRow.COLUMNS + " FROM project WHERE id = #{id}")
     ProjectRow findById(@Param("id") String id);
 
     /**
-     * 加锁读出项目行。和 {@link #findById} 的区别是它读**最新已提交版本**，
-     * 并把行锁到事务结束 —— 普通查询在一个先读过别的东西的事务里会一直看旧快照。
+     * 加锁读出项目行。
+     *
+     * <p>与 {@link #findById} 的区别是读取最新已提交版本，并把行锁持有到事务结束；
+     * 普通查询在先读过别的东西的事务里会一直看到旧快照。
+     *
+     * @param id 项目 id
+     * @return 项目行；不存在时为 null
      */
     @Select("SELECT " + ProjectRow.COLUMNS + " FROM project WHERE id = #{id} FOR UPDATE")
     ProjectRow findByIdForUpdate(@Param("id") String id);
 
     /**
-     * 某人参与的项目，分页。JOIN 而不是先查 id 再 IN，省一次往返，也天然去重。
+     * 某人参与的项目，分页。
      *
-     * <p>{@code ORDER BY} 必须稳定，否则 {@code OFFSET} 翻页会漏条或重复 ——
-     * 姓名相同的项目按 id 再排一次就够了。
+     * <p>用 JOIN 省一次往返并天然去重。{@code ORDER BY} 必须稳定，否则
+     * {@code OFFSET} 翻页会漏条或重复。退出项目会删掉成员行，JOIN 自然把它排除，
+     * 不存在"还在但看不见"的第三种状态。
      *
-     * <p>退出的项目自然不在这张单子上：退出删掉的是他那一行成员关系，JOIN 就接不上了。
-     * 没有"还在、但看不见"的第三种状态，所以这里也不需要额外条件。
+     * @param userId 用户 id
+     * @param limit 每页条数
+     * @param offset 偏移量
+     * @return 项目行，按名称再按 id 排序
      */
     @Select("""
             SELECT p.id, p.owner_id AS ownerId, p.name, p.repo_path AS repoPath
@@ -66,7 +78,12 @@ public interface ProjectMapper {
                                   @Param("limit") int limit,
                                   @Param("offset") int offset);
 
-    /** 一次取多个项目的全部成员，避免「按项目逐个查」的 N+1。 */
+    /**
+     * 一次取多个项目的全部成员，避免 N+1。
+     *
+     * @param projectIds 项目 id 集合
+     * @return 成员行
+     */
     @Select("""
             <script>
             SELECT project_id AS projectId, user_id AS userId
@@ -78,8 +95,10 @@ public interface ProjectMapper {
     List<ProjectMemberRow> findMembers(@Param("projectIds") Collection<String> projectIds);
 
     /**
-     * 加锁读出一个项目的成员行。和 {@link #findMembers} 的分工同
-     * {@link #findByIdForUpdate}：给"读到之后要基于成员集合做决定"的调用方用。
+     * 加锁读出一个项目的成员行，给"读到之后要基于成员集合做决定"的调用方用。
+     *
+     * @param projectId 项目 id
+     * @return 成员行，锁持有到事务结束
      */
     @Select("""
             SELECT project_id AS projectId, user_id AS userId
@@ -90,27 +109,40 @@ public interface ProjectMapper {
     List<ProjectMemberRow> findMembersForUpdate(@Param("projectId") String projectId);
 
     /**
-     * 加锁读出项目行，给"改动共享主干"的操作（合并）做互斥用。
+     * 加锁读出项目行，给改动共享主干的操作（合并）做互斥。
      *
-     * <p>{@code FOR UPDATE} 不能去掉，理由和 {@code WorkspaceMapper#lockFencingToken} 一样：
-     * 普通查询读到的东西在事务提交前就可能过期，而锁会一直挡到事务结束。
+     * <p>{@code FOR UPDATE} 不能去掉：普通查询读到的值在事务提交前就可能过期，而锁会
+     * 持有到事务结束。
      *
+     * @param id 项目 id
      * @return 项目 id；项目不存在时为 null
      */
     @Select("SELECT id FROM project WHERE id = #{id} FOR UPDATE")
     String lockById(@Param("id") String id);
 
     /**
-     * 抹掉项目行。**调用方必须先清成员行**（{@link #deleteMembers}）——
-     * 这个项目里没有外键、也没有级联（见 schema.sql 开头那条约定），
-     * 顺序写反的话会留下一堆没有项目的成员行。
+     * 删除项目行；调用方必须先清成员行（{@link #deleteMembers}）。
+     *
+     * <p>这里没有外键与级联（见 schema.sql 开头的约定），顺序写反会留下孤儿成员行。
+     *
+     * @param id 项目 id
+     * @return 删除的行数
      */
     @Delete("DELETE FROM project WHERE id = #{id}")
     int delete(@Param("id") String id);
 
+    /**
+     * @param projectId 项目 id
+     * @return 删除的行数
+     */
     @Delete("DELETE FROM project_member WHERE project_id = #{projectId}")
     int deleteMembers(@Param("projectId") String projectId);
 
+    /**
+     * @param projectId 项目 id
+     * @param userId 成员用户 id
+     * @return 插入的行数
+     */
     @Insert("INSERT INTO project_member (project_id, user_id) VALUES (#{projectId}, #{userId})")
     int insertMember(@Param("projectId") String projectId, @Param("userId") String userId);
 }

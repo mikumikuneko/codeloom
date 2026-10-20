@@ -15,65 +15,56 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 每条会话那条**活着的**投影 —— 会话的活状态，住在进程内存里。
+ * 每条会话的活投影，住在进程内存里。
  *
- * <h2>为什么要有它</h2>
- * 循环真正要的只有三样东西 —— 已经投出来的上下文、这条对话读过哪些文件、
- * 有没有一次"批准了却还没跑"的调用 —— 它们全都可以跟着事件一路走过去，
- * 不必每迭代一次就把整条事件流读回来从头投影（见 {@link ContextAssembler.Projection}）。
+ * <p>循环只需要已投出的上下文、读过哪些文件、有没有"批准了却还没跑"的调用；
+ * 这些都能跟着事件折叠，不必每次迭代都重读整条事件流（见
+ * {@link ContextAssembler.Projection}）。它只是派生缓存：丢失、落后或进程重启都只会多算
+ * 一次，不会算错。
  *
- * <p>两个参考实现（deepseek harness、Claude Code）都是这个形状：会话在内存里是**活的**，
- * 磁盘/数据库只负责**落盘与重启恢复**。我们把活状态放在这里 —— 它**只是派生缓存**：
- * 丢了、落后了、进程重启了，都只是多算一次，不会算错（见下面的补读）。
+ * <p>每次交给调用方前先 {@code readAfter(上次的 seq)} 补读到最新，因此其他实例写入的事件
+ * （同步、合并、别人的操作）也接得住；压缩、清理旧结果、回滚这类会回头改投影的事件会让它
+ * 推倒重来。
  *
- * <h2>它读不到旧的</h2>
- * 每次交给调用方之前先补读一次：{@code readAfter(上次的 seq)}，一直补出新的为止。
- * 所以"另一个实例往这条会话写了事件"（同步、合并、别人的操作）也接得住 ——
- * 补读到什么就折什么，包括那三种会**回头改**投影的事件（压缩、清理旧结果、回滚）：
- * 投影见到它们会自己推倒重来。
- *
- * <h2>它有上限，超了就把最久没用过的那条放下</h2>
- * 这是**服务端**：会话数没有上限，而这张表按"跑过一轮的会话数"只增不减。
- * 上限有两条，**取先到的那条**：条数（{@code codeloom.live-projections}）和
- * 大致占用的字节（{@code codeloom.live-projections-bytes}）。为什么要字节那一条 ——
- * 一条 500 轮的会话和一条 2 轮的差几个数量级，只看条数等于没有内存边界。
- *
- * <p>放下一条**只是慢一次**：它下次要被用到时从事件流重建。所以淘汰不需要任何
- * "正在跑的不许踢"的机制 —— 一轮从头到尾握着的是投影对象本身，条目没了也影响不到它。
+ * <p>上限有两条，取先到者：条数（{@code codeloom.live-projections}）和大致字节数
+ * （{@code codeloom.live-projections-bytes}）。只看条数没有内存边界：500 轮的会话与
+ * 2 轮的相差几个数量级。淘汰只是让下次使用变慢（会从事件流重建），
+ * 不需要"正在跑的不许踢"：一轮持有的是投影对象本身，条目被移除不影响它。
  */
 @Component
 public class SessionProjections {
 
-    /** 一次补读最多拉这么多条，拉满就再拉一轮。没有它，一条长会话要一次全读进来。 */
+    /** 一次补读最多拉这么多条，拉满再拉一轮；否则一条长会话要一次全读进来。 */
     private static final int PAGE = 500;
 
     /**
-     * 投影器。**全项目就一个**（它自己不持有状态），配置在装配它的那一处定死。
+     * 投影器。全项目只有一个（自身无状态），在装配处定死。
      *
-     * <p>投影里唯一用"按 id 查用户名"的是**别人捎来的留言**（那段话要写明来源，
-     * 见 {@link ContextAssembler}）。查发生在**折进去的那一刻**：折好的消息不再变
-     *（前缀必须逐字节稳定），所以改过用户名之后，模型看到的仍是折进去时的那个名字，
-     * 而**界面**每次渲染都现查、显示的是新名字。
+     * <p>投影里唯一按 id 查用户名的是别人捎来的留言（那段话要写明来源，见
+     * {@link ContextAssembler}）。查询发生在折进去的那一刻：折好的消息不再变（前缀必须
+     * 逐字节稳定），所以改过用户名后模型看到的仍是旧名字，而界面每次渲染现查、显示新名字。
      */
     private final ContextAssembler assembler;
 
     private final EventStore events;
 
-    /** 常驻多少条。 */
+    /** 常驻条数上限。 */
     private final int maxLive;
 
-    /** 常驻大致占多少字节。见 {@link Live#sizeBytes()} 里那个"大致"。 */
+    /** 常驻大致字节上限，见 {@link Live#sizeBytes()}。 */
     private final long maxLiveBytes;
 
     /**
-     * 按**访问顺序**排：每次拿到一条就把它挪到末尾，淘汰从最前面开始。
+     * 按访问顺序排列：每次取用挪到末尾，淘汰从最前开始。
      *
-     * <p>{@code LinkedHashMap} 一行都写不出来，加锁才写得出来（它读写都要动顺序），
-     * 所以只在**碰这张表的那两小段**里加锁：补读是 I/O，绝不能锁在里面 ——
-     * 那样所有会话的 acquire 会互相排队。
+     * <p>{@code LinkedHashMap} 无法无锁维护，所以只在操作这张表的两小段里加锁；
+     * 补读是 I/O，绝不能放在锁内，否则所有会话的 acquire 会互相排队。
      */
     private final Map<SessionId, Live> live = new LinkedHashMap<>(16, 0.75f, true);
 
+    /**
+     * @throws IllegalArgumentException 任一上限不是正数
+     */
     public SessionProjections(EventStore events, ContextAssembler assembler,
                               @Value("${codeloom.live-projections}") int maxLive,
                               @Value("${codeloom.live-projections-bytes}") DataSize maxLiveBytes) {
@@ -88,21 +79,27 @@ public class SessionProjections {
     }
 
     /**
-     * 这条会话的投影，**已经折到库里最新的一条**。
+     * 这条会话的投影，已经折到库里最新的事件。
      *
-     * <p>拿到的对象是**共享的、活的**：调用方（这一轮）会继续往它上面折自己新产生的事件。
-     * 同一时刻只有一轮在跑这条会话（执行租约是按工作区发的，见 {@code ExecutionLease}），
-     * 所以这里不需要比"一个会话一条"更重的同步 —— 包括补读那一段。
+     * <p>返回的对象是共享且活的，调用方会继续往上折本轮产生的事件。同一会话同时只有一轮
+     * 在跑（执行租约按工作区发放），因此不需要比"一会话一条"更重的同步，补读也一样。
+     *
+     * @param session 会话
+     * @return 已补读到最新的活投影
      */
     public ContextAssembler.Projection acquire(Session session) {
         Live entry = liveEntry(session);
-        // 补读在锁**外面**：它是数据库往返，而这张表是所有会话共用的
+        // 补读在锁外：它是数据库往返，而这张表由所有会话共用
         entry.catchUp(session.model().systemPrompt());
         evictBeyondBudget(entry);
         return entry.projection;
     }
 
-    /** 这条会话没了（被丢弃）—— 把它的投影也放下。**放下而已**，它不承担任何事实责任。 */
+    /**
+     * 会话没了（被丢弃）时放下它的投影。它只是缓存，不承担事实责任。
+     *
+     * @param sessionId 已消失的会话
+     */
     public void forget(SessionId sessionId) {
         synchronized (live) {
             live.remove(sessionId);
@@ -110,10 +107,10 @@ public class SessionProjections {
     }
 
     /**
-     * 这张表现在的样子：常驻几条、大致多少字节、上限是多少。
+     * 这张表的当前状态，只用于诊断（见 {@code LiveProjectionsInfo}）：常驻数贴近上限就该调高，
+     * 长期只有个位数就该调低；没有这个数，两个上限只能凭感觉定。
      *
-     * <p>**只给诊断用**（见 {@code LiveProjectionsInfo}）。它回答的是"该不该调那两个上限"：
-     * 常驻数一直贴着上限，就该往上调；常年是个位数，就该往下调。没有这个数，那两个值只能凭感觉定。
+     * @return 常驻条数、大致字节数和两个上限
      */
     public LiveReport liveReport() {
         synchronized (live) {
@@ -121,11 +118,16 @@ public class SessionProjections {
         }
     }
 
-    /** 见 {@link #liveReport()}。 */
+    /**
+     * @param count           常驻条数
+     * @param approximateBytes 大致占用字节
+     * @param maxCount        条数上限
+     * @param maxBytes        字节上限
+     */
     public record LiveReport(int count, long approximateBytes, int maxCount, long maxBytes) {
     }
 
-    /** 常驻这些大致占多少字节。**调用方必须已经持有 {@code live} 的锁。** */
+    /** 常驻投影大致占多少字节；调用方必须已经持有 {@code live} 的锁。 */
     private long totalBytes() {
         long bytes = 0;
         for (Live entry : live.values()) {
@@ -141,10 +143,8 @@ public class SessionProjections {
     }
 
     /**
-     * 淘汰到两条上限之内，**最久没用过的先走**。
-     *
-     * <p>刚用过的那条不会是最旧的（它刚被挪到末尾），但还是显式跳过 ——
-     * 免得哪天上限被设成 0 之类的怪值之后，它把自己踢掉、于是这一轮拿到一条已经不存在的投影。
+     * 淘汰到两条上限之内，最久未用的先走。刚用过的那条虽然已被挪到末尾，仍显式跳过，
+     * 避免上限被设成怪值时它把自己踢掉、让本轮拿到已不存在的投影。
      */
     private void evictBeyondBudget(Live justUsed) {
         synchronized (live) {
@@ -168,7 +168,7 @@ public class SessionProjections {
         private String systemPrompt;
         private long lastSeq;
 
-        /** 上次算出来的体积；负数表示"还没算过，或者又折过事件了"。 */
+        /** 上次算出的体积；负数表示尚未计算或又折过事件。 */
         private long sizeBytes = -1;
 
         private Live(Session session) {
@@ -178,16 +178,15 @@ public class SessionProjections {
         }
 
         /**
-         * 建一条投影，并告诉它**重来时去哪取整条流**。
-         *
-         * <p>**必须给**：这个类是**按页**喂的（见 {@link #catchUp}），而投影遇到压缩、清理旧结果、
-         * 回滚时要拿整条流重来一遍 —— 手里那一片不够，前面那一整段会静默消失。
+         * 建投影，并告诉它重建时去哪里取整条流。必须提供：本类按页喂事件，
+         * 而投影遇到压缩、清理旧结果、回滚需要整条流重来，手里那一片不够，
+         * 缺失的前段会静默消失。
          */
         private ContextAssembler.Projection newProjection(String prompt) {
             return assembler.projection(prompt, () -> events.readAll(sessionId));
         }
 
-        /** 大致占多少字节。算一次就留着，直到它又折了事件。 */
+        /** 大致占多少字节；算一次就缓存，直到再次折入事件。 */
         private long sizeBytes() {
             if (sizeBytes < 0) {
                 sizeBytes = projection.approximateSizeBytes();
@@ -196,14 +195,11 @@ public class SessionProjections {
         }
 
         /**
-         * 把库里还没折进来的补齐。
+         * 把库里尚未折入的事件补齐。分页拉取，拉满再拉一轮；漏掉一页会让模型看不见中间
+         * 那一段，且不会报错。
          *
-         * <p>分页拉：一次拉满就再拉一轮。漏掉一页的后果是**模型看不见中间那一段**，
-         * 而它不会报错。
-         *
-         * <p>系统提示词理论上跟着会话一辈子不变，但它是投影的**第一个消息**、
-         * 即缓存前缀的起点。万一哪天它变了（改了配置、换了模型带新提示词），
-         * 缓存里的第一个消息就成了旧的。所以这里顺手比一下，不一样就把这条投影作废重建。
+         * <p>系统提示词通常是投影的第一条消息，也是缓存前缀的起点。它一旦变化（改配置、
+         * 换模型带入新提示词），缓存的首条消息就陈旧了，所以这里比较后直接作废重建。
          */
         private void catchUp(String currentPrompt) {
             if (!systemPrompt.equals(currentPrompt)) {

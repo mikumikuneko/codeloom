@@ -31,24 +31,14 @@ import com.codeloom.domain.event.WorkspaceChanges;
 import java.util.Optional;
 
 /**
- * 「一次工具调用走到了哪一步」—— 从事件里读出来，**全仓只有这一处**。
+ * 「一次工具调用走到了哪一步」——从事件里读出来，全仓只有这一处。
  *
- * <h2>为什么要有它</h2>
- * 好几个地方都要问"这次调用结束了没有"，而它们问的**不是同一个问题**：投影要判
- * "尾部那次批准了但还没补跑"，崩溃恢复要判"哪些是执行到一半"，压缩要判"哪些结果能清"。
- * 问题不同、答案不同，但**"哪些事件算一次调用的终局"是同一件事**。
+ * <p>投影、崩溃恢复与压缩都要问"这次调用结束了没有"，但各自问的不是同一件事；共同点只有
+ * "哪些事件算终局"。若终局事件在两处各列一遍，漏掉一种不会报错——崩溃恢复会给一条早已
+ * 结束的调用再补一条"进程重启、没有完成"。这里只给步名，同一件事在各处含义相反，由各方
+ * 自己判断。见 {@code docs/decisions/bug-fix/2026-10-10-a-waiting-call-is-not-an-interrupted-call.md}。
  *
- * <p>这件事从前在两个地方各列了一遍（一处 {@code instanceof} 链、一处带 {@code default}
- * 的 switch），而**漏掉一种终局事件不会报错**：恢复会给一条早就结束的调用再补一条
- * "进程重启、没有完成"。
- *
- * <h2>它只回答"是哪一步"，不回答"那一步意味着什么"</h2>
- * 同一件事对不同的人意味着相反的东西，这是**刻意**的：{@code ToolApprovalRequested}
- * 在投影那边算"还没收尾"（那条 {@code tool_calls} 还等着配对），在崩溃恢复那边算
- * "不是执行到一半"（那条命令压根还没跑）。所以这里只给步名，各自去判。
- *
- * <p>实现是**一个穷尽 switch 表达式、不带 default**：新增一种事件，这里编译不过 ——
- * 而那正是要的（新事件多半得先答一句"它落在调用生命线的哪一步"）。
+ * <p>实现是穷尽 switch 表达式、不带 default：新增一种事件，这里编译不过。
  */
 public final class ToolCallLifecycle {
 
@@ -59,40 +49,65 @@ public final class ToolCallLifecycle {
     private enum Change {
         /** 请求了。 */
         OPENED,
-        /** 有结局了：跑完 / 被取消 / 被中断 / 被拒绝 —— **终局是这四种**。 */
+        /** 有结局了：跑完 / 被取消 / 被中断 / 被拒绝——终局是这四种。 */
         CLOSED,
         /** 挂起等人批。 */
         APPROVAL_ASKED,
         /** 批了（那条调用于是又欠一次执行）。 */
         APPROVAL_GRANTED,
-        /** 拒了（它从此没有下文）。 */
+        /** 拒了（随后由 {@code ToolRejected} 收尾）。 */
         APPROVAL_REFUSED,
     }
 
     private record Step(String callId, Change change) {
     }
 
-    /** 这次调用被请求了 —— 生命线的起点。 */
+    /**
+     * 这次调用被请求了——生命线的起点。
+     *
+     * @param event 待判定的事件
+     * @return 调用 id；事件不是 {@code ToolCallRequested} 时为空
+     */
     public static Optional<String> openedBy(Event event) {
         return callIdOf(event, Change.OPENED);
     }
 
-    /** 这次调用**有结局了**：跑完、被取消、被中断、被拒绝。 */
+    /**
+     * 这次调用有结局了：跑完、被取消、被中断、被拒绝。
+     *
+     * @param event 待判定的事件
+     * @return 调用 id；事件不是这四种终局之一时为空
+     */
     public static Optional<String> closedBy(Event event) {
         return callIdOf(event, Change.CLOSED);
     }
 
-    /** 这次调用挂起等人批。 */
+    /**
+     * 这次调用挂起等人批。
+     *
+     * @param event 待判定的事件
+     * @return 调用 id；事件不是 {@code ToolApprovalRequested} 时为空
+     */
     public static Optional<String> approvalAskedBy(Event event) {
         return callIdOf(event, Change.APPROVAL_ASKED);
     }
 
-    /** 这次调用被批准了。 */
+    /**
+     * 这次调用被批准了。
+     *
+     * @param event 待判定的事件
+     * @return 调用 id；事件不是批准答复时为空
+     */
     public static Optional<String> approvalGrantedBy(Event event) {
         return callIdOf(event, Change.APPROVAL_GRANTED);
     }
 
-    /** 这次调用被拒绝了。 */
+    /**
+     * 这次调用被拒绝了。
+     *
+     * @param event 待判定的事件
+     * @return 调用 id；事件不是拒绝答复时为空
+     */
     public static Optional<String> approvalRefusedBy(Event event) {
         return callIdOf(event, Change.APPROVAL_REFUSED);
     }
@@ -108,15 +123,15 @@ public final class ToolCallLifecycle {
             case ToolResult result -> Optional.of(new Step(result.callId(), Change.CLOSED));
             case ToolCancelled(String callId) -> Optional.of(new Step(callId, Change.CLOSED));
             case ToolInterrupted(String callId) -> Optional.of(new Step(callId, Change.CLOSED));
-            // 拒绝 = 这次调用**到此为止**：它没跑过，而且不会再有下文。
-            // 和上面那三种一样是"终局"，只是终局的原因不同
+            // 拒绝也是终局：这次调用没跑过，也不会有下文，只是终局原因不同
+            // （见 docs/decisions/bug-fix/2026-10-05-a-rejected-call-gets-its-own-event.md）
             case ToolRejected(String callId) -> Optional.of(new Step(callId, Change.CLOSED));
             case ToolApprovalRequested asked ->
                     Optional.of(new Step(asked.callId(), Change.APPROVAL_ASKED));
             case ToolApprovalResolved resolved -> Optional.of(new Step(resolved.callId(),
                     resolved.approved() ? Change.APPROVAL_GRANTED : Change.APPROVAL_REFUSED));
 
-            // 剩下的和"这次调用走到哪一步"没关系。**穷尽列出来**，见类注释
+            // 其余事件与"这次调用走到哪一步"无关；穷尽列出，见类注释
             case AgentNoteDelivered ignored -> Optional.empty();
             case AssistantDelta ignored -> Optional.empty();
             case AssistantMessage ignored -> Optional.empty();

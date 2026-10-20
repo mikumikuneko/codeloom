@@ -41,25 +41,21 @@ class ToolTest {
                 new CommandResult(0, "假装跑过了", false, 1), command -> false);
     }
 
-    /**
-     * 一次工具调用需要的上下文。**五个参数一样不少** —— 生产里就那么一个构造器。
-     *
-     * <p>图省事的活儿收在这里：测试要么给判据，要么明说它永远是 false ——
-     * 而不是靠一个能少填两个字段的重载。
-     */
+    /** 构造工具上下文；所有字段都要给出，与生产唯一的构造器一致。 */
     private ToolContext context(CommandExecutor executor, Predicate<String> asksApproval) {
-        // 判据现在回来的是**理由**而不是布尔（见 CommandApproval）。这里把它收成一句固定的，
-        // 免得每个调用点都写一遍 —— 要验"理由真的传下去了"的那条测试自己给判据
+        // 审批判据返回理由；这里统一收成固定文本，验证理由传递的用例自行提供判据。
         return asking(executor, commandLine -> asksApproval.test(commandLine)
                 ? Optional.of("测试：这条命令要人批一下")
                 : Optional.empty());
     }
 
     /**
-     * 判据直接给理由的那种。
+     * 直接接收审批理由的上下文构造。不能重载为 {@code context}：两个重载都接收 String 函数，
+     * 隐式类型 lambda 会产生歧义。
      *
-     * <p>名字不叫 {@code context} 是因为**它不能被重载**：两个重载都收"一个 String 的函数"，
-     * 而 {@code command -> true} 这种隐式类型的 lambda 在它们之间选不出来（编译器报"引用不明确"）。
+     * @param executor         命令执行器
+     * @param requiresApproval 审批判据
+     * @return 工具上下文
      */
     private ToolContext asking(CommandExecutor executor, CommandApproval requiresApproval) {
         return new ToolContext(worktree, executor, CancellationToken.none(), requiresApproval,
@@ -67,13 +63,10 @@ class ToolTest {
     }
 
     /**
-     * 记一笔"这个文件读过了"。
+     * 记录文件已读，满足 edit_file 的观测要求。必须在文件写入之后调用，
+     * 否则写入本身会让记录的版本失效。
      *
-     * <p>{@code edit_file} 现在要求**改之前观测过**（见 {@link ReadLedger}），
-     * 所以每条"改文件"的测试都得先过这一下 —— 真实的会话本来也是读了才改。
-     *
-     * <p>**必须在文件写好之后再叫它**：账上存的是那一刻的 mtime，
-     * 先记账再写文件的话，写这个动作本身就会让版本对不上。
+     * @param path 工作区相对路径
      */
     private void readFirst(String path) {
         context.reads().mark(worktree.resolve(path), true);
@@ -150,8 +143,7 @@ class ToolTest {
         @Test
         @DisplayName("【真有上界】行数远没到，总量也该到顶 —— 并说清接着用 offset 从哪行读")
         void totalCharsAreBoundedToo() {
-            // 100 行 × 每行 5000 字符：行数离 2000 还远，字符数早就过了 10 万。
-            // 一行的大的 JSON、压过的 JS 就是这个形状 —— 只按行数设上界拦不住它
+            // 100 行 × 5000 字符：行数远未到 2000，字符数已超过 10 万，验证总量上限。
             write("huge.json", ("x".repeat(5_000) + "\n").repeat(100));
 
             ToolOutcome outcome = new ReadFileTool().execute(context, args("""
@@ -159,16 +151,15 @@ class ToolTest {
 
             assertThat(outcome.truncated()).isTrue();
             assertThat(outcome.output()).hasSizeLessThan(110_000);
-            // 只说"后面还有"没用：模型手里就有 offset，它要的是**接着从哪一行读**
+            // 必须给出下一次读取的 offset。
             assertThat(outcome.output()).contains("接着读就用 offset=");
         }
 
         @Test
-        @DisplayName("这个工具声明了自己有界 —— 总量闸据此放行（见 Tool#selfBounded）")
+        @DisplayName("这个工具声明了自己有界，run_command 没有（见 Tool#selfBounded）")
         void declaresItselfBounded() {
             assertThat(new ReadFileTool().selfBounded()).isTrue();
-            // 别的工具**不该**跟着声明：声明它 = 断言"我的产出自带分段入口"，
-            // 而 run_command 的输出模型没法"接着跑一半"
+            // 其他工具不应声明：run_command 的输出无法“接着跑一半”。
             assertThat(new RunCommandTool().selfBounded()).isFalse();
         }
     }
@@ -231,10 +222,9 @@ class ToolTest {
                     {"path":"Foo.java","old_string":"void a() {}","new_string":"void b() {}"}"""));
 
             assertThat(outcome.success()).isFalse();
-            // 只说"还没读过"——"先用 read_file…"那句是给模型的指导，已经删了
-            //（它会原样进工具结果，界面上就成了教训人的话）
+            // 只说明状态，不重复工具描述里的指导。
             assertThat(outcome.output()).contains("还没读过");
-            // 一个字都没写进去
+            // 文件未被修改。
             assertThat(readBack("Foo.java")).contains("void a()");
         }
 
@@ -244,8 +234,7 @@ class ToolTest {
             write("Foo.java", "class Foo {\n    void a() {}\n}\n");
             readFirst("Foo.java");
 
-            // 别人（另一个 agent、或者人自己）在这个空档里动了它。
-            // 时间戳往前拨一秒：同一毫秒内写完的话，mtime 可能和账上记的一样
+            // 模拟其他 agent 或用户在此期间修改文件；时间戳拨快一秒以确保 mtime 不同。
             Files.writeString(worktree.resolve("Foo.java"), "class Foo {\n    void a() {}\n}\n// 别人加的\n",
                     StandardCharsets.UTF_8);
             Files.setLastModifiedTime(worktree.resolve("Foo.java"),
@@ -256,7 +245,7 @@ class ToolTest {
 
             assertThat(outcome.success()).isFalse();
             assertThat(outcome.output()).contains("改过").contains("重新读");
-            // 别人的那一行还在 —— 没有被覆盖掉
+            // 他人的改动仍在，未被覆盖。
             assertThat(readBack("Foo.java")).contains("别人加的");
         }
 
@@ -279,8 +268,7 @@ class ToolTest {
         @Test
         @DisplayName("能新建文件，并自动建父目录")
         void createsFileAndParentDirectories() {
-            // 注意 \\n：text block 里写 \n 会被 Java 编译器变成【真实换行】，
-            // 而 JSON 字符串里不允许有裸换行。要 JSON 收到转义序列，得写两个反斜杠。
+            // JSON 字符串内不能有裸换行；text block 中需写 \\n 才能得到转义序列。
             ToolOutcome outcome = new WriteFileTool().execute(context, args("""
                     {"path":"src/main/java/New.java","content":"class New {}\\n"}"""));
 
@@ -289,7 +277,7 @@ class ToolTest {
         }
 
         @Test
-        @DisplayName("【关键约束】文件已存在时拒绝 —— 逼它走 edit_file，否则整文件覆盖的保护全被绕过")
+        @DisplayName("【关键约束】没读过的已有文件拒绝覆盖 —— 逼它先读或走 edit_file")
         void refusesToOverwriteExistingFile() {
             write("Existing.java", "class Existing {}\n");
 
@@ -297,7 +285,7 @@ class ToolTest {
                     {"path":"Existing.java","content":"class Replaced {}\\n"}"""));
 
             assertThat(outcome.success()).isFalse();
-            // 只说状态，不再把"用 edit_file / 先读一遍"那半句指导塞进结果（见上面同一道门）
+            // 只说明状态，不附带操作指导。
             assertThat(outcome.output()).contains("还没读过").contains("覆盖");
             assertThat(readBack("Existing.java")).isEqualTo("class Existing {}\n");   // 原文件完好
         }
@@ -327,7 +315,7 @@ class ToolTest {
                     .contains("\"created\":true")
                     .contains("\"lines\":2");
 
-            // 覆盖一遍：数目和"不是新建"都得如实给出来
+            // 再覆盖一次，行数和 created=false 都要如实反映。
             readFirst("New.java");
             ToolOutcome overwritten = new WriteFileTool().execute(context, args("""
                     {"path":"New.java","content":"c"}"""));
@@ -341,7 +329,7 @@ class ToolTest {
         @DisplayName("【只读了一部分】整份覆盖要拦住 —— 没看到的那部分会被**静默抹掉**")
         void refusesToOverwriteAfterAPartialRead() {
             write("Big.java", "a\nb\nc\n");
-            // 只读了第 2 行（offset=2&limit=1）—— 那是一次**部分**观测
+            // 只读取第 2 行（offset=2、limit=1），属于部分观测。
             new ReadFileTool().execute(context, args("""
                     {"path":"Big.java","offset":2,"limit":1}"""));
 
@@ -350,7 +338,7 @@ class ToolTest {
 
             assertThat(outcome.success()).isFalse();
             assertThat(outcome.output()).contains("只读了它的一部分");
-            // 一个字节都没被抹掉
+            // 文件内容完全未变。
             assertThat(readBack("Big.java")).isEqualTo("a\nb\nc\n");
         }
 
@@ -360,7 +348,7 @@ class ToolTest {
             write("Shared.java", "class Shared {}\n");
             readFirst("Shared.java");
 
-            // 另一个人的 agent（或者人自己）在这个空档里动了它
+            // 模拟他人修改文件。
             Files.writeString(worktree.resolve("Shared.java"), "class Shared {}\n// 他加的\n",
                     StandardCharsets.UTF_8);
             Files.setLastModifiedTime(worktree.resolve("Shared.java"),
@@ -382,7 +370,7 @@ class ToolTest {
 
             assertThat(created.success()).isTrue();
 
-            // 紧接着改它 —— 模型刚亲手写的那份，它当然"知道"内容
+            // 紧接着修改刚写入的文件，不应被“未读过”拦住。
             ToolOutcome edited = new EditFileTool().execute(context, args("""
                     {"path":"New.java","old_string":"int x = 1;","new_string":"int x = 2;"}"""));
 
@@ -463,12 +451,8 @@ class ToolTest {
     // ------------------------------------------------------------------
 
     /**
-     * glob 模式的语义。
-     *
-     * <p>这一组盯的是**换掉 JDK 那个 glob 引擎**这件事。JDK 把 {@code **&#47;} 当成
-     * "至少一层目录"，于是 {@code **&#47;*.java} 漏掉根目录的文件、{@code src/**&#47;*.java}
-     * 一条都匹配不到 —— 而后者是我们自己写在工具 description 里的例子。一次真实会话里
-     * agent 刚建好文件，glob 说"没有匹配的"，它以为自己建的东西不见了。
+     * glob 模式语义。本类不使用 JDK 的 glob 引擎：它把 {@code **}{@code /} 当作至少一层目录，
+     * 会漏掉根目录文件，也会让工具说明里的 {@code src/**}{@code /}*.java 匹配不到 {@code src/A.java}。
      */
     @Nested
     @DisplayName("glob 模式")
@@ -506,8 +490,7 @@ class ToolTest {
         @Test
         @DisplayName("模式里的点在正则里不是通配符 —— 字面量就是字面量")
         void dotsAreLiteral() {
-            // 翻成正则时最容易漏的就是这一条：`a.java` 里的 `.` 不转义的话，
-            // 它会匹配任意字符，于是 `axjava` 也会命中 —— 而模型会因此以为那个文件存在
+            // 点必须按字面量处理，否则 a.java 会匹配 axjava。
             assertThat(matches("a.java", "a.java")).isTrue();
             assertThat(matches("a.java", "axjava")).isFalse();
         }
@@ -516,11 +499,8 @@ class ToolTest {
     // ------------------------------------------------------------------
 
     /**
-     * 「读过才许覆盖」这条约束，以及它必须放行的那个空文件。
-     *
-     * <p>这一组对应一次真实会话：agent 想往平台种下的那个空 {@code README.md} 里写点东西，
-     * 三步全被挡回来（{@code write_file} 说已存在、{@code edit_file} 要非空唯一的
-     * {@code old_string}、而 {@code read_file} 读空文件直接报错），最后放弃了。
+     * “读过才许覆盖”约束及其对空文件的放行。若空文件不可读，write_file 与 edit_file
+     * 都无法填充它。
      */
     @Nested
     @DisplayName("覆盖与空文件")
@@ -546,9 +526,9 @@ class ToolTest {
                     args("{\"path\":\"已有.txt\",\"content\":\"新的\"}"));
 
             assertThat(outcome.success()).isFalse();
-            // 和 edit_file 那道门同一个口径：只说状态，不重复工具描述里已经写过的指导
+            // 与 edit_file 一致：只说明状态，不重复工具描述里的指导。
             assertThat(outcome.output()).contains("还没读过").contains("覆盖").doesNotContain("read_file");
-            // 而且**一个字都没动**
+            // 文件未被修改。
             assertThat(Files.readString(worktree.resolve("已有.txt"))).isEqualTo("原来的内容");
         }
 
@@ -593,8 +573,7 @@ class ToolTest {
         @Test
         @DisplayName("数组形式被拒 —— 这里收的是整行，不是分词好的参数")
         void rejectsArrayCommand() {
-            // 模型很容易顺手写成数组（旧的形状就是数组）。说清正确形状，
-            // 别让它自己去猜（它会猜成"这个工具的 run_command 是坏的"）
+            // 数组是常见笔误，必须明确说明正确形状。
             ToolOutcome outcome = new RunCommandTool().execute(context, args("""
                     {"command":["mvn","-q","test"]}"""));
 
@@ -635,13 +614,13 @@ class ToolTest {
             ToolOutcome outcome = new RunCommandTool().execute(timingOut, args("""
                     {"command":"mvn -q test","timeout_seconds":600}"""));
 
-            // 报成 INTERNAL 的话，模型会以为命令写错了，于是原样再跑一遍 —— 再超时一次
+            // 报成 INTERNAL 会让模型误以为命令写错并原样重试。
             assertThat(outcome.failure()).isEqualTo(ToolOutcome.Failure.TIMEOUT);
-            // 说清停了多久，并给出下一步；不然它会去猜自己哪里写错了
+            // 必须说明超时时长和下一步。
             assertThat(outcome.output()).contains("600").contains("timeout_seconds");
-            // ★ 被杀掉之前的那半截才是最有用的东西
+            // 终止前的半截输出最有诊断价值。
             assertThat(outcome.output()).contains("已经下了 3 个依赖");
-            // 被杀掉之前它已经跑了一会儿，完全可能改过文件 —— 所以不许把这次改动漏掉
+            // 终止前可能已改文件，不能漏掉 mutated。
             assertThat(outcome.mutated()).isTrue();
         }
 
@@ -678,8 +657,7 @@ class ToolTest {
         @Test
         @DisplayName("【问人的理由】判据说的那句话要原样带出去 —— 人要看着它点同意")
         void theReasonToAskIsCarriedOut() {
-            // 理由装在 output 里往上传：等着人批这个结局没有别的内容可装
-            // （这一轮不落 ToolResult，模型也看不到它）—— 见 ToolOutcome.approvalRequired
+            // 理由装在 output 中上传；审批结局没有其他内容可装（见 ToolOutcome.approvalRequired）。
             ToolContext askingContext = asking(
                     (ws, cmd, timeout, limit, cancel) -> new CommandResult(0, "", false, 1),
                     commandLine -> Optional.of("`curl` 不在免审批的程序名单里，先请你过一眼。"));
@@ -708,14 +686,13 @@ class ToolTest {
                               {"content":"跑测试","state":"pending"}]}"""));
 
             assertThat(outcome.success()).isTrue();
-            // 它不碰工作区，所以不算"改动过" —— 左边那棵树不该因为写了一次计划就重拉
+            // 不碰工作区，因此不算改动过。
             assertThat(outcome.mutated()).isFalse();
             assertThat(outcome.todoUpdate().items()).extracting(TodoListUpdated.Item::content)
                     .containsExactly("改三个文件", "跑测试");
             assertThat(outcome.todoUpdate().items().getFirst().state())
                     .isEqualTo(TodoListUpdated.State.IN_PROGRESS);
-            // 回给模型的是一句确认 + 数，不是整份清单：清单马上就会摆在它眼前
-            // （见 ContextAssembler 的注入），在这儿再抄一遍是白烧 token
+            // 只回确认和计数；清单会由投影立即注入，无需重复。
             assertThat(outcome.output()).contains("1 进行中").contains("1 待处理");
         }
 
@@ -758,9 +735,7 @@ class ToolTest {
         @Test
         @DisplayName("schema 里声明的每一个 state 都真的收 —— 声明的和收下的不能是两份")
         void everyDeclaredStateIsActuallyAccepted() throws Exception {
-            // "参数长什么样"由 schema 说了算，而"这个字符串翻成哪个领域状态"由
-            // stateOf 说了算 —— 两处在两个文件里，编译器管不到它们对不对得上。
-            // 这条测试就是那根线：schema 里加一个值而 stateOf 没跟上，它当场就红
+            // schema 与 stateOf 位于两处，编译器无法检查一致性；该用例负责发现漂移。
             JsonNode declared = mapper.readTree(new TodoWriteTool().parametersJsonSchema())
                     .path("properties").path("todos").path("items")
                     .path("properties").path("state").path("enum");
@@ -785,8 +760,7 @@ class ToolTest {
     void registryExposesStandardTools() {
         ToolRegistry registry = ToolRegistry.standard();
 
-        // 这一条是**故意钉死**的：多一个少一个都要有人来改这里，
-        // 而不是让一个新工具悄悄跟着每次请求发给模型（那也是每次请求都要付的 token）
+        // 工具集合被刻意固定：新增或删除都必须显式修改此处，避免新工具静默进入每次请求。
         assertThat(registry.names()).containsExactlyInAnyOrder(
                 "read_file", "edit_file", "write_file", "grep", "glob", "run_command", "todo_write");
         assertThat(registry.definitions()).hasSize(7);

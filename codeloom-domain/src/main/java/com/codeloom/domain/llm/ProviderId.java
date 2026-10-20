@@ -5,19 +5,16 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * 用户用的是**哪一家**模型服务 —— 身份，不是地址。
+ * 用户使用的是哪一家模型服务——身份，不是地址。
  *
- * <h2>为什么身份是 id 而不是地址</h2>
- * 密钥按"哪一家"存（见 {@link com.codeloom.domain.port.ApiKeyStore}），会话也记"哪一家"。
- * 而地址是**这一家的一个属性**，住在 {@link Providers} 那张表里 —— 于是同一个服务只可能
- * 有一种地址，"同一个服务的两种写法"这件事从根上不存在。
+ * <p>密钥按 provider 存（见 {@link com.codeloom.domain.port.ApiKeyStore}），会话也记
+ * provider；地址是这一家的属性，住在 {@link Providers} 表里，因此同一个服务只有一种地址。
  *
- * <h2>为什么只校验形状，不校验"必须在预设表里"</h2>
- * 因为**自定义 provider** 迟早要来（用户填自己的地址）：那时 id 由界面生成，不在预设表里，
- * 而这个类型不该拦它。是不是我们认识的一家，由**取地址**那一步回答（见 {@link Providers#find}）
- * —— 认不出来就没有地址可用，那时才报错，报的也正是那件事本身。
+ * <p>只校验形状，不要求必须在预设表里：自定义 provider 迟早要来，id 可由界面生成；
+ * "认不认识这一家"由取地址那一步回答（见 {@link Providers#find}），取不到就没有地址可用。
  *
- * @param value 形如 {@code deepseek} 的小写短标识
+ * @param value 形如 {@code deepseek} 的小写短标识；见
+ *              {@code docs/decisions/architecture/2026-09-26-keys-and-identity-are-per-provider.md}
  */
 public record ProviderId(String value) {
 
@@ -34,6 +31,13 @@ public record ProviderId(String value) {
         }
     }
 
+    /**
+     * 从文本构造：先去掉首尾空白并转小写，再校验形状。
+     *
+     * @param value provider 标识文本
+     * @return provider 标识
+     * @throws IllegalArgumentException 形状不合法时
+     */
     public static ProviderId of(String value) {
         return new ProviderId(value);
     }

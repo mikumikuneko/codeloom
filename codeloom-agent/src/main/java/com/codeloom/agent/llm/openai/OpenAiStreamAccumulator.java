@@ -21,50 +21,23 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
- * 把 OpenAI 兼容的流式分片拼回完整的响应。
+ * 把 OpenAI 兼容的流式分片拼回完整响应。
  *
- * <h2>这个类存在的唯一理由：arguments 是逐 token 分片到达的</h2>
- * 这是实测出来的，不是猜的（真实抓包存在
- * {@code src/test/resources/fixtures/deepseek-stream-tool-call.sse}）：
+ * <p>实测（真实抓包见 {@code src/test/resources/fixtures/deepseek-stream-tool-call.sse}）：
+ * 工具参数逐 token 分片，且会切在 JSON 语法中间，因此不能边收边解析，只能拼完再交给模型；
+ * 一次响应可能有多个调用，必须按 {@code index} 分组，{@code id} / {@code name} 只在第一帧出现。
  *
- * <pre>
- *   帧1:  {"index":0,"id":"call_00_...","type":"function","function":{"name":"read_file","arguments":""}}
- *   帧2:  {"index":0,"function":{"arguments":"{"}}
- *   帧3:  {"index":0,"function":{"arguments":"\""}}
- *   帧4:  {"index":0,"function":{"arguments":"path"}}
- *   ...
- *   帧14: {"index":0,"function":{"arguments":"}"}}
- * </pre>
- *
- * 十三条碎片才拼出 {@code {"path": "src/OrderService.java"}}。由此推出三条硬约束：
- * <ol>
- *   <li><b>不能边收边解析。</b>碎片会切在 JSON 语法中间 —— {@code "path"} 被切成
- *       {@code "} + {@code path} + {@code "}，{@code src/} 被切成 {@code src} + {@code /}。
- *       任何"收到一帧就试着解析参数"的写法都必然出错，只能等拼完再解析。</li>
- *   <li><b>必须按 {@code index} 分组。</b>一次响应可以有多个工具调用（并行调用），
- *       每个有自己的 index 和自己的碎片序列。</li>
- *   <li><b>{@code id} / {@code name} / {@code type} 只在第一帧出现。</b>
- *       后续帧里只有 {@code arguments}，别指望每帧都带全。</li>
- * </ol>
- *
- * <p>另外注意：**正文和工具调用会交错**。实测中模型先输出了正文
- * （"I'll read..."）才发起工具调用，所以 {@code delta.content} 和
- * {@code delta.tool_calls} 必须能同时处理，不能假设"要么说话要么调工具"。
+ * <p>正文和工具调用可以交错到达，两者必须能同时处理。
  */
 public final class OpenAiStreamAccumulator {
 
-    /** OpenAI 的结束哨兵。它是 provider 约定而不是 SSE 规范的一部分，所以留在这里而不是 SseParser 里。 */
+    /** OpenAI 的结束哨兵；属于 provider 约定，不放进 {@link SseParser}。 */
     private static final String DONE_SENTINEL = "[DONE]";
 
     private final ObjectMapper mapper;
     private final StringBuilder text = new StringBuilder();
 
-    /**
-     * 思考过程。
-     *
-     * <p>**这一家的字段名在这一层被消化掉**（见 {@link #appendReasoningDelta}）——
-     * 领域的名字固定是中性的 {@code reasoning}，不跟着某一家走。
-     */
+    /** 思考过程；provider 字段名在本层消化，对外只用中性的 {@code reasoning}。 */
     private final StringBuilder reasoning = new StringBuilder();
     private final Map<Integer, PartialToolCall> toolCalls = new LinkedHashMap<>();
 
@@ -74,6 +47,9 @@ public final class OpenAiStreamAccumulator {
     private boolean done;
     private boolean finished;
 
+    /**
+     * @param mapper JSON 解析器
+     */
     public OpenAiStreamAccumulator(ObjectMapper mapper) {
         this.mapper = Objects.requireNonNull(mapper, "mapper");
     }
@@ -81,8 +57,10 @@ public final class OpenAiStreamAccumulator {
     /**
      * 喂入一个 SSE data 载荷，产出零个或多个归一化事件。
      *
-     * <p>正文增量会立即产出（要实时刷给界面看）；工具调用**不产出** ——
-     * 它的参数还没拼完，提前交出去只会拿到半截 JSON。
+     * <p>正文和思考增量立即产出；工具调用要等 {@link #finish()}，因为参数尚未拼完。
+     *
+     * @param dataPayload SSE 帧的 data 载荷
+     * @return 本次产生的事件
      */
     public List<StreamEvent> accept(String dataPayload) {
         if (dataPayload == null) {
@@ -122,9 +100,9 @@ public final class OpenAiStreamAccumulator {
     }
 
     /**
-     * 流结束后调用：把攒齐的工具调用和结束事件交出去。
+     * 流结束后调用：交出击攒齐的工具调用和结束事件。重复调用返回空。
      *
-     * <p>工具调用到这一步才产出，因为只有这时才能确定碎片收全了。
+     * @return 工具调用与 {@link StreamEvent.Finished}
      */
     public List<StreamEvent> finish() {
         if (finished) {
@@ -140,22 +118,19 @@ public final class OpenAiStreamAccumulator {
         return events;
     }
 
-    /** 已经收到过 {@code [DONE]}。 */
+    /**
+     * @return 是否已经收到 {@code [DONE]}
+     */
     public boolean isDone() {
         return done;
     }
 
     /**
-     * 拼思考过程的增量，并**立刻**把这一段交出去。
+     * 拼接并立即产出思考增量。{@code reasoning_content} 是这一家的字段名，响应方向的映射只写在这里；
+     * 缺少该字段时跳过，不视为错误。
      *
-     * <p>和正文增量一样即时产出：思考过程是给人实时看的，攒到结束再给就失去了意义。
-     *
-     * <p>{@code reasoning_content} 是 OpenAI 兼容阵营里推理模型的常见字段名，但它**不是**标准 ——
-     * 权威的是各家自己的字段（Anthropic 那边是带签名的 thinking block，形状完全不同）。
-     * 所以映射就写在这儿一处：**领域层只认 {@code reasoning} 这个中性名**，
-     * 换一家 provider 时改的是这里，不是领域代码。
-     *
-     * <p>没有这个字段就直接跳过 —— 不支持推理的模型不会发它，那不是错误。
+     * @param delta  流式增量
+     * @param events 输出事件
      */
     private void appendReasoningDelta(JsonNode delta, List<StreamEvent> events) {
         JsonNode piece = delta.get("reasoning_content");
@@ -170,12 +145,16 @@ public final class OpenAiStreamAccumulator {
         events.add(new StreamEvent.ReasoningDelta(text));
     }
 
-    /** 拼好的思考过程；这个模型不产生思考时是空串。 */
+    /**
+     * @return 拼好的思考过程；不产生思考时为空串
+     */
     public String accumulatedReasoning() {
         return reasoning.toString();
     }
 
-    /** 到目前为止累积的正文，便于调用方在流中断时也能拿到已产出的部分。 */
+    /**
+     * @return 目前累积的正文；流中断时仍包含已产出的部分
+     */
     public String accumulatedText() {
         return text.toString();
     }
@@ -183,16 +162,17 @@ public final class OpenAiStreamAccumulator {
     // ------------------------------------------------------------------
 
     /**
-     * 把 SSE 流抽干成归一化结果 —— **生产路径与测试路径的唯一实现**。
+     * 把 SSE 流抽干成归一化结果；生产和测试共用这一实现，确保 [DONE]、取消检查和收尾逻辑被覆盖。
      *
-     * <p>共用一份实现（而不是生产、测试各一个循环）保证 {@code [DONE]} 的处理、
-     * 取消检查、收尾逻辑在测试里被真正覆盖 —— 分开写的话这些只会在真实路径上跑、
-     * 测不到。
+     * <p>同步阻塞读，调用点必须在虚拟线程上。
      *
-     * <p>同步阻塞读 —— 调用点必须在虚拟线程上（agent 循环本来就在虚拟线程里跑）。
-     *
-     * @param cancellation 每帧检查一次取消信号。检查点落在**帧边界**上，
-     *                     与"中断只发生在工具返回边界"是同一套思路
+     * @param parser       帧来源，结束时关闭
+     * @param mapper       JSON 解析器
+     * @param listener     事件下游
+     * @param cancellation 每帧检查一次的取消信号
+     * @return 完整结果
+     * @throws IOException 读取流失败
+     * @throws LlmCallException 用户取消时抛出 {@code CANCELLED}
      */
     public static LlmResult drain(SseParser parser, ObjectMapper mapper,
                                   Consumer<StreamEvent> listener, CancellationToken cancellation)
@@ -209,7 +189,7 @@ public final class OpenAiStreamAccumulator {
                 }
                 accumulator.accept(payload.get()).forEach(collector);
                 if (accumulator.isDone()) {
-                    // [DONE] 之后不再读 —— 有些实现会在后面挂 keep-alive 注释行
+                    // [DONE] 之后不再读；有些实现会在后面挂 keep-alive 注释行。
                     break;
                 }
             }
@@ -219,12 +199,7 @@ public final class OpenAiStreamAccumulator {
                 accumulator.accumulatedReasoning());
     }
 
-    /**
-     * 边转发事件给下游，边把汇总需要的字段记下来。
-     *
-     * <p>"读流中"和"finish 之后"两段共用这套分拣逻辑，避免重复实现漏改后一处
-     *（症状是"模型名/用量偶尔丢失"，很难查）。
-     */
+    /** 向下游转发事件并汇总结果字段；读流中与 finish 之后共用同一套分拣。 */
     private static final class Collector implements Consumer<StreamEvent> {
 
         private final Consumer<StreamEvent> downstream;
@@ -250,8 +225,7 @@ public final class OpenAiStreamAccumulator {
                     usage = finished.usage();
                 }
                 case StreamEvent.ToolCallCompleted completed -> toolCalls.add(completed.call());
-                // 正文和思考都不在这里汇总：它们由 accumulator 自己的 StringBuilder 攒着，
-                // 分拣一遍只为了向下游转发
+                // 正文和思考由 accumulator 的 StringBuilder 汇总，这里只转发。
                 case StreamEvent.TextDelta ignored -> {
                 }
                 case StreamEvent.ReasoningDelta ignored -> {
@@ -280,8 +254,7 @@ public final class OpenAiStreamAccumulator {
     private void captureModel(JsonNode chunk) {
         JsonNode node = chunk.get("model");
         if (node != null && !node.isNull()) {
-            // 记服务商【实际使用】的模型，不是我们请求时传的那个 ——
-            // 旧别名会被服务商映射到新模型，审计要记真实值
+            // 记服务商实际使用的模型；旧别名可能被映射，审计要记真实值。
             model = node.asText();
         }
     }
@@ -301,9 +274,7 @@ public final class OpenAiStreamAccumulator {
         int cached = usage.hasNonNull("prompt_cache_hit_tokens")
                 ? usage.get("prompt_cache_hit_tokens").asInt(0)
                 : usage.path("prompt_tokens_details").path("cached_tokens").asInt(0);
-        // 思考那部分**已经在 completion_tokens 里**，这里只是把它的细分读出来。
-        // 嵌套的那一层是 OpenAI 起的头、DeepSeek 也照着的写法；两层都不在时
-        // MissingNode 一路 .path() 下去得到 0，不需要额外的存在性判断
+        // 思考 token 已含在 completion_tokens 里，这里只读细分；缺失时 path 链得到 0。
         int reasoning = usage.path("completion_tokens_details").path("reasoning_tokens").asInt(0);
         return new TokenUsage(input, output, total, cached, reasoning);
     }
@@ -365,7 +336,7 @@ public final class OpenAiStreamAccumulator {
         return value.length() <= 200 ? value : value.substring(0, 200) + "…";
     }
 
-    /** 一路工具调用的累积状态。碎片按到达顺序追加，不做任何解析。 */
+    /** 一路工具调用的累积状态；碎片按到达顺序追加，不做解析。 */
     private static final class PartialToolCall {
 
         private final String id;

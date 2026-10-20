@@ -12,11 +12,10 @@ import java.nio.file.Path;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 行 ↔ 领域对象的转换 —— 这一行是**一棵树**的，不是一条会话的。
+ * 行与领域对象的转换；这一行属于一棵树，而不是一条会话。
  *
- * <p>三类字段各有各的考验：{@code head_commit} 可空（空项目起步时就真的是 null），
- * 路径要从字符串还原成 {@link Path}，而主键是两个 char 拼出来的复合键 ——
- * 少拼一半会得到一棵"看起来对、其实属于别人"的树。
+ * <p>{@code head_commit} 可空，路径要从字符串还原成 {@link Path}，主键由两个 id 组成 ——
+ * 少拼一半会得到一棵看似正确、其实属于别人的树。
  */
 class WorkspaceRowTest {
 
@@ -24,8 +23,8 @@ class WorkspaceRowTest {
     private static final ProjectId PROJECT = ProjectId.of("22222222-2222-2222-2222-222222222222");
     private static final WorkspaceId ID = WorkspaceId.of(OWNER, PROJECT);
 
-    /** 绝对路径：{@link Workspace} 的紧凑构造器只接受绝对路径，而这个测试要在
-     *  Windows 和 Linux 上都跑得起来，所以不能写死 {@code "D:/..."} 或 {@code "/ws"}。 */
+    /** 绝对路径：{@link Workspace} 只接受绝对路径，测试要在 Windows 与 Linux 上都可运行，
+     *  不能写死 {@code "D:/..."} 或 {@code "/ws"}。 */
     private static final Path PATH = Path.of(System.getProperty("user.dir")).resolve("ws");
 
     @Test
@@ -42,8 +41,8 @@ class WorkspaceRowTest {
     @Test
     @DisplayName("head_commit 可空：空项目起步时它真的是 null，不是空串")
     void headCommitMayBeNull() {
-        // 空项目（git init 之后一个提交都没有）时这棵树还没有 HEAD。
-        // 把 null 写成空串的话，下游每一处 null 判断都会静默走偏
+        // 空项目（git init 后尚无提交）时这棵树没有 HEAD；
+        // 把 null 写成空串会让下游的 null 判断静默走偏
         Workspace empty = new Workspace(ID, PATH, "workspace/" + OWNER.value(), null);
 
         WorkspaceRow row = WorkspaceRow.of(empty);

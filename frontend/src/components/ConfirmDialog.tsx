@@ -11,24 +11,19 @@ import {
 } from '@/components/ui/dialog'
 
 /**
- * 确认框：一件**没有回收站**的事，或者会动到**共享的那份**的事，先问一句再动手。
+ * 确认框：一件没有回收站的事，或者会动到共享那份的事，先问一句再动手。
  *
- * <p>默认的红色确认键是给前者的；后者（比如"合进主干"）传
- * {@code confirmVariant="default"} —— 它没有把东西删掉，只是会让对方也看到。
+ * 默认红色确认键给前者；后者（如"合进主干"）传 `confirmVariant="default"`：它没有
+ * 删除东西，只是会让对方也看到。
  *
- * <h2>为什么用它，而不是浏览器的 confirm</h2>
- * 那个弹窗是浏览器自己的：样式和这个界面无关、位置贴在窗口最上面、而且会把整个页面冻住。
- * 一个界面上只有它长成那样，看的人第一反应是"这里没做完"。
+ * 不用浏览器 `confirm`：样式与界面无关、位置贴在窗口最上面，而且会冻住整个页面。
  *
- * <h2>它只问"要不要"，不解释"为什么"</h2>
- * 所以文案就三样：动的是哪件东西（标题）、动了会怎样（一句后果）、两个按钮。
- * 刻意不往里塞细节 —— 比如"目录里有 N 个文件"，那要多问一次后端，
- * 而且会把注意力引到数字上，而这里要回答的只有"要不要"。
+ * 只问"要不要"，不解释"为什么"：文案三样——动的是哪件东西（标题）、动了会怎样
+ * （一句后果）、两个按钮。不塞细节（如"目录里有 N 个文件"），那要多问一次后端，
+ * 也会把注意力引到数字上。
  *
- * <h2>成功之后关不关，由调用方决定</h2>
- * {@code onConfirm} 返回一句错误（就停在框里显示起来），或者 {@code null} 表示成功。
- * 有些调用方成功之后还有别的事要做（清掉选中、刷新列表），把关框写在它们那儿更顺 ——
- * 见 FileTree、ProvidersPage、SessionHistoryDialog 三处用法。
+ * `onConfirm` 返回一句错误（停在框里显示）或 null 表示成功；成功之后关不关由调用方
+ * 决定，有些调用方成功之后还要清选中、刷新列表。
  */
 export function ConfirmDialog({
   title,
@@ -42,11 +37,11 @@ export function ConfirmDialog({
   description: string
   confirmLabel: string
   /**
-   * 确认键的样子。默认红色 —— 这个框大多数时候问的是"删了就没有了"。
-   * 普通确认（比如"合进主干"）传 {@code default}：它会动到共享的那份，但不是不可逆。
+   * 确认键的样子。默认红色：这个框多数时候问的是"删了就没有了"。
+   * 普通确认（如"合进主干"）传 `default`：它会动到共享那份，但不是不可逆。
    */
   confirmVariant?: 'default' | 'destructive'
-  /** 返回一句给人看的错误，或者 null 表示成功。成功之后要不要关，由调用方决定。 */
+  /** 返回一句给人看的错误，或 null 表示成功。成功之后是否关闭由调用方决定。 */
   onConfirm: () => Promise<string | null>
   onClose: () => void
 }) {
@@ -78,8 +73,8 @@ export function ConfirmDialog({
         )}
 
         <DialogFooter>
-          {/* 两个按钮都写明 type="button"：这个框可能被渲染在别处的 form 里，
-              而对话框是 portal 出去的，靠"它不在 form 的 DOM 子树里"太隐晦了 */}
+          {/* 两个按钮都写明 type="button"：这个框可能渲染在别处的 form 里，
+              而对话框是 portal 出去的，靠"它不在 form 的 DOM 子树里"太隐晦。 */}
           <Button type="button" variant="ghost" onClick={onClose} disabled={busy}>
             算了
           </Button>

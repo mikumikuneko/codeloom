@@ -5,81 +5,40 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 把模型写的那一行命令**保守地**切成词 —— 只为了"要不要先问人"那一道判据看得懂它。
+ * 把模型写的一行命令保守地切成词，供"要不要先问人"的判据使用。
  *
- * <h2>它只在"真能看懂"的时候给答案</h2>
- * 命令的最终解释权在 shell 手里（{@link CommandShell}），而 shell 会做一大堆我们
- * 肉眼看不见的事：展开变量、跑命令替换、按 glob 拼路径、认 {@code ~}。所以这里的
- * 规矩是：**只要这行命令里出现任何"解释起来会变样"的东西，就说看不懂**
- * （{@link Optional#empty()}），由调用方按"要问"处理。
+ * <p>只要出现任何解释起来会改变结果的内容，就返回 {@link Optional#empty()}，调用方
+ * 按"要问"处理：{@code $}、反引号、反斜杠、子 shell 与花括号、管道与重定向、单个
+ * {@code &}、换行与回车，以及词首的 {@code ~}。{@code &&}、{@code ||}、{@code ;}
+ * 是串联，按段切开后每段各自校验，见 {@link #simpleCommands}。
  *
- * <p>看不懂的那些字符，以及各自的理由：
- * <table>
- *   <tr><td>{@code $}</td><td>变量展开 —— {@code $HOME} 会变成你看不见的路径</td></tr>
- *   <tr><td>{@code `}</td><td>命令替换，藏第二条命令最经典的写法</td></tr>
- *   <tr><td>{@code \}</td><td>转义：它能让下一个字符换个意思（含 Windows 路径里的分隔符）</td></tr>
- *   <tr><td>{@code ( ) { }}</td><td>子 shell 与花括号展开</td></tr>
- *   <tr><td>{@code | & < >}</td><td>前后接管道、丢到后台、读写别的文件</td></tr>
- *   <tr><td>{@code && || ;}（命令之间）</td><td>串联：按段切开、每段各查一遍，
- *       见 {@link #simpleCommands}</td></tr>
- *   <tr><td>换行、回车</td><td>长得像一行，其实是两行</td></tr>
- *   <tr><td>{@code ~}（只在词首）</td><td>展开成用户目录 —— 一字之差，删的是家目录</td></tr>
- * </table>
+ * <p>成对引号内的空格不切词，引号未配平则看不懂。单引号内只有换行和回车不可接受；双引号内
+ * {@code $}、反引号和反斜杠仍然生效；{@code ; | & < > ( ) { } ~} 在两种引号里都是
+ * 字面量。{@code ~} 只在词首判为看不懂，因为只有词首才会展开。
  *
- * <p>{@code ~} 刻意**只看词首**：引号里的 {@code "~"} 不展开，
- * {@code grep -n "~" file} 里那个也不是路径。全都拦掉会让一条完全正常的搜索
- * 每次都问人，而多问一次正是这套东西最烦人的失败方式。
- *
- * <h2>引号是唯一被理解的东西 —— 而且两种引号挡的东西不一样</h2>
- * 成对的引号让 {@code "a b"} 算一个词（不然切出来的词和 shell 看到的不是一回事）。
- * 引号没配平就说不懂 —— 那行命令在 shell 里的样子我们猜不出来。
- *
- * <p>引号里的东西按 shell 的规矩重新判一遍，两种引号**不是同一张表**：
- * <ul>
- *   <li><b>单引号</b>里什么都不解释 —— {@code '$HOME'} 就是那五个字符。
- *       所以引号里只剩"这行其实不止一行"要防。</li>
- *   <li><b>双引号</b>里 {@code $}、反引号、反斜杠照样生效，所以那三个还是不懂。</li>
- *   <li>而 {@code ; | & < > ( ) { } ~} 在两种引号里都是**字面量** —— 于是
- *       {@code node -e "setTimeout(()=>{},1200)"}、{@code grep -n 'a|b' f}
- *       都是看得懂的，不必为它们每次点一次批准。</li>
- * </ul>
- *
- * <h2>它**不是**安全边界</h2>
- * 通配符（{@code *}、{@code ?}）没被拦：它们只按当前目录展开，而当前目录正是项目根，
- * 所以 {@code rm -rf *} 落在项目里。**残留的洞**老老实实列在这里：{@code rm -rf .*}
- * 展开出来的 {@code ..} 我们看不见（只有 GNU rm 自己会拒绝删它）；
- * 软链接指向外面；以及把删除藏在程序内部（{@code node -e "…rmSync('/')"}）。
- * 这些拦不住，也不该假装拦住 —— 这道判据的作用是"少问几次"，不是"挡住攻击"。
- *
- * <p>参考实现把这件事做到了另一个量级：Claude Code 用 tree-sitter 解析 bash。
- * 一个简化版解析器的失败方式恰好是"我切错了但我说没问题"，那比"多说一句看不懂"
- * 坏得多 —— 所以这里选择简单、保守，并且**承认自己不懂**。
+ * <p>它不是安全边界：通配符按工作目录展开，软链接、程序内部的删除、通配符展开出的
+ * {@code ..} 都拦不住。相关决策见
+ * {@code docs/decisions/bug-fix/2026-10-17-chained-commands-no-longer-ask.md} 与
+ * {@code docs/decisions/architecture/2026-09-24-commands-are-whole-lines-through-bash.md}。
  */
 public final class CommandLine {
 
     /**
-     * 不在引号里时，会改变解释结果的字符。
+     * 不在引号里时会改变解释结果的字符。
      *
-     * <p>{@code ~} 不在这里 —— 它只在词首才展开，单独判，见类注释。
+     * <p>{@code ~} 不在这里：它只在词首展开，单独判断，见类注释。
      */
     private static final String UNREADABLE_PLAIN = "$`\\(){};|&<>\n\r";
 
     /**
-     * 把一行拆成**几条简单命令**：按引号外的 {@code &&}、{@code ||} 和 {@code ;} 切。
+     * 按引号外的 {@code &&}、{@code ||}、{@code ;} 把一行切成几条简单命令。
      *
-     * <p>为什么要切：模型很爱写 {@code javac X.java && java X}，而 {@code &} 本身
-     * 意味着"把这条丢到后台"、和 {@code &&} 的"前一条成功再跑下一条"是两回事。
-     * 不切的话，一条普通的串联命令会被判成"看不懂"，于是每一步都要人点一次批准 ——
-     * 那是这套判据最烦人的失败方式。
+     * <p>串联只是"依次跑几条"：每一段仍各自按 {@link #simpleWords} 及后续判据校验，
+     * 任何一段不合格，整行都要问人。{@code |} 和单个 {@code &} 不切，仍算看不懂 ——
+     * 管道改变数据流向，后台执行让命令不受等待。
      *
-     * <p>切完**每一段各自过一遍** {@link #simpleWords} 与审批判据：串联只是"依次跑几条"，
-     * 任何一段不合格（变量替换、管道、重定向、引号没配平、程序不在名单里、路径跑到树外），
-     * 整行照样要问。所以放宽的只是"串联"这个写法，不是"看不懂的内容"。
-     *
-     * <p>{@code |} 和单个 {@code &} 仍然不切、仍然算看不懂：管道让数据换了流向，
-     * 后台执行让命令跑在谁都不知道的地方 —— 那两件事不是"依次跑几条"。
-     *
-     * @return 每条命令的词表；任何一段读不懂就是 {@link Optional#empty()}
+     * @param commandLine 模型写的一行
+     * @return 每条命令的词表；空白输入、空段或任何一段读不懂时为 {@link Optional#empty()}
      */
     public static Optional<List<List<String>>> simpleCommands(String commandLine) {
         if (commandLine == null || commandLine.isBlank()) {
@@ -129,18 +88,16 @@ public final class CommandLine {
     }
 
     /**
-     * 在**双引号**里仍然会被解释的字符。
+     * 双引号里仍会被解释的字符：{@code $}、反引号、反斜杠与换行。
      *
-     * <p>双引号挡得住 {@code ; | & < > ( ) { } ~}（它们在引号里是字面量），
-     * 挡不住 {@code $}、反引号和反斜杠 —— 那三个在双引号里照样生效。
+     * <p>{@code ; | & < > ( ) { } ~} 在双引号里是字面量。
      */
     private static final String UNREADABLE_IN_DOUBLE_QUOTES = "$`\\\n\r";
 
     /**
-     * 在**单引号**里会被解释的字符：只有换行。
+     * 单引号里会被解释的字符：只有换行与回车。
      *
-     * <p>单引号是唯一一个不做任何解释的引法，{@code '$HOME'} 就是那五个字符本身。
-     * 所以引号里只剩"这行其实不止一行"这一件事要防。
+     * <p>{@code '$HOME'} 就是那五个字符本身。
      */
     private static final String UNREADABLE_IN_SINGLE_QUOTES = "\n\r";
 
@@ -151,8 +108,8 @@ public final class CommandLine {
      * 这行命令能安全切开时给出它的词；看不懂时给空。
      *
      * @param commandLine 模型写的那一行
-     * @return 词表（引号内的空格不当分隔），或者 {@link Optional#empty()} 表示
-     *         "这行命令我们看不懂，请按需要批准处理"
+     * @return 词表（引号内的空格不当分隔）；null、空白、存在会改变解释结果的字符、
+     *         引号未配平时为 {@link Optional#empty()}
      */
     public static Optional<List<String>> simpleWords(String commandLine) {
         if (commandLine == null || commandLine.isBlank()) {
@@ -173,8 +130,7 @@ public final class CommandLine {
                     quote = 0;
                     continue;
                 }
-                // 引号挡住的东西不一样：单引号里什么都不解释，双引号里 $、反引号、
-                // 反斜杠照样生效 —— 所以两边查的不是同一张表
+                // 两种引号查的不是同一张表：单引号不做解释，双引号里 $、反引号、反斜杠生效
                 String unreadable = quote == '"' ? UNREADABLE_IN_DOUBLE_QUOTES : UNREADABLE_IN_SINGLE_QUOTES;
                 if (unreadable.indexOf(c) >= 0) {
                     return Optional.empty();
@@ -210,7 +166,7 @@ public final class CommandLine {
         }
 
         if (quote != 0) {
-            // 引号没收口：这行命令在 shell 里会被当成"还没写完"，我们更不该猜
+            // 引号未闭合：shell 会认为命令还没写完，这里不猜
             return Optional.empty();
         }
         if (wordStarted) {
