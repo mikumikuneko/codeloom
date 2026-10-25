@@ -193,10 +193,11 @@
   /*
    * 工作区三栏的头。高度写死同一个值是这一条的全部意义：「项目」「文件路径」
    * 「会话/聊天/观战」的顶边落在同一条水平线上，页面才站得住 —— 各写各的 padding
-   * 时三条线会差 4–8px，那点差距看得出歪、说不出哪里歪。
+   * 时三条线会差 4–8px，那点差距看得出歪、说不出哪里歪。底线同理：三栏共用一条，
+   * 内容从同一条线开始。
    */
   .pane-head {
-    @apply flex h-9 shrink-0 items-center;
+    @apply flex h-9 shrink-0 items-center border-b border-border/50;
     }
 
   /*
@@ -226,6 +227,7 @@
     -webkit-text-fill-color: transparent;
     animation: loom-shimmer 1.8s linear infinite;
   }
+
 }
 
 @keyframes loom-shimmer {

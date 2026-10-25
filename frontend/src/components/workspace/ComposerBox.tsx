@@ -141,7 +141,7 @@ export function ComposerBox({
         event.preventDefault()
         void submit()
       }}
-      className="shrink-0 p-3"
+      className="shrink-0 border-t border-border/50 p-3"
     >
       {notice}
 

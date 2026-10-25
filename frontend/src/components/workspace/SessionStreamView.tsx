@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button'
 import { LivePane } from '@/components/workspace/LivePane'
 import { Markdown, StreamingMarkdown } from '@/components/workspace/Markdown'
 import { errorText, approvals, sessions as sessionsApi, type ToolView } from '@/lib/api'
-import { languageOfPath, useHighlighted, useViewportHighlighting } from '@/lib/highlight'
+import { languageOfPath, tokenStyle, useHighlighted, useViewportHighlighting } from '@/lib/highlight'
+import { lineNumberWidth } from '@/lib/lineNumbers'
 import { observeStream, usePendingEcho } from '@/lib/pendingEcho'
 import {
   formatTokens,
@@ -279,9 +280,9 @@ export function SessionStreamView({
         )
       ) : (
         <div className="px-4 py-4">
-          {/* space-y-8 是块与块的间距，块内部的 space-y-4 是另一半：两档间距是
+          {/* space-y-6 是块与块的间距，块内部的 space-y-4 是另一半：两档间距是
               这段流唯一的骨架，见 groupIntoTurns */}
-          <div className="space-y-8">
+          <div className="space-y-6">
             {empty && !streaming.text && !streaming.reasoning && (
               <p className="text-sm leading-6 text-muted-foreground">
                 这里会显示这条会话的每一步。
@@ -311,7 +312,7 @@ export function SessionStreamView({
             {/* 我刚发出、流里还没出现的那几句。灰的：它们还没轮到 */}
             {pending.map((text, index) => (
               <div key={index} className="flex items-start gap-1.5">
-                <span className="shrink-0 text-sm leading-6 text-loom-faint/60">{speaker}：</span>
+                <span className="shrink-0 text-xs leading-6 text-loom-faint/60">{speaker}：</span>
                 <div className="min-w-0 flex-1 text-loom-faint">
                   <Markdown>{text}</Markdown>
                 </div>
@@ -374,7 +375,7 @@ function Item({
       return (
         // 与下面灰显回声用同一套排版：回声落库后换成它，位置不该跳。
         <div className="flex items-start gap-1.5">
-          <span className="shrink-0 text-sm leading-6 text-loom-faint">{speaker}：</span>
+          <span className="shrink-0 text-xs leading-6 text-loom-faint">{speaker}：</span>
           <div className="min-w-0 flex-1">
             <Markdown>{item.text}</Markdown>
           </div>
@@ -691,7 +692,10 @@ function Turn({
 
                 但"淡"不该淡掉排版：裸 `<p>` 会让人一边写一边看到星号和井号，等落地
                 才变成排版好的；现在两边走同一套渲染，唯一还淡着的只有颜色 */}
-            {streaming.reasoning && <Thinking text={streaming.reasoning} running />}
+            {/* 正文一出现就说明思考结束：把思考自动折回去，让位给答案 */}
+            {streaming.reasoning && (
+              <Thinking text={streaming.reasoning} running={streaming.text === ''} />
+            )}
             {/* 流式正文和落库后重画的那一份同一个左边界（都贴最左边），否则答案
                 会在两档之间横跳 */}
             {streaming.text && <StreamingMarkdown text={streaming.text} />}
@@ -778,7 +782,7 @@ function TurnTail({
   return (
     // 改动那一格排最后：它展开的文件列表很宽（一条长路径就能撑开整行），排中间的
     // 话一展开就把后面的东西挤到下一行，"这一轮用了多久"会跳位置
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-border/40 pt-2">
       <UsageRow
         input={item.input}
         output={item.output}
@@ -1001,7 +1005,7 @@ function UsageRow({
           <div className="flex gap-2">
             <dt>其中缓存命中</dt>
             <dd className="font-mono">
-              {formatTokens(cached)} tokens（{cacheHitPercent(cached, input)}%）
+              {formatTokens(cached)} tokens（{cacheHitPercent(cached, input)}）
             </dd>
           </div>
         )}
@@ -1102,7 +1106,7 @@ function FoldChevron() {
 }
 
 /**
- * 工具结果和 diff 的折叠按钮上写什么。两处同一句话，所以只有这一处。
+ * 工具结果和 diff 的折叠按钮上写什么。几个折叠按钮共用这一句话。
  */
 function expandLabel(expanded: boolean, hidden: number): string {
   return expanded ? '收起' : hidden === 1 ? '还有 1 行' : `还有 ${hidden} 行`
@@ -1119,16 +1123,16 @@ function contextPercent(reading: ContextReading): number {
 }
 
 /**
- * 缓存命中的比例。
+ * 缓存命中的比例，连同分母缺失时的那句话一起返回。
  *
- * 取不到输入（`input` 为 0）时返回 null：那时"命中 0%"和"没有输入"是两句不同的
- * 话，显示前者是在说一件没发生的事。
+ * 取不到输入（`input` 为 0）时写"无输入"：那时"命中 0%"和"没有输入"是两句不同
+ * 的话，显示前者是在说一件没发生的事。
  */
-function cacheHitPercent(cached: number, input: number): number | null {
+function cacheHitPercent(cached: number, input: number): string {
   if (input <= 0) {
-    return null
+    return '无输入'
   }
-  return Math.round((cached / input) * 100)
+  return `${Math.round((cached / input) * 100)}%`
 }
 
 /**
@@ -1150,9 +1154,11 @@ const LiveTurn = createContext(true)
  * 渲染生效，不会先画一帧"还开着"再收回；写在 effect 里会闪那一下，而它恰好发生在
  * 用户刚发出一条消息、正在看屏幕时。
  */
-function useDisclosure(): [boolean, (open: boolean) => void] {
+function useDisclosure(initialOpen = false): [boolean, (open: boolean) => void] {
   const live = useContext(LiveTurn)
-  const [open, setOpen] = useState(false)
+  // 正在发生的细节可以默认展开（思考过程就是）；历史默认折着。
+  // 不看 live：思考增量可能先于"这一轮在跑"的状态事件到达，等它再展开会漏掉开头
+  const [open, setOpen] = useState(initialOpen)
   const [wasLive, setWasLive] = useState(live)
   if (wasLive !== live) {
     setWasLive(live)
@@ -1178,9 +1184,19 @@ function useDisclosure(): [boolean, (open: boolean) => void] {
  * 整行都能点，不是只有小三角：折叠条本身就是一行字，去瞄一个比字还小的目标太难。
  *
  * 折着的时候不渲染 markdown：否则每帧都要重新解析整段思考，而人根本没在看。
+ *
+ * 正在思考时默认展开，答案一开始就自动折回去：思考是"它现在在想什么"，值得跟着看；
+ * 答案开始后，人要看的是答案。手动折起/展开不跟着抖——只有 running 真的变化时才动。
  */
 function Thinking({ text, running = false }: { text: string; running?: boolean }) {
-  const [open, setOpen] = useDisclosure()
+  const [open, setOpen] = useDisclosure(running)
+  const [wasRunning, setWasRunning] = useState(running)
+  // 跟着 running 走：开始思考时展开，思考结束（答案开始或消息落地）时折回去。
+  // 写在渲染里而不是 effect 里，避免先画一帧旧状态再跳。
+  if (wasRunning !== running) {
+    setWasRunning(running)
+    setOpen(running)
+  }
   const summary = thinkingSummary(text, running)
 
   return (
@@ -1475,10 +1491,9 @@ function ToolLine({
  * 两种分开说，因为它们让人做的事不一样：被取消是我干的（按了停，不用查），
  * 中断是平台没的（意外，值得看一眼）。
  */
-const UNFINISHED_WORD: Record<Unfinished, string> = {
+const UNFINISHED_WORD: Record<Exclude<Unfinished, 'rejected'>, string> = {
   cancelled: '被取消',
   interrupted: '进程中断',
-  rejected: '你拒绝了',
   'no-result': '没有结果',
 }
 
@@ -1506,11 +1521,17 @@ function StatusDot({ running, failed, unfinished, label }: {
         ? 'bg-loom-faint'
         : 'bg-emerald-400'
   return (
-    <span
-      role="img"
-      aria-label={label}
-      className={`size-[7px] shrink-0 self-center rounded-full ${color} ${running ? 'animate-pulse' : ''}`}
-    />
+    <span role="img" aria-label={label} className="relative size-[7px] shrink-0 self-center">
+      {/* 跑着的时候外面再扩一圈：静止的圆点只说明"这里有个调用"，
+          呼吸的圈才说明"它现在还在跑" */}
+      {running && (
+        <span
+          aria-hidden
+          className={`absolute inset-0 animate-ping rounded-full opacity-40 motion-reduce:hidden ${color}`}
+        />
+      )}
+      <span className={`relative block size-[7px] rounded-full transition-colors ${color}`} />
+    </span>
   )
 }
 
@@ -1643,8 +1664,8 @@ function WebPage({ title, truncated }: { title?: string; truncated: boolean }) {
  * 正文不存进事件：它就在这次调用的参数里（见 `written`），再存一份是同一内容出现
  * 两次。覆盖时旧内容在磁盘上已经没了，那才是真画不出 diff 的那一半。
  *
- * 行号和代码用 diff 那一套：同样的等宽 13px、同样的行号列宽，所以新建、diff、
- * 普通代码块在同一栏里读起来是一个东西。
+ * 行号和代码沿用同一套等宽 13px；行号列的间距按各自的行结构定——这里和
+ * CodeLines 一样留 1.5rem，diff 那处因为要紧跟 +/− 记号只留半格。
  */
 function CreatedFile({
   content,
@@ -1679,10 +1700,9 @@ function CreatedFile({
   const tokens = useHighlighted(shown.join('\n'), language, seen)
 
   const digits = String(Math.max(lines, all.length, 1)).length
-  const numberWidth = `${digits + 2}ch`
   // 数字和正文之间留 1.5rem：数字右对齐，pr + 同宽 calc 会把数字整体往左推，
   // 而不是把正文挤到右边（见 CodeLines 同一处）。
-  const numberBox = `calc(${numberWidth} + 1.5rem)`
+  const numberBox = lineNumberWidth(digits, 1.5)
 
   if (all.length === 0) {
     return <p className="text-loom-faint">（空文件）</p>
@@ -1843,21 +1863,53 @@ function ResultText({ outcome }: { outcome: ToolOutcome }) {
  * 把变的词再深一档，读的人才知道变的是什么。哪几个词换了由 {@link wordDiffs} 算。
  *
  * 颜色不是唯一信号：底色只帮忙扫，`+` / `−` 才是真正的信息，读屏器也说得出来。
+ *
+ * 默认只露前 {@link DIFF_PREVIEW_ROWS} 行（会话流里的内联结果）；中栏按提交打开的
+ * 整份文件把 `previewRows` 传成总行数，并先滚到第一处增删。
  */
-export function DiffView({ rows, path, startLine }: {
+export function DiffView({
+  rows,
+  path,
+  startLine,
+  previewRows = DIFF_PREVIEW_ROWS,
+  focusFirstChange = false,
+}: {
   rows: DiffRow[]
   path: string | null
   /** 这一段在文件里的起始行号（后端随结果带过来）；没有就不标号 */
   startLine?: number
+  /**
+   * 收起时露出多少行。
+   *
+   * 会话流里的工具结果用默认值，避免一屏都是 diff；中栏按提交打开的整份文件传
+   * `rows.length`，直接铺满，不再要求人点一次"还有 N 行"。
+   */
+  previewRows?: number
+  /**
+   * 整份文件打开时先滚到第一处改动。
+   *
+   * 上下文铺满之后文件会从第一行开始；人点"这一轮的改动"时先想看的仍是改了什么，
+   * 所以落点放在第一处增删上，前面的行还在，往上滚就能看。
+   */
+  focusFirstChange?: boolean
 }) {
   const [expanded, setExpanded] = useDisclosure()
-  const shown = expanded ? rows : rows.slice(0, DIFF_PREVIEW_ROWS)
+  const shown = expanded ? rows : rows.slice(0, previewRows)
   const hidden = rows.length - shown.length
 
   // 滚到了才分词，和别处一样：一段流水里可能挂几十个 diff。
   const anchor = useRef<HTMLDivElement>(null)
   const seen = useViewportHighlighting(anchor)
   const language = languageOfPath(path)
+
+  // 整份文件从第一行铺开，但落点先放到第一处增删：人点开时先要看的是改了什么，
+  // 前面的上下文已经在上方，往上滚就有
+  useEffect(() => {
+    if (!focusFirstChange) {
+      return
+    }
+    anchor.current?.querySelector('[data-diff-change]')?.scrollIntoView({ block: 'center' })
+  }, [focusFirstChange, rows])
 
   // 两侧各自当成一整份文档去分词，再按行贴回去。
   //
@@ -1876,7 +1928,7 @@ export function DiffView({ rows, path, startLine }: {
    * 两种来源：统一 diff 的行自带号（按提交看的入口）；会话里那段改动只有起始行，
    * 按增删行数现场推。
    */
-  const numberWidth = useMemo(() => {
+  const numberDigits = useMemo(() => {
     let max = startLine ?? 0
     for (const row of rows) {
       if (row.kind !== 'gap' && row.line !== undefined) {
@@ -1905,12 +1957,13 @@ export function DiffView({ rows, path, startLine }: {
       }
     }
     // 数字两侧各留一个字符的空。
-    return max > 0 ? `${String(max).length + 2}ch` : null
+    return max > 0 ? String(max).length : null
   }, [rows, startLine])
 
-  // 数字和正文之间再留半格（和 CreatedFile / CodeLines 一致）：数字右对齐 +
-  // 同宽的 calc，数字整体往左推，正文起点不变。
-  const numberBox = numberWidth === null ? null : `calc(${numberWidth} + 0.5rem)`
+  // 数字和正文之间只留半格，比 CreatedFile / CodeLines 窄：diff 的行号后面紧跟
+  // +/− 记号，留宽了正文会被挤到右边。数字右对齐 + 同宽的 calc，数字整体往左推，
+  // 正文起点不变。
+  const numberBox = numberDigits === null ? null : lineNumberWidth(numberDigits, 0.5)
 
   // 每一侧各有一个游标：碰到这一侧的行就往下走一格。它们只在这次渲染里活，
   // shown 又是 rows 的前缀，所以两个游标始终对得上。
@@ -1970,6 +2023,7 @@ export function DiffView({ rows, path, startLine }: {
         return (
           <div
             key={index}
+            data-diff-change={added || removed ? 'true' : undefined}
             className={`flex ${added ? 'bg-loom-added' : removed ? 'bg-loom-removed' : ''}`}
           >
             {number !== null && (
@@ -2077,7 +2131,7 @@ const DiffLineText = memo(function DiffLineText({
     return (
       <>
         {tokens.map((token, index) => (
-          <span key={index} style={{ color: token.color }}>
+          <span key={index} style={tokenStyle(token)}>
             {token.content}
           </span>
         ))}
@@ -2278,10 +2332,9 @@ function formatDelay(delayMs: number): string {
 }
 
 /** 说给读屏器听的话。和 {@link UNFINISHED_WORD} 一一对应，改一个就要改另一个。 */
-const UNFINISHED_STATE_WORD: Record<Unfinished, string> = {
+const UNFINISHED_STATE_WORD: Record<Exclude<Unfinished, 'rejected'>, string> = {
   cancelled: '被取消了，没有结果',
   interrupted: '平台中断了，没有结果',
-  rejected: '你拒绝了这次调用，没有结果',
   'no-result': '没有结果',
 }
 

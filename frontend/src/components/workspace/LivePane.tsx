@@ -1,6 +1,12 @@
 import { ArrowDown } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
+/** 离底部超过这么远，才认为人翻上去了，显示「回到底部」 */
+const AWAY_FROM_BOTTOM_PX = 80
+
+/** 离底部这么近才算仍在跟随；用户往上滚一点就交还滚动位置 */
+const FOLLOW_BOTTOM_PX = 8
+
 /**
  * 右栏两种「一条不断长出内容的东西」共用的外壳：会话流、聊天室。
  *
@@ -51,11 +57,17 @@ export function LivePane({
   const scroller = useRef<HTMLDivElement>(null)
   const bottom = useRef<HTMLDivElement>(null)
   const [awayFromBottom, setAwayFromBottom] = useState(false)
+  /** 用户是否还在跟底部；由滚动事件更新，内容长高时只读它 */
+  const follow = useRef(true)
 
   // 从藏起来变回看得见：补一次落底（见 visible 的注释）。
   useEffect(() => {
     if (visible) {
-      bottom.current?.scrollIntoView({ block: 'end' })
+      const node = scroller.current
+      if (node) {
+        node.scrollTop = node.scrollHeight
+        follow.current = true
+      }
     }
   }, [visible])
 
@@ -64,35 +76,52 @@ export function LivePane({
     if (!node) {
       return
     }
-    const toBottom = () => bottom.current?.scrollIntoView({ block: 'end' })
-
-    // 第一批内容一定要落到最底下。只判"离底部 40px 以内才滚"的话，刚打开长会话
-    // 时 scrollTop 是 0，条件从一开始就不成立，一次都不滚：人被留在最老的一条上，
-    // 而新内容还在往下加。第一趟无条件落底之后，后面每次都满足那个条件。
-    let landed = false
+    // 直接改 scrollTop，不用 scrollIntoView：后者可能连带滚动外层，而这里要滚的
+    // 始终只是这一条流
+    const toBottom = () => {
+      node.scrollTop = node.scrollHeight
+    }
 
     /**
-     * 现在离底部有多远。
+     * 是否还在跟随底部，见上面 follow 的注释。
+     *
+     * 判断必须在内容长高之前做。旧写法在观察回调里拿"已经长高之后"的距离去比，
+     * 一条消息一次长出几十像素就超出阈值，于是人明明停在底部、也不再自动跟下去。
+     * 现在由用户的滚动事件更新它：往上滚 = 我在看历史，之后的新内容不抢滚动位置；
+     * 回到底部 = 继续跟随。
+     */
+    follow.current = true
+
+    /** 距底部还有多远。 */
+    const distance = () => node.scrollHeight - node.scrollTop - node.clientHeight
+
+    /**
+     * 重算"离开底部"和"是否继续跟随"。
      *
      * 内容变高变矮时也要重算，不只是滚动时：折叠一段思考、收起一次 diff 都会改
      * `scrollHeight` 而不产生滚动事件。少了这一句，之前翻上去过一次的判断会永远
      * 留着，人明明已在底部，"回到底部"还挂着。
      */
     const measure = () => {
-      setAwayFromBottom(node.scrollHeight - node.scrollTop - node.clientHeight > 80)
+      const remaining = distance()
+      setAwayFromBottom(remaining > AWAY_FROM_BOTTOM_PX)
+      follow.current = remaining <= FOLLOW_BOTTOM_PX
     }
 
     const observer = new MutationObserver(() => {
-      measure()
-      const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 40
-      if (!landed || nearBottom) {
-        landed = true
+      if (follow.current) {
         toBottom()
       }
+      measure()
     })
     observer.observe(node, { childList: true, subtree: true, characterData: true })
 
     node.addEventListener('scroll', measure, { passive: true })
+
+    // 第一批内容一定要落到最底下：新打开长会话时 scrollTop 还是 0，不先落一次底，
+    // 人会停在最老的一条上
+    toBottom()
+    measure()
 
     return () => {
       observer.disconnect()
@@ -112,22 +141,24 @@ export function LivePane({
         {/* min-h-0 不能省：flex 子项的默认最小高度是内容高度，不写会把容器撑开。
             relative 同理，而且是个安静的坑：裁剪按包含块算，不按 DOM 祖先。这一层
             不是定位元素时，内容里绝对定位的东西会绕过它往上找定位祖先，从找到的那
-            一层往外撑。中栏那边栽过（见 CodeView） */}
+            一层往外撑。 */}
         <div ref={scroller} className="relative h-full overflow-auto">
           {children}
           <div ref={bottom} />
         </div>
 
         {/* 翻上去之后才有这一颗。它不自动消失也不闪：新内容接上了、又长出来了，
-            它都在这儿等着 */}
+            它都在这儿等着。放在输入框上方的右下角，而不是流的中间：正文从左边读，
+            右边角上不压住正在看的那几行；圆钮比一条横在中间的胶囊更轻 */}
         {awayFromBottom && (
           <button
             type="button"
+            title="回到底部"
+            aria-label="回到底部"
             onClick={() => bottom.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })}
-            className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full bg-card px-2.5 py-1 text-xs text-muted-foreground shadow-[0_0_0_1px_var(--border),0_4px_12px_-4px_rgb(0_0_0/60%)] transition-colors hover:text-foreground"
+            className="absolute right-4 bottom-0 z-20 flex size-8 items-center justify-center rounded-full bg-card text-muted-foreground shadow-float transition-colors hover:bg-secondary hover:text-foreground"
           >
-            <ArrowDown className="size-3" />
-            回到底部
+            <ArrowDown className="size-4" />
           </button>
         )}
 

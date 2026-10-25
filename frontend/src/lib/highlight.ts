@@ -3,13 +3,15 @@ import type { ThemedToken } from 'shiki'
 import type { HighlighterCore } from 'shiki/core'
 
 import { DARCULA } from '@/lib/darcula'
+import { baseName } from '@/lib/path'
 
 /**
  * 代码高亮。全站共用一个高亮器实例。
  *
  * 用 shiki 的细粒度入口，因为 `codeToTokens` 直接返回"每行一个 token 数组"。
- * 中栏一行一个 `div`（行号单独一列且不可选中），按行拿 token 是唯一顺手的接口；
- * 输出整段 HTML 的库（如 highlight.js）需要自己按行切，跨行的 span 会被切坏。
+ * `CodeLines` 一行一个 `div`（行号单独一列且不可选中），按行拿 token 是唯一顺手
+ * 的接口；输出整段 HTML 的库（如 highlight.js）需要自己按行切，跨行的 span 会被
+ * 切坏。
  *
  * 细粒度 import（`shiki/core` + 逐语言 import）避免把全部语言和主题打进包里；
  * 用 JavaScript 引擎而不是 WASM 引擎，省掉六百多 KB 的 `.wasm`。
@@ -152,7 +154,13 @@ export function useHighlighted(
   language: string | null,
   enabled = true,
 ): ThemedToken[][] | null {
-  const [tokens, setTokens] = useState<ThemedToken[][] | null>(null)
+  // 结果连同产生它的内容一起存。节流窗口里内容可能已经换了，但 state 还是上一份的；
+  // 只存 token 会让新内容顶着旧 token 渲染，屏幕上出现别的文件的文字。
+  const [result, setResult] = useState<{
+    content: string
+    language: string
+    tokens: ThemedToken[][]
+  } | null>(null)
   /** 上一次真正分词的时刻；节流按它算下一次该等到何时 */
   const lastRunAt = useRef(0)
 
@@ -167,13 +175,13 @@ export function useHighlighted(
       lastRunAt.current = Date.now()
       highlighter()
         .then((hl) => hl.codeToTokens(content, { lang: language, theme: THEME }).tokens)
-        .then((result) => {
-          if (!cancelled) setTokens(result)
+        .then((tokens) => {
+          if (!cancelled) setResult({ content, language, tokens })
         })
         .catch(() => {
           // 高亮失败不该让代码看不见：退回原样。语法包解析不了只是少点颜色，
           // 代码才是这一栏唯一的正文。
-          if (!cancelled) setTokens(null)
+          if (!cancelled) setResult(null)
         })
     }, wait)
     return () => {
@@ -183,11 +191,12 @@ export function useHighlighted(
   }, [content, language, enabled])
 
   // 认不出扩展名当场返回 null，不为它进一次 state（effect 里同步 setState 会多渲染
-  // 一次，而这件事不需要渲染就能算出来）。
-  //
-  // 这一行也是必须的：tokens 里可能还留着上一份内容的结果，而高亮结果带着内容
-  // 本身，上错色比没色更糟。调用方再挂 per-file key，把这件事变成结构上的保证。
-  return language === null ? null : tokens
+  // 一次，而这件事不需要渲染就能算出来）。内容或语言对不上也返回 null：宁可少一帧
+  // 颜色，也不能把上一份的 token 套到这一份上。
+  if (language === null || result === null) {
+    return null
+  }
+  return result.content === content && result.language === language ? result.tokens : null
 }
 
 /**
@@ -285,7 +294,7 @@ export function languageOfPath(path: string | null): string | null {
   if (path === null) {
     return null
   }
-  const name = path.slice(path.lastIndexOf('/') + 1)
+  const name = baseName(path)
   const dot = name.lastIndexOf('.')
   return dot > 0 ? languageOfWord(name.slice(dot + 1)) : null
 }

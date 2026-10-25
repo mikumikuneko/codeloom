@@ -1,6 +1,27 @@
 import type { ThemeRegistration } from 'shiki/core'
 
 /**
+ * Darcula 的色值。
+ *
+ * 只读视图（shiki 的 TextMate scope）和编辑器（CodeMirror 的 lezer tag）共用这一份，
+ * 两套映射的 tag/scope 名字不同，颜色不该各写一遍：同一个 `true` 在两处画成两种
+ * 蓝，是肉眼能看出来的。
+ */
+export const DARCULA_COLORS = {
+  background: '#0a0a0c',
+  plain: '#a9b7c6',
+  comment: '#808080',
+  keyword: '#cc7832',
+  annotation: '#bbb529',
+  string: '#6a8759',
+  number: '#6897bb',
+  constant: '#9876aa',
+  function: '#ffc66d',
+  tag: '#e8bf6a',
+  attribute: '#bababa',
+} as const
+
+/**
  * JetBrains Darcula：照 IDEA 那套配色写的 TextMate 主题。
  *
  * 注意拼写：Darcula 是 IDEA 这套（橙关键字、黄方法名、灰注释），Dracula 是另一套
@@ -21,15 +42,16 @@ export const DARCULA = {
   name: 'codeloom-darcula',
   type: 'dark',
   colors: {
-    // 背景用我们的；这个名字只为完整性，实际渲染由 CodeLines 铺底色。
-    'editor.background': '#0a0a0c',
-    'editor.foreground': '#a9b7c6',
+    // 背景用我们的。这个值只为主题完整性：编辑器本身是 transparent，代码块
+    // 外壳才是真正铺底色的那层。
+    'editor.background': DARCULA_COLORS.background,
+    'editor.foreground': DARCULA_COLORS.plain,
   },
   settings: [
     // TextMate 规则后面的覆盖前面的，所以顺序有含义：越具体的越靠后。
-    { settings: { foreground: '#a9b7c6' } },
+    { settings: { foreground: DARCULA_COLORS.plain } },
 
-    { scope: ['comment', 'punctuation.definition.comment'], settings: { foreground: '#808080' } },
+    { scope: ['comment', 'punctuation.definition.comment'], settings: { foreground: DARCULA_COLORS.comment } },
 
     /*
      * 关键字：public / final / class / extends / int / boolean / return / new
@@ -46,32 +68,32 @@ export const DARCULA = {
      */
     {
       scope: ['keyword', 'storage.modifier', 'storage.type.primitive'],
-      settings: { foreground: '#cc7832' },
+      settings: { foreground: DARCULA_COLORS.keyword },
     },
     // 运算符不是关键字：=、(、. 在 Darcula 里就是默认色。
-    { scope: ['keyword.operator'], settings: { foreground: '#a9b7c6' } },
+    { scope: ['keyword.operator'], settings: { foreground: DARCULA_COLORS.plain } },
     // 注解（@Override 之类）是橄榄色；必须排在 keyword/storage 之后才盖得住。
     {
       scope: ['storage.type.annotation', 'meta.declaration.annotation', 'punctuation.decorator'],
-      settings: { foreground: '#bbb529' },
+      settings: { foreground: DARCULA_COLORS.annotation },
     },
 
-    { scope: ['string', 'punctuation.definition.string'], settings: { foreground: '#6a8759' } },
-    { scope: ['constant.numeric'], settings: { foreground: '#6897bb' } },
-    { scope: ['constant.language', 'constant.character.escape'], settings: { foreground: '#9876aa' } },
+    { scope: ['string', 'punctuation.definition.string'], settings: { foreground: DARCULA_COLORS.string } },
+    { scope: ['constant.numeric'], settings: { foreground: DARCULA_COLORS.number } },
+    { scope: ['constant.language', 'constant.character.escape'], settings: { foreground: DARCULA_COLORS.constant } },
 
     // 方法名：声明和调用同色，这是 IDEA 观感的一部分。
-    { scope: ['entity.name.function', 'support.function'], settings: { foreground: '#ffc66d' } },
+    { scope: ['entity.name.function', 'support.function'], settings: { foreground: DARCULA_COLORS.function } },
 
     // 类名、类型名在 Darcula 里就是默认前景色，不上色。
     {
       scope: ['entity.name.type', 'entity.name.class', 'support.class', 'support.type'],
-      settings: { foreground: '#a9b7c6' },
+      settings: { foreground: DARCULA_COLORS.plain },
     },
 
     // 标记语言的标签与属性（HTML/XML 也走这个主题）。
-    { scope: ['entity.name.tag'], settings: { foreground: '#e8bf6a' } },
-    { scope: ['entity.other.attribute-name'], settings: { foreground: '#bababa' } },
+    { scope: ['entity.name.tag'], settings: { foreground: DARCULA_COLORS.tag } },
+    { scope: ['entity.other.attribute-name'], settings: { foreground: DARCULA_COLORS.attribute } },
 
     /*
      * Markdown（以及任何走 markup.* 的语法）。
@@ -84,16 +106,16 @@ export const DARCULA = {
      * 颜色，所以拿默认色加粗；行内代码与字符串是同一类字面量，用同一个绿；标记号
      * （#、-）与注释同色，它们是记号不是内容。
      */
-    { scope: ['markup.heading'], settings: { foreground: '#a9b7c6', fontStyle: 'bold' } },
+    { scope: ['markup.heading'], settings: { foreground: DARCULA_COLORS.plain, fontStyle: 'bold' } },
     {
       scope: ['punctuation.definition.heading', 'punctuation.definition.list'],
-      settings: { foreground: '#808080' },
+      settings: { foreground: DARCULA_COLORS.comment },
     },
-    { scope: ['markup.bold'], settings: { foreground: '#a9b7c6', fontStyle: 'bold' } },
-    { scope: ['markup.italic'], settings: { foreground: '#a9b7c6', fontStyle: 'italic' } },
-    { scope: ['markup.inline.raw', 'markup.raw.block', 'markup.raw'], settings: { foreground: '#6a8759' } },
-    { scope: ['markup.quote'], settings: { foreground: '#808080' } },
+    { scope: ['markup.bold'], settings: { foreground: DARCULA_COLORS.plain, fontStyle: 'bold' } },
+    { scope: ['markup.italic'], settings: { foreground: DARCULA_COLORS.plain, fontStyle: 'italic' } },
+    { scope: ['markup.inline.raw', 'markup.raw.block', 'markup.raw'], settings: { foreground: DARCULA_COLORS.string } },
+    { scope: ['markup.quote'], settings: { foreground: DARCULA_COLORS.comment } },
     // 链接用数字那档蓝：都是指向别处的东西，同一档颜色说得通。
-    { scope: ['markup.underline.link', 'string.other.link'], settings: { foreground: '#6897bb' } },
+    { scope: ['markup.underline.link', 'string.other.link'], settings: { foreground: DARCULA_COLORS.number } },
   ],
 } satisfies ThemeRegistration
