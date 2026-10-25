@@ -30,6 +30,15 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
   const [nonce, setNonce] = useState(0)
   // 下一次运行是否为安静方式。用 ref 而不是 state：它不该触发渲染。
   const quiet = useRef(false)
+  /**
+   * 有没有一次"会管 loading"的读取还没结束。
+   *
+   * 安静重拉要据此让路：它自己不碰 loading，而它一插进来就会把在飞的那次取消掉，
+   * 被取消的那次 finally 不跑，loading 就永远停在 true —— 整页卡在"正在打开…"，
+   * 只有刷新才能恢复。切回浏览器标签页时 focus 和 visibilitychange 都会触发一次
+   * 安静重拉，正好撞上打开项目的那次请求，就是这个样子。
+   */
+  const busy = useRef(true)
 
   // load 每次渲染都是新函数，依赖里不能放它，否则无限循环。
   // 调用方用 deps 声明"什么时候该重新拉"。
@@ -41,6 +50,7 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
     const silent = quiet.current
     quiet.current = false
     if (!silent) {
+      busy.current = true
       setLoading(true)
       setError(null)
     }
@@ -62,7 +72,10 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
         if (!cancelled && !silent) setError(errorText(e))
       })
       .finally(() => {
-        if (!cancelled && !silent) setLoading(false)
+        if (!cancelled && !silent) {
+          busy.current = false
+          setLoading(false)
+        }
       })
     return () => {
       cancelled = true
@@ -76,7 +89,12 @@ export function useAsync<T>(load: () => Promise<T>, deps: unknown[]): AsyncState
     // `=== true` 而不是直接赋值：这个函数可能被当事件处理器传下去，第一个参数
     // 是 MouseEvent（真值），会把一次正常重拉变成安静方式。
     reload: (quietReload = false) => {
-      quiet.current = quietReload === true
+      const silent = quietReload === true
+      // 在飞的那次本来就会带回新数据，也由它负责收 loading；安静重拉插进去只会
+      // 把它取消掉，然后留下一个永远收不掉的加载态。跳过；等它落地，下一次轮询
+      // 自然会再来。
+      if (silent && busy.current) return
+      quiet.current = silent
       setNonce((n) => n + 1)
     },
   }
