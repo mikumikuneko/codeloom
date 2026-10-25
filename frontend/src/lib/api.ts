@@ -138,6 +138,8 @@ export interface ConfiguredKey {
   name: string
   /** 密钥掩码（头八尾四，中间五个星；短 key 整把为 `****`），用来辨认填的是哪一把；读不出来时为 null */
   hint: string | null
+  /** 思考强度 none/low/high/max；null = 不发送，由服务商决定默认 */
+  reasoningEffort: string | null
   configuredAt: string
 }
 
@@ -151,6 +153,8 @@ export interface ProviderPreset {
   displayName: string
   /** 官网，只用来给人点过去 */
   officialUrl: string
+  /** 这一家是否支持思考强度；决定表单里要不要显示那个下拉 */
+  supportsReasoningEffort: boolean
 }
 
 export const apiKeys = {
@@ -165,12 +169,12 @@ export const apiKeys = {
    * `name` 可以留空，界面就用预设名；后端把空名字写成 NULL 而不是空串，
    * 使"没起过名"和"起了个空名"是同一件事。
    *
-   * 不收地址：地址由服务端按 `provider` 取。
+   * 不收地址：地址由服务端按 `provider` 取。`apiKey` 留空表示只改设置（已配置过时）。
    */
-  configure: (provider: string, name: string, apiKey: string) =>
+  configure: (provider: string, name: string, apiKey: string, reasoningEffort: string) =>
     api<void>('/api/auth/api-key', {
       method: 'PUT',
-      body: JSON.stringify({ provider, name, apiKey }),
+      body: JSON.stringify({ provider, name, apiKey, reasoningEffort }),
     }),
 
   remove: (provider: string) =>

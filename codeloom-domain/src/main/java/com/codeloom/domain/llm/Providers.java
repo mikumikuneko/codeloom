@@ -25,15 +25,18 @@ public final class Providers {
      *                    这里又开一条未经归一化的路径
      * @param displayName 界面上显示的名字
      * @param officialUrl 官网，只用来给人点过去
-     * @param baseUrl     请求地址；OpenAI 兼容端点的根，客户端在它后面拼
-     *                    {@code /chat/completions}
+     * @param baseUrl                 请求地址；OpenAI 兼容端点的根，客户端在它后面拼
+     *                                {@code /chat/completions}
+     * @param supportsReasoningEffort 这一家是否支持 reasoning_effort；界面据此决定要不要
+     *                                显示思考强度
      */
-    public record Preset(ProviderId id, String displayName, String officialUrl, String baseUrl) {
+    public record Preset(ProviderId id, String displayName, String officialUrl, String baseUrl,
+                         boolean supportsReasoningEffort) {
     }
 
     public static final Preset DEEPSEEK = new Preset(
             ProviderId.of("deepseek"), "DeepSeek",
-            "https://platform.deepseek.com", "https://api.deepseek.com");
+            "https://platform.deepseek.com", "https://api.deepseek.com", true);
 
     private static final List<Preset> ALL = List.of(DEEPSEEK);
 

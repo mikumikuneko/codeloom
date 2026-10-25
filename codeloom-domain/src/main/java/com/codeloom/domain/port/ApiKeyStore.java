@@ -1,6 +1,7 @@
 package com.codeloom.domain.port;
 
 import com.codeloom.domain.llm.ProviderId;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.user.UserId;
 
 import java.time.Instant;
@@ -25,13 +26,30 @@ public interface ApiKeyStore {
      * 界面上凭它们认出「哪个是我的 DeepSeek」。地址对预设的那几家是冗余的
      * （{@code Providers} 里已有一份），它是给自定义 provider 留的位置。
      *
-     * @param owner    密钥的所有者
-     * @param provider 哪一家模型服务
-     * @param baseUrl  这一家的请求地址；预设的给 null（从 {@code Providers} 取）
-     * @param name     显示名；null 表示没起（界面上显示预设名或 id）
-     * @param apiKey   明文密钥；实现负责加密，落库的必须是密文
+     * @param owner           密钥的所有者
+     * @param provider        哪一家模型服务
+     * @param baseUrl         这一家的请求地址；预设的给 null（从 {@code Providers} 取）
+     * @param name            显示名；null 表示没起（界面上显示预设名或 id）
+     * @param apiKey          明文密钥；实现负责加密，落库的必须是密文
+     * @param reasoningEffort 思考强度；null 表示不发送，由服务商决定默认值
      */
-    void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey);
+    void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey,
+             ReasoningEffort reasoningEffort);
+
+    /**
+     * 只改显示名、地址和思考强度，不动密钥。
+     *
+     * <p>用户改一个下拉不该被逼着重填整把 key。调用方必须先确认这一家已经配置过；
+     * 没有密钥时这个方法不会创建出半条配置。
+     *
+     * @param owner           密钥的所有者
+     * @param provider        哪一家模型服务
+     * @param baseUrl         这一家的请求地址；预设的给 null
+     * @param name            显示名；null 表示没起
+     * @param reasoningEffort 思考强度；null 表示不发送
+     */
+    void updateSettings(UserId owner, ProviderId provider, String baseUrl, String name,
+                        ReasoningEffort reasoningEffort);
 
     /**
      * 取出这一家的明文密钥；没配过就是空。
@@ -43,6 +61,17 @@ public interface ApiKeyStore {
      * @return 明文密钥；没配过时为空
      */
     Optional<String> find(UserId owner, ProviderId provider);
+
+    /**
+     * 这一家配置的思考强度；没配过或留空时为空。
+     *
+     * <p>每次发请求现取，用户改完下一轮立即生效，不需要重启或清客户端缓存。
+     *
+     * @param owner    密钥的所有者
+     * @param provider 哪一家模型服务
+     * @return 思考强度；没配置时为空
+     */
+    Optional<ReasoningEffort> reasoningEffort(UserId owner, ProviderId provider);
 
     /**
      * 删掉这个用户在这一家上的密钥。没配过时也成功。
@@ -65,12 +94,13 @@ public interface ApiKeyStore {
      * 标识是领域语言里的 {@link ProviderId}；库里那一列是 VARCHAR，换算由适配器完成
      * （见 {@code ApiKeyRow}）。
      *
-     * @param provider     哪一家
-     * @param baseUrl      这一家的请求地址；预设的那几家为 null（地址在 {@code Providers} 里）
-     * @param name         用户给它起的显示名，可空
-     * @param configuredAt 最后一次更换密钥的时间
+     * @param provider        哪一家
+     * @param baseUrl         这一家的请求地址；预设的那几家为 null（地址在 {@code Providers} 里）
+     * @param name            用户给它起的显示名，可空
+     * @param reasoningEffort 思考强度，可空（不发送，由服务商决定）
+     * @param configuredAt    最后一次更换密钥的时间
      */
     record ConfiguredProvider(ProviderId provider, String baseUrl, String name,
-                              Instant configuredAt) {
+                              ReasoningEffort reasoningEffort, Instant configuredAt) {
     }
 }

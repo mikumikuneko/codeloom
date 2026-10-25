@@ -131,6 +131,52 @@ class ApiKeyApiTest {
     }
 
     @Test
+    @DisplayName("思考强度随 provider 保存；改设置不用重填密钥")
+    void reasoningEffortCanBeChangedWithoutResendingTheKey() throws Exception {
+        TestBrowser alice = register();
+        alice.put("/api/auth/api-key", presetBody(DEEPSEEK, DEEPSEEK_KEY, "max"));
+
+        JsonNode configured = listKeys(alice).stream()
+                .filter(node -> node.get("provider").asText().equals(DEEPSEEK))
+                .findFirst()
+                .orElseThrow();
+        assertThat(configured.get("reasoningEffort").asText()).isEqualTo("max");
+        String hint = configured.get("hint").asText();
+
+        // 不传 apiKey：只改设置，密钥原样保留
+        HttpResponse<String> updated = alice.put("/api/auth/api-key",
+                json.writeValueAsString(Map.of(
+                        "provider", DEEPSEEK, "reasoningEffort", "none")));
+        assertThat(updated.statusCode()).isEqualTo(204);
+
+        JsonNode after = listKeys(alice).stream()
+                .filter(node -> node.get("provider").asText().equals(DEEPSEEK))
+                .findFirst()
+                .orElseThrow();
+        assertThat(after.get("reasoningEffort").asText()).isEqualTo("none");
+        assertThat(after.get("hint").asText()).isEqualTo(hint);
+
+        var me = users.findByUsername(alice.username()).orElseThrow();
+        assertThat(clients.findClient(me.id(), model(DEEPSEEK))).isPresent();
+    }
+
+    @Test
+    @DisplayName("不认识的强度、或这一家不支持它 → 400")
+    void unsupportedReasoningEffortIsRejected() throws Exception {
+        TestBrowser alice = register();
+
+        HttpResponse<String> unknown = alice.put("/api/auth/api-key",
+                presetBody(DEEPSEEK, DEEPSEEK_KEY, "ultra"));
+        assertThat(unknown.statusCode()).isEqualTo(400);
+        assertThat(unknown.body()).contains("思考强度");
+
+        HttpResponse<String> unsupported = alice.put("/api/auth/api-key",
+                customBodyWithEffort(MOONSHOT, MOONSHOT_BASE_URL, MOONSHOT_KEY, "high"));
+        assertThat(unsupported.statusCode()).isEqualTo(400);
+        assertThat(unsupported.body()).contains("不支持思考强度");
+    }
+
+    @Test
     @DisplayName("【地址不是身份】预设的那几家：请求里的地址不采纳，地址由服务端定")
     void presetProvidersTakeTheirAddressFromTheServer() throws Exception {
         TestBrowser alice = register();
@@ -268,10 +314,23 @@ class ApiKeyApiTest {
         return json.writeValueAsString(Map.of("provider", provider, "apiKey", apiKey));
     }
 
+    private String presetBody(String provider, String apiKey, String reasoningEffort)
+            throws Exception {
+        return json.writeValueAsString(Map.of(
+                "provider", provider, "apiKey", apiKey, "reasoningEffort", reasoningEffort));
+    }
+
     /** 自定义 provider：地址得一起给，那是它唯一的来源。 */
     private String customBody(String provider, String baseUrl, String apiKey) throws Exception {
         return json.writeValueAsString(
                 Map.of("provider", provider, "baseUrl", baseUrl, "apiKey", apiKey));
+    }
+
+    private String customBodyWithEffort(String provider, String baseUrl, String apiKey,
+                                        String reasoningEffort) throws Exception {
+        return json.writeValueAsString(Map.of(
+                "provider", provider, "baseUrl", baseUrl, "apiKey", apiKey,
+                "reasoningEffort", reasoningEffort));
     }
 
     private TestBrowser register() throws Exception {

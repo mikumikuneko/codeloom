@@ -2,6 +2,7 @@ package com.codeloom.app.persistence;
 
 import com.codeloom.app.auth.SecretCipher;
 import com.codeloom.domain.llm.ProviderId;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.port.ApiKeyStore;
 import com.codeloom.domain.user.UserId;
 import org.springframework.stereotype.Repository;
@@ -33,13 +34,35 @@ public class MyBatisApiKeyStore implements ApiKeyStore {
      * @param owner    密钥所属用户
      * @param provider 服务商标识
      * @param baseUrl  自定义请求地址；预设服务商为 null
-     * @param name     显示名，可以为 null
-     * @param apiKey   明文密钥
+     * @param name            显示名，可以为 null
+     * @param apiKey          明文密钥
+     * @param reasoningEffort 思考强度；null 表示服务商默认
      */
     @Override
-    public void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey) {
+    public void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey,
+                    ReasoningEffort reasoningEffort) {
         mapper.save(owner.value(), provider.value(), name, baseUrl,
-                cipher.encrypt(apiKey), Instant.now());
+                cipher.encrypt(apiKey), wireValue(reasoningEffort), Instant.now());
+    }
+
+    /**
+     * 只改显示名、地址和思考强度，不动密文。
+     *
+     * @param owner           密钥所属用户
+     * @param provider        服务商标识
+     * @param baseUrl         自定义请求地址；预设服务商为 null
+     * @param name            显示名，可以为 null
+     * @param reasoningEffort 思考强度；null 表示服务商默认
+     */
+    @Override
+    public void updateSettings(UserId owner, ProviderId provider, String baseUrl, String name,
+                               ReasoningEffort reasoningEffort) {
+        mapper.updateSettings(owner.value(), provider.value(), name, baseUrl,
+                wireValue(reasoningEffort), Instant.now());
+    }
+
+    private static String wireValue(ReasoningEffort effort) {
+        return effort == null ? null : effort.wireValue();
     }
 
     /**
@@ -54,6 +77,18 @@ public class MyBatisApiKeyStore implements ApiKeyStore {
         // 明文只在这个方法里存在一小会儿。
         return Optional.ofNullable(mapper.findSealedKey(owner.value(), provider.value()))
                 .map(cipher::decrypt);
+    }
+
+    /**
+     * 读取这一家的思考强度；空值表示不发送。
+     *
+     * @param owner    密钥所属用户
+     * @param provider 服务商标识
+     * @return 思考强度；没配置时为空
+     */
+    @Override
+    public Optional<ReasoningEffort> reasoningEffort(UserId owner, ProviderId provider) {
+        return ReasoningEffort.parse(mapper.findReasoningEffort(owner.value(), provider.value()));
     }
 
     /**

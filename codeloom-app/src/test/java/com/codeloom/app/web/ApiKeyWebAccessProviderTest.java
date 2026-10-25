@@ -2,6 +2,7 @@ package com.codeloom.app.web;
 
 import com.codeloom.app.llm.ProviderEndpoints;
 import com.codeloom.domain.llm.ProviderId;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.port.ApiKeyStore;
 import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.user.UserId;
@@ -63,13 +64,25 @@ class ApiKeyWebAccessProviderTest {
         final Map<ProviderId, String> keys = new HashMap<>();
 
         @Override
-        public void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey) {
+        public void put(UserId owner, ProviderId provider, String baseUrl, String name, String apiKey,
+                        ReasoningEffort reasoningEffort) {
             keys.put(provider, apiKey);
+        }
+
+        @Override
+        public void updateSettings(UserId owner, ProviderId provider, String baseUrl, String name,
+                                   ReasoningEffort reasoningEffort) {
+            // 这几条用例只看密钥，设置更新是空操作
         }
 
         @Override
         public Optional<String> find(UserId owner, ProviderId provider) {
             return Optional.ofNullable(keys.get(provider));
+        }
+
+        @Override
+        public Optional<ReasoningEffort> reasoningEffort(UserId owner, ProviderId provider) {
+            return Optional.empty();
         }
 
         @Override
@@ -80,7 +93,7 @@ class ApiKeyWebAccessProviderTest {
         @Override
         public List<ConfiguredProvider> listConfigured(UserId owner) {
             return keys.keySet().stream()
-                    .map(provider -> new ConfiguredProvider(provider, null, null, Instant.EPOCH))
+                    .map(provider -> new ConfiguredProvider(provider, null, null, null, Instant.EPOCH))
                     .toList();
         }
     }

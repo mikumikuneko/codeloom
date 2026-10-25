@@ -108,6 +108,25 @@ class OpenAiCompatibleClientTest {
     }
 
     @Test
+    @DisplayName("思考强度配置了才写进请求体；没配置就不发，由服务商决定默认")
+    void reasoningEffortIsOptional() throws IOException {
+        List<JsonNode> bodies = new java.util.ArrayList<>();
+        String baseUrl = startServer(exchange -> {
+            bodies.add(readJson(exchange));
+            send(exchange, 200, "text/event-stream", minimalStream().getBytes(StandardCharsets.UTF_8));
+        });
+
+        new OpenAiCompatibleClient(mapper, baseUrl, () -> "sk-test-not-a-real-key", () -> "max")
+                .stream(request("hi"), event -> {
+                }, CancellationToken.none());
+        clientFor(baseUrl).stream(request("hi"), event -> {
+        }, CancellationToken.none());
+
+        assertThat(bodies.get(0).path("reasoning_effort").asText()).isEqualTo("max");
+        assertThat(bodies.get(1).has("reasoning_effort")).isFalse();
+    }
+
+    @Test
     @DisplayName("工具定义被渲染成 OpenAI 的 function 结构")
     void rendersToolDefinitions() throws IOException {
         AtomicReference<JsonNode> received = new AtomicReference<>();

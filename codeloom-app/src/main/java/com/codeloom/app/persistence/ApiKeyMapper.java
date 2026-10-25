@@ -5,6 +5,7 @@ import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 import java.time.Instant;
 import java.util.List;
 
@@ -29,28 +30,60 @@ public interface ApiKeyMapper {
      * @param provider  服务商标识
      * @param name      显示名，可以为 null
      * @param baseUrl   自定义请求地址，预设服务商为 null
-     * @param sealedKey 密文
-     * @param now       本次写入时间
+     * @param sealedKey       密文
+     * @param reasoningEffort 思考强度；null 表示服务商默认
+     * @param now             本次写入时间
      * @return 受影响行数
      */
     @Insert("""
             INSERT INTO user_api_key
-                (user_id, provider, name, base_url, sealed_key, created_at, updated_at)
+                (user_id, provider, name, base_url, sealed_key, reasoning_effort, created_at, updated_at)
             VALUES
-                (#{userId}, #{provider}, #{name}, #{baseUrl}, #{sealedKey}, #{now}, #{now})
+                (#{userId}, #{provider}, #{name}, #{baseUrl}, #{sealedKey}, #{reasoningEffort},
+                 #{now}, #{now})
             AS new
             ON DUPLICATE KEY UPDATE
-                name       = new.name,
-                base_url   = new.base_url,
-                sealed_key = new.sealed_key,
-                updated_at = new.updated_at
+                name             = new.name,
+                base_url         = new.base_url,
+                sealed_key       = new.sealed_key,
+                reasoning_effort = new.reasoning_effort,
+                updated_at       = new.updated_at
             """)
     int save(@Param("userId") String userId,
              @Param("provider") String provider,
              @Param("name") String name,
              @Param("baseUrl") String baseUrl,
              @Param("sealedKey") String sealedKey,
+             @Param("reasoningEffort") String reasoningEffort,
              @Param("now") Instant now);
+
+    /**
+     * 只改显示名、地址和思考强度，不动密文。
+     *
+     * <p>没有密钥时返回 0 行；调用方应当先确认这一家配置过，别让它悄悄创建半条记录。
+     *
+     * @param userId          用户 id
+     * @param provider        服务商标识
+     * @param name            显示名，可以为 null
+     * @param baseUrl         自定义请求地址，预设服务商为 null
+     * @param reasoningEffort 思考强度，可以为 null
+     * @param now             本次写入时间
+     * @return 受影响行数
+     */
+    @Update("""
+            UPDATE user_api_key
+               SET name = #{name},
+                   base_url = #{baseUrl},
+                   reasoning_effort = #{reasoningEffort},
+                   updated_at = #{now}
+             WHERE user_id = #{userId} AND provider = #{provider}
+            """)
+    int updateSettings(@Param("userId") String userId,
+                       @Param("provider") String provider,
+                       @Param("name") String name,
+                       @Param("baseUrl") String baseUrl,
+                       @Param("reasoningEffort") String reasoningEffort,
+                       @Param("now") Instant now);
 
     /**
      * 读某一家的密文。
@@ -63,6 +96,18 @@ public interface ApiKeyMapper {
             + "WHERE user_id = #{userId} AND provider = #{provider}")
     String findSealedKey(@Param("userId") String userId,
                          @Param("provider") String provider);
+
+    /**
+     * 读某一家的思考强度，不碰密文。
+     *
+     * @param userId   用户 id
+     * @param provider 服务商标识
+     * @return 配置值；没配置或为 null 时返回 null
+     */
+    @Select("SELECT reasoning_effort FROM user_api_key "
+            + "WHERE user_id = #{userId} AND provider = #{provider}")
+    String findReasoningEffort(@Param("userId") String userId,
+                               @Param("provider") String provider);
 
     /**
      * 删除某一家的密钥。
@@ -83,7 +128,7 @@ public interface ApiKeyMapper {
      * @return 已配置的服务商，按 provider 排序
      */
     @Select("SELECT provider, base_url AS baseUrl, name,"
-            + " updated_at AS configuredAt "
+            + " reasoning_effort AS reasoningEffort, updated_at AS configuredAt "
             + "FROM user_api_key WHERE user_id = #{userId} ORDER BY provider")
     List<ApiKeyRow> listConfigured(@Param("userId") String userId);
 }

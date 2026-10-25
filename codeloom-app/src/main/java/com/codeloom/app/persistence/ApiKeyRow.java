@@ -1,6 +1,7 @@
 package com.codeloom.app.persistence;
 
 import com.codeloom.domain.llm.ProviderId;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.port.ApiKeyStore;
 
 import java.time.Instant;
@@ -15,10 +16,12 @@ import java.time.Instant;
  *
  * <p>不带 {@code sealed_key}：这里没有理由碰密文。
  */
-record ApiKeyRow(String provider, String baseUrl, String name, Instant configuredAt) {
+record ApiKeyRow(String provider, String baseUrl, String name, String reasoningEffort,
+                 Instant configuredAt) {
 
     ApiKeyStore.ConfiguredProvider toDomain() {
         return new ApiKeyStore.ConfiguredProvider(
-                ProviderId.of(provider), baseUrl, name, configuredAt);
+                ProviderId.of(provider), baseUrl, name,
+                ReasoningEffort.parse(reasoningEffort).orElse(null), configuredAt);
     }
 }

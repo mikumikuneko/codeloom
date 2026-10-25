@@ -5,6 +5,7 @@ import com.codeloom.agent.llm.LlmClientProvider;
 import com.codeloom.agent.llm.openai.OpenAiCompatibleClient;
 import com.codeloom.domain.llm.ProviderId;
 import com.codeloom.domain.llm.Providers;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.port.ApiKeyStore;
 import com.codeloom.domain.session.ModelConfig;
 import com.codeloom.domain.user.UserId;
@@ -104,7 +105,11 @@ public class ApiKeyLlmClientProvider implements LlmClientProvider {
                 return new OpenAiCompatibleClient(PROTOCOL_MAPPER, baseUrl,
                         () -> keyFor(ownerId, provider).orElseThrow(() ->
                                 new IllegalStateException(ApiKeyError.goneMidTurn(
-                                        Providers.displayNameOf(provider)))));
+                                        Providers.displayNameOf(provider)))),
+                        // 每轮现取：供应商页改完思考强度，下一轮就生效，不用重建客户端
+                        () -> keys.reasoningEffort(ownerId, provider)
+                                .map(ReasoningEffort::wireValue)
+                                .orElse(null));
             });
         }
     }

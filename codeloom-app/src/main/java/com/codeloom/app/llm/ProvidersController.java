@@ -33,14 +33,17 @@ public class ProvidersController {
     }
 
     /**
-     * @param id          标识；配置密钥、建会话、换模型时回传的就是它
-     * @param displayName 界面上显示的名字
-     * @param officialUrl 官网，只用来给人点过去
+     * @param id                      标识；配置密钥、建会话、换模型时回传的就是它
+     * @param displayName             界面上显示的名字
+     * @param officialUrl             官网，只用来给人点过去
+     * @param supportsReasoningEffort 这一家是否支持思考强度；界面据此决定要不要显示下拉
      */
-    public record PresetView(String id, String displayName, String officialUrl) {
+    public record PresetView(String id, String displayName, String officialUrl,
+                             boolean supportsReasoningEffort) {
 
         static PresetView of(Providers.Preset preset) {
-            return new PresetView(preset.id().value(), preset.displayName(), preset.officialUrl());
+            return new PresetView(preset.id().value(), preset.displayName(), preset.officialUrl(),
+                    preset.supportsReasoningEffort());
         }
     }
 }

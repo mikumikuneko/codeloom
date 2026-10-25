@@ -5,6 +5,13 @@ import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { errorText, apiKeys, type ConfiguredKey, type ProviderPreset } from '@/lib/api'
 import { useAsync } from '@/lib/useAsync'
 
@@ -35,9 +42,7 @@ export function ProvidersPage() {
     <div className="space-y-6">
       <div className="space-y-1">
         <h1 className="text-xl font-medium">供应商</h1>
-        <p className="text-sm text-muted-foreground">
-          选一家，填上你自己的 API Key 就能用。密钥只存密文，读不回原文。
-        </p>
+        <p className="text-sm text-muted-foreground">密钥只存密文，读不回原文。</p>
       </div>
 
       {error && (
@@ -186,6 +191,10 @@ function ProviderForm({
 }) {
   const [name, setName] = useState(configured?.name ?? preset.displayName)
   const [apiKey, setApiKey] = useState('')
+  // 没配过时按服务商的默认显示为高；保存后会把这个值明确写下去
+  const [reasoningEffort, setReasoningEffort] = useState(
+    configured?.reasoningEffort ?? 'high',
+  )
   const [revealed, setRevealed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -196,7 +205,7 @@ function ProviderForm({
     setError(null)
     setBusy(true)
     try {
-      await apiKeys.configure(preset.id, name, apiKey)
+      await apiKeys.configure(preset.id, name, apiKey, reasoningEffort)
       // 提交之后立刻清空密钥输入框：它已在服务端存成密文，留在能被截屏、被浏览器
       // 自动填充的框里没有好处。
       setApiKey('')
@@ -243,13 +252,16 @@ function ProviderForm({
           <Input
             id="provider-key"
             type={revealed ? 'text' : 'password'}
-            value={apiKey}
+            // 眼睛只负责“看见现有密钥的掩码”，掩码不是可编辑的值：打开时只读，
+            // 关掉之后输入框回到空串，正常输入就是换一把新 key
+            value={apiKey !== '' ? apiKey : revealed ? (configured?.hint ?? '') : ''}
+            readOnly={apiKey === '' && revealed && configured !== null}
             onChange={(e) => setApiKey(e.target.value)}
             autoComplete="off"
-            // 已有 key 时留一排点：它是"它在这儿"的意思，不是那把 key（读不回来）。
             placeholder={configured?.hint ? '••••••••••••' : 'sk-…'}
             className="pr-9 font-mono"
-            required
+            // 已经配过时可以不填：留着旧密钥，只改名字或思考强度
+            required={configured === null}
           />
           <button
             type="button"
@@ -260,12 +272,24 @@ function ProviderForm({
             {revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
           </button>
         </div>
-        <p className="text-xs text-loom-faint">
-          {configured?.hint
-            ? `现在是 ${configured.hint} · 存的是密文、读不回原文，重填即替换`
-            : '只需要填这一项，请求地址已经预设好了'}
-        </p>
       </div>
+
+      {preset.supportsReasoningEffort && (
+        <div className="space-y-1.5">
+          <Label htmlFor="provider-reasoning">思考强度</Label>
+          <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
+            <SelectTrigger id="provider-reasoning">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">关闭思考</SelectItem>
+              <SelectItem value="low">低</SelectItem>
+              <SelectItem value="high">高</SelectItem>
+              <SelectItem value="max">最高</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       {error && (
         <p role="alert" className="text-sm text-destructive">
@@ -294,7 +318,7 @@ function ProviderForm({
       {confirming && configured && (
         <ConfirmDialog
           title={`删除 ${configured.name} 的密钥`}
-          description="删掉之后，用这一家的会话就发不出请求了。密钥只存密文，要重新填一遍才能恢复。"
+          description="删掉之后，用这一家的会话就发不出请求了；要重新填一遍才能恢复。"
           confirmLabel="删除"
           onClose={() => setConfirming(false)}
           onConfirm={remove}

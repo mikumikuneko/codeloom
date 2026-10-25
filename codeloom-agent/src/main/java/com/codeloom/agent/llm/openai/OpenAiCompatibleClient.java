@@ -49,6 +49,11 @@ public final class OpenAiCompatibleClient implements LlmClient {
     private final ObjectMapper mapper;
     private final String endpoint;
     private final Supplier<String> apiKeySupplier;
+    /**
+     * 思考强度；每次请求现取，null 表示不发送这个字段。由调用方决定哪一家支持它，
+     * 客户端只负责把它写进请求体。
+     */
+    private final Supplier<String> reasoningEffortSupplier;
     private final Duration requestTimeout;
     /** 工具 schema 文本 → 解析后的树。schema 是常量，见 {@link #parsedSchema}。 */
     private final Map<String, JsonNode> schemaCache = new ConcurrentHashMap<>();
@@ -60,7 +65,19 @@ public final class OpenAiCompatibleClient implements LlmClient {
      * @param apiKeySupplier 每次请求现取密钥
      */
     public OpenAiCompatibleClient(ObjectMapper mapper, String baseUrl, Supplier<String> apiKeySupplier) {
-        this(mapper, baseUrl, apiKeySupplier, Duration.ofMinutes(5));
+        this(mapper, baseUrl, apiKeySupplier, () -> null, Duration.ofMinutes(5));
+    }
+
+    /**
+     * @param mapper                  JSON 解析器
+     * @param baseUrl                 OpenAI 兼容端点
+     * @param apiKeySupplier          每次请求现取密钥
+     * @param reasoningEffortSupplier 每次请求现取思考强度；null 表示不发送
+     */
+    public OpenAiCompatibleClient(ObjectMapper mapper, String baseUrl,
+                                  Supplier<String> apiKeySupplier,
+                                  Supplier<String> reasoningEffortSupplier) {
+        this(mapper, baseUrl, apiKeySupplier, reasoningEffortSupplier, Duration.ofMinutes(5));
     }
 
     /**
@@ -71,8 +88,17 @@ public final class OpenAiCompatibleClient implements LlmClient {
      */
     public OpenAiCompatibleClient(ObjectMapper mapper, String baseUrl,
                                   Supplier<String> apiKeySupplier, Duration requestTimeout) {
+        this(mapper, baseUrl, apiKeySupplier, () -> null, requestTimeout);
+    }
+
+    private OpenAiCompatibleClient(ObjectMapper mapper, String baseUrl,
+                                   Supplier<String> apiKeySupplier,
+                                   Supplier<String> reasoningEffortSupplier,
+                                   Duration requestTimeout) {
         this.mapper = Objects.requireNonNull(mapper, "mapper");
         this.apiKeySupplier = Objects.requireNonNull(apiKeySupplier, "apiKeySupplier");
+        this.reasoningEffortSupplier =
+                Objects.requireNonNull(reasoningEffortSupplier, "reasoningEffortSupplier");
         this.requestTimeout = Objects.requireNonNull(requestTimeout, "requestTimeout");
         this.endpoint = stripTrailingSlash(Objects.requireNonNull(baseUrl, "baseUrl")) + "/chat/completions";
         this.http = HttpClient.newBuilder()
@@ -136,6 +162,11 @@ public final class OpenAiCompatibleClient implements LlmClient {
                 .map(message -> wireMessage(message, request.model())).toList());
         if (request.hasTools()) {
             payload.put("tools", request.tools().stream().map(this::wireTool).toList());
+        }
+        String effort = reasoningEffortSupplier.get();
+        if (effort != null && !effort.isBlank()) {
+            // 官方取值 none/low/high/max；none 同时关闭思考。没有配置就不发，用服务商默认。
+            payload.put("reasoning_effort", effort.strip());
         }
         try {
             // writeValueAsBytes 恒定 UTF-8；writeValueAsString().getBytes() 会受默认字符集影响。

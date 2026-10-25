@@ -4,6 +4,7 @@ import com.codeloom.agent.llm.openai.ModelCatalog;
 import com.codeloom.app.llm.ProviderEndpoints;
 import com.codeloom.domain.llm.ProviderId;
 import com.codeloom.domain.llm.Providers;
+import com.codeloom.domain.llm.ReasoningEffort;
 import com.codeloom.domain.port.ApiKeyStore;
 import com.codeloom.domain.user.User;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -79,18 +80,22 @@ public class ApiKeyController {
      * 视为自定义 provider，此时地址必须由调用方给，那是它唯一的来源。
      *
      * @param principal 当前身份
-     * @param request   服务商标识、可选地址、可选显示名与明文密钥
-     * @throws ResponseStatusException 400：密钥为空，或自定义 provider 未给地址
+     * @param request   服务商标识、可选地址、可选显示名、明文密钥与思考强度
+     * @throws ResponseStatusException 400：第一次配置没给密钥、自定义 provider 未给地址，
+     *                                 或这一家不支持思考强度
      */
     @PutMapping
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void configure(Principal principal, @RequestBody ConfigureRequest request) {
         User me = currentUser.require(principal);
-        if (request.apiKey() == null || request.apiKey().isBlank()) {
-            throw new IllegalArgumentException("apiKey 不能为空");
-        }
         ProviderId provider = ProviderId.of(request.provider());
         String baseUrl = blankToNull(request.baseUrl());
+        ReasoningEffort effort = ReasoningEffort.parse(request.reasoningEffort()).orElse(null);
+        if (effort != null && !Providers.find(provider)
+                .map(Providers.Preset::supportsReasoningEffort).orElse(false)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "这一家不支持思考强度：" + provider.value());
+        }
         if (Providers.find(provider).isEmpty() && baseUrl == null) {
             // 认不出来的 id 又没给地址，配了也用不了；那种错要等到发请求才炸，最难查。
             // 所以在这里拒掉，并把认识的那几家列出来。
@@ -99,10 +104,22 @@ public class ApiKeyController {
                             + Providers.all().stream().map(preset -> preset.id().value()).toList()
                             + "；要接别的服务，请连请求地址一起给出");
         }
+
         // 预设的地址以 Providers 为准，这里不抄第二份（传了也不采纳）
-        keys.put(me.id(), provider,
-                Providers.find(provider).isPresent() ? null : baseUrl,
-                blankToNull(request.name()), request.apiKey().strip());
+        String resolvedUrl = Providers.find(provider).isPresent() ? null : baseUrl;
+        boolean configured = keys.listConfigured(me.id()).stream()
+                .anyMatch(existing -> existing.provider().equals(provider));
+        String apiKey = blankToNull(request.apiKey());
+        if (apiKey == null) {
+            // 改一个下拉不该被逼着重填整把 key；已经有密钥时只更新设置
+            if (!configured) {
+                throw new IllegalArgumentException("第一次配置要填 apiKey");
+            }
+            keys.updateSettings(me.id(), provider, resolvedUrl, blankToNull(request.name()), effort);
+            return;
+        }
+        keys.put(me.id(), provider, resolvedUrl, blankToNull(request.name()),
+                apiKey.strip(), effort);
     }
 
     /**
@@ -127,6 +144,9 @@ public class ApiKeyController {
                         keys.find(me.id(), configured.provider())
                                 .map(ApiKeyController::mask)
                                 .orElse(null),
+                        configured.reasoningEffort() == null
+                                ? null
+                                : configured.reasoningEffort().wireValue(),
                         configured.configuredAt()))
                 .toList();
     }
@@ -200,23 +220,27 @@ public class ApiKeyController {
     }
 
     /**
-     * @param provider     服务商标识，也是删除密钥和拉取模型时要回传的值
-     * @param name         显示名；没起过名字时回落到预设名
-     * @param hint         掩码（头 8 尾 4；短 key 整把为 {@code ****}）；读不出来时为 null
-     * @param configuredAt 最后一次更换的时间
+     * @param provider        服务商标识，也是删除密钥和拉取模型时要回传的值
+     * @param name            显示名；没起过名字时回落到预设名
+     * @param hint            掩码（头 8 尾 4；短 key 整把为 {@code ****}）；读不出来时为 null
+     * @param reasoningEffort 思考强度；null = 不发送，由服务商决定
+     * @param configuredAt    最后一次更换的时间
      */
     public record ConfiguredKeyView(String provider, String name, String hint,
-                                    Instant configuredAt) {
+                                    String reasoningEffort, Instant configuredAt) {
     }
 
     /**
      * @param provider 服务商标识
      * @param baseUrl  请求地址。预设服务商不用给，给了也不采纳；认不出来的 id 必须给，
      *                 那是自定义 provider，而地址是它唯一的来源
-     * @param name     显示名，可以留空（界面上用预设名兜底）
-     * @param apiKey   明文密钥；只出现在这个入参里，落库前就会被加密
+     * @param name            显示名，可以留空（界面上用预设名兜底）
+     * @param apiKey          明文密钥；只出现在这个入参里，落库前就会被加密。已配置过时
+     *                        可以留空，只改设置
+     * @param reasoningEffort 思考强度：none/low/high/max；null 或空表示不发送
      */
-    public record ConfigureRequest(String provider, String baseUrl, String name, String apiKey) {
+    public record ConfigureRequest(String provider, String baseUrl, String name, String apiKey,
+                                   String reasoningEffort) {
 
         /**
          * 打印时不带密钥。

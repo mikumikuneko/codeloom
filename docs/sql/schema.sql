@@ -306,6 +306,7 @@ CREATE TABLE IF NOT EXISTS user_api_key (
     -- 认出"哪个是我的 DeepSeek"。两列都可空：不填就用预设名 / id 兜底。
     name          VARCHAR(64)   NULL COMMENT '用户给这一家起的显示名，如「DeepSeek 官方」。NULL = 用预设名或 id 兜底',
     base_url      VARCHAR(512)  NULL COMMENT '这一家的请求地址。预设的那几家为 NULL（地址在 Providers 里）；自定义 provider 的地址住在这儿 —— 那是它唯一的位置',
+    reasoning_effort VARCHAR(16) NULL COMMENT '思考强度 none/low/high/max；NULL = 不发送，由服务商决定默认。只有支持 reasoning_effort 的 provider 才有意义',
     sealed_key    VARCHAR(1024) NOT NULL COMMENT 'base64(IV):base64(密文+认证标签)。**永远不要存明文**',
     created_at    DATETIME(3)   NOT NULL COMMENT '第一次在这个端点上配置的时间',
     updated_at
