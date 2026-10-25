@@ -617,7 +617,7 @@ function NameDialog({
           ? '名字写全，包括扩展名'
           : task.directory
             ? `会建在${parent}下面`
-            : `会建在${parent}下面，内容先是空的`
+            : `会建在${parent}下面`
       }
       initial={task.initial}
       submitLabel={title}

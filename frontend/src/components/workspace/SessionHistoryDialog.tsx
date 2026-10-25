@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -92,10 +91,11 @@ export function SessionHistoryDialog({
           <History className="size-4" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      {/* 没有说明文案：标题和列表已经说清这是什么；显式去掉 aria-describedby，
+          免得 Radix 在控制台报缺少描述 */}
+      <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>选一条，右边就显示它的过程。</DialogDescription>
         </DialogHeader>
 
         <ul className="space-y-0.5">
