@@ -1,7 +1,26 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
+import { createLogger, defineConfig } from 'vite'
+
+/**
+ * 浏览器刷新时，聊天室那条 WebSocket 被直接掐断，而 Vite 的 ws 代理正往里写一帧，
+ * 于是报 ECONNABORTED 并把整段堆栈打出来。原因就是刷新本身，不是服务端故障；
+ * 可它每次刷新都出现，会把终端滚满。
+ *
+ * 这类断线会从两条路各报一次（ws proxy error 与 ws proxy socket error），都滤掉；
+ * 其他代理错误照常打。
+ */
+const logger = createLogger()
+const logError = logger.error
+logger.error = (message, options) => {
+  const wsProxy = message.includes('ws proxy error') || message.includes('ws proxy socket error')
+  const aborted = message.includes('ECONNABORTED') || message.includes('ECONNRESET')
+  if (wsProxy && aborted) {
+    return
+  }
+  logError(message, options)
+}
 
 /**
  * 后端地址。默认 8080（见 application.yml 里的 `server.port`）。
@@ -12,6 +31,7 @@ import { defineConfig } from 'vite'
 const backend = process.env.CODELOOM_BACKEND ?? 'http://localhost:8080'
 
 export default defineConfig({
+  customLogger: logger,
   plugins: [react(), tailwindcss()],
 
   resolve: {
