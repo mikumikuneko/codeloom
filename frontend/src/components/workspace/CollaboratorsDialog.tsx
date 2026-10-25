@@ -101,17 +101,19 @@ function Members({ project }: { project: Project }) {
 /**
  * 邀请链接：同时只有一张，所以这里永远只有一行。
  *
- * 刚生成的那张默认摊开（完整链接 + 复制），因为下一步就是复制它。但它和别的位置
- * 不是两种东西：摊开只是同一行的另一种状态。另起一个框会让同一个邀请被画两遍，
- * 撤销那一行时框不知道，链接还挂在屏幕上。
+ * 默认摊开（完整链接 + 复制）：打开这个弹窗多半就是为了抄那条链接，再让人点一次
+ * 「显示链接」是多出来的一步。收起只是这一次弹窗里的临时动作，关掉再开又回到摊开。
+ *
+ * 摊开和收起不是两种东西：摊开只是同一行的另一种状态。另起一个框会让同一个邀请被
+ * 画两遍，撤销那一行时框不知道，链接还挂在屏幕上。
  *
  * 作废的行不显示：服务端只交出现在还能用的（见 `InvitationService.pending`）。
  */
 function Invites({ project }: { project: Project }) {
   const { data: pending, reload } = useAsync(() => invitations.pending(project.id), [project.id])
-  /** 刚生成那张的 token，用于摊开显示。存 token 而不是记录：刷新后记录是新对象，
-   *  而这个判断只问"是不是同一张凭据" */
-  const [openedToken, setOpenedToken] = useState<string | null>(null)
+  /** 被主动收起的 token。存 token 而不是记录：刷新后记录是新对象，而这个判断只问
+   *  "是不是同一张凭据"。默认 null = 摊开 */
+  const [collapsedToken, setCollapsedToken] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -121,8 +123,9 @@ function Invites({ project }: { project: Project }) {
     setBusy(true)
     setError(null)
     try {
-      const created = await invitations.issue(project.id)
-      setOpenedToken(created.token)
+      await invitations.issue(project.id)
+      // 新生成的一张总是摊开：下一步就是复制它
+      setCollapsedToken(null)
       reload()
     } catch (e) {
       setError(errorText(e))
@@ -156,8 +159,10 @@ function Invites({ project }: { project: Project }) {
           key={invitation.token}
           projectId={project.id}
           invitation={invitation}
-          opened={invitation.token === openedToken}
-          onToggle={() => setOpenedToken(invitation.token === openedToken ? null : invitation.token)}
+          opened={invitation.token !== collapsedToken}
+          onToggle={() =>
+            setCollapsedToken(collapsedToken === invitation.token ? null : invitation.token)
+          }
           onChanged={reload}
         />
       ))}
