@@ -297,11 +297,14 @@ const FrozenBlock = memo(function FrozenBlock({ text }: { text: string }) {
  *
  * 落地后的渲染用同一个 Markdown（整段一次解析），两处共用排版规则，"长出来时"和
  * "长完之后"不会视觉上跳一下。
+ *
+ * 流式正文不压暗：颜色只用一档，边写边按最终样式显示。曾经用淡一档表示"这段还没
+ * 说完"，但读的人看到的是"怎么还是灰的、没渲染"，等落地才变白反而像刚加载出来。
  */
 export function StreamingMarkdown({ text }: { text: string }) {
   const { blocks, tail } = splitStreamingBlocks(text)
   return (
-    <div className="space-y-3 text-sm leading-6 text-muted-foreground [overflow-wrap:anywhere]">
+    <div className="space-y-3 text-sm leading-6 [overflow-wrap:anywhere]">
       {blocks.map((block, index) => (
         // 只用下标当 key：块只会往后追加，同一个下标永远是同一块。
         <FrozenBlock key={index} text={block} />
