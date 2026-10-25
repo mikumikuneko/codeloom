@@ -1,9 +1,19 @@
-import { LogOut, MessageSquarePlus, PanelRightClose, PanelRightOpen, Settings } from 'lucide-react'
+import {
+  LogOut,
+  MessageSquarePlus,
+  MoreHorizontal,
+  PanelRightClose,
+  PanelRightOpen,
+  Settings,
+} from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { SignOutConfirm } from '@/components/SignOutButton'
+import { Avatar } from '@/components/workspace/Avatar'
 import { ChatPanel } from '@/components/workspace/ChatPanel'
+import { ContextMenu, type MenuAction } from '@/components/workspace/ContextMenu'
 import { CodeView } from '@/components/workspace/CodeView'
 import { ProjectDiffView } from '@/components/workspace/ProjectDiffView'
 import { Composer } from '@/components/workspace/Composer'
@@ -58,8 +68,9 @@ interface Notice {
 export function WorkspacePage() {
   const { projectId = '' } = useParams()
   const me = useAuth((s) => s.user)
-  const logout = useAuth((s) => s.logout)
   const navigate = useNavigate()
+  const [accountMenu, setAccountMenu] = useState<{ x: number; y: number } | null>(null)
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false)
 
   const project = useAsync(() => projects.one(projectId), [projectId])
   const all = useAsync(() => sessionsApi.forProject(projectId), [projectId])
@@ -474,11 +485,6 @@ export function WorkspacePage() {
     }
   }, [])
 
-  async function signOut() {
-    await logout()
-    navigate('/login', { replace: true })
-  }
-
   /**
    * 磁盘变过之后，把看着磁盘的两样一起重来：左边那棵树，和冲突清单。
    *
@@ -782,22 +788,59 @@ export function WorkspacePage() {
           )}
 
           <CollaboratorsDialog project={data} onOpen={() => project.reload(true)} />
-          <Button variant="ghost" size="icon-sm" asChild className="text-muted-foreground">
-            <Link to="/settings" title="设置">
-              <Settings className="size-4" />
-            </Link>
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="登出"
-            className="text-muted-foreground"
-            onClick={() => void signOut()}
-          >
-            <LogOut className="size-4" />
-          </Button>
+
+          <div className="ml-1 flex items-center gap-1.5 border-l border-border/50 pl-2">
+            <Avatar
+              name={me?.displayName ?? '我'}
+              slot={mySlot}
+              className="size-6 text-[10px]"
+            />
+            <span className="max-w-28 truncate text-sm text-muted-foreground">
+              {me?.displayName}
+            </span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              title="账户菜单"
+              aria-label="账户菜单"
+              className="text-muted-foreground"
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect()
+                setAccountMenu({ x: rect.left, y: rect.bottom + 4 })
+              }}
+            >
+              <MoreHorizontal className="size-4" />
+            </Button>
+          </div>
         </div>
       </header>
+
+      {accountMenu !== null && (
+        <ContextMenu
+          x={accountMenu.x}
+          y={accountMenu.y}
+          label="账户"
+          onClose={() => setAccountMenu(null)}
+          actions={
+            [
+              {
+                label: '供应商配置',
+                icon: <Settings className="size-3.5" />,
+                onSelect: () => navigate('/settings'),
+              },
+              {
+                label: '退出登录',
+                divided: true,
+                icon: <LogOut className="size-3.5" />,
+                onSelect: () => setConfirmingSignOut(true),
+              },
+            ] satisfies MenuAction[]
+          }
+        />
+      )}
+      {confirmingSignOut && (
+        <SignOutConfirm onClose={() => setConfirmingSignOut(false)} />
+      )}
 
       {/* 三栏这一行。左右两栏宽度是拖出来的（见 usePaneWidths），走 inline style；
           中间靠 flex-1 吃掉剩下的 */}
@@ -1175,7 +1218,7 @@ export function WorkspacePage() {
       {confirmingMerge && mySession !== null && (
         <ConfirmDialog
           title="合进主干"
-          description="把你在这条会话里的改动合进主干，对方也能看到。有冲突的话会停下来，在中间裁决。"
+          description="对方也能看到。有冲突的话会停下来，在中间裁决。"
           confirmLabel="合并"
           confirmVariant="default"
           onConfirm={async () => {

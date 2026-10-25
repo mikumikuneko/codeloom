@@ -3,7 +3,8 @@ import { Fragment, useEffect } from 'react'
 import { ComposerBox } from '@/components/workspace/ComposerBox'
 import { LivePane } from '@/components/workspace/LivePane'
 import type { ChatMessage, Project } from '@/lib/api'
-import { personDot, slotsOf, type PersonSlot } from '@/lib/people'
+import { Avatar } from '@/components/workspace/Avatar'
+import { slotsOf, type PersonSlot } from '@/lib/people'
 import { formatChatTime } from '@/lib/time'
 import { useProjectChat } from '@/lib/useProjectChat'
 
@@ -135,27 +136,4 @@ function Line({
       </div>
     </div>
   )
-}
-
-/**
- * 头像：用户名的第一个字，底色是这个人的颜色。
- *
- * 字用深色：两块底色（青 `#5fa8b8`、紫 `#b87ba6`）都是中亮度，白字对比度只有
- * 2 出头，小字号下是糊的。
- */
-function Avatar({ name, slot }: { name: string; slot: PersonSlot }) {
-  return (
-    <span
-      aria-hidden="true"
-      title={name}
-      className={`grid size-8 shrink-0 select-none place-items-center rounded-full text-xs font-medium text-[#14181c] ${personDot[slot]}`}
-    >
-      {firstChar(name)}
-    </span>
-  )
-}
-
-/** 第一个字。不用 `charAt(0)`：那是第一个 UTF-16 码元，emoji 会被切成半个。 */
-function firstChar(name: string): string {
-  return [...name.trim()][0] ?? '?'
 }

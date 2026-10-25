@@ -1,7 +1,7 @@
-import { FolderTree, LogOut, Server } from 'lucide-react'
-import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { FolderTree, Server } from 'lucide-react'
+import { Link, NavLink, Outlet } from 'react-router-dom'
 
-import { Button } from '@/components/ui/button'
+import { SignOutButton } from '@/components/SignOutButton'
 import { useAuth } from '@/stores/auth'
 
 /**
@@ -16,13 +16,6 @@ import { useAuth } from '@/stores/auth'
  */
 export function AppShell() {
   const user = useAuth((s) => s.user)
-  const logout = useAuth((s) => s.logout)
-  const navigate = useNavigate()
-
-  async function signOut() {
-    await logout()
-    navigate('/login', { replace: true })
-  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background text-foreground">
@@ -44,15 +37,7 @@ export function AppShell() {
           <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
             {user?.displayName}
           </span>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            title="登出"
-            className="text-muted-foreground"
-            onClick={() => void signOut()}
-          >
-            <LogOut className="size-4" />
-          </Button>
+          <SignOutButton />
         </div>
       </aside>
 
