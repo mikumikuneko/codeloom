@@ -199,7 +199,7 @@ function Side({
         </Button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
-        <CodeLines content={content} path={path} copyable={false} />
+        <CodeLines content={content} path={path} />
       </div>
     </div>
   )

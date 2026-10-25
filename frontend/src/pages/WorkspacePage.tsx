@@ -1,4 +1,4 @@
-import { LogOut, MessageSquarePlus, Settings } from 'lucide-react'
+import { LogOut, MessageSquarePlus, PanelRightClose, PanelRightOpen, Settings } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
@@ -9,6 +9,7 @@ import { ProjectDiffView } from '@/components/workspace/ProjectDiffView'
 import { Composer } from '@/components/workspace/Composer'
 import { CollaboratorsDialog } from '@/components/workspace/CollaboratorsDialog'
 import { ConflictResolver } from '@/components/workspace/ConflictResolver'
+import { EditorTabs, type EditorTab } from '@/components/workspace/EditorTabs'
 import { FileTree } from '@/components/workspace/FileTree'
 import { RewindPicker } from '@/components/workspace/RewindPicker'
 import { SessionHistoryDialog } from '@/components/workspace/SessionHistoryDialog'
@@ -67,32 +68,222 @@ export function WorkspacePage() {
   const row = useRef<HTMLDivElement>(null)
   const panes = usePaneWidths(row)
 
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
   /**
-   * 中栏现在看的是哪一轮对哪个文件的改动（null = 看文件本身）。
-   *
-   * 它和 `selectedFile` 是同一栏的两种用法，两者一起变：见 {@link openDiff} 和旁边
-   * 那棵树的 `onSelect`。分开管会出现"文件换了、改动还是上一个文件的"。
+   * 中栏打开过的标签。文件按路径去重，改动按「提交 + 路径」去重；同一份东西再从
+   * 树或会话流里点一次只会切过去，不会叠出第二个标签。
    */
-  const [diffView, setDiffView] = useState<{ commitSha: string; path: string } | null>(null)
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([])
+  const [activeTabKey, setActiveTabKey] = useState<string | null>(null)
+  const [closingTabs, setClosingTabs] = useState<
+    { kind: 'one' | 'others' | 'all'; key?: string } | null
+  >(null)
+  const activeTab = editorTabs.find((tab) => tab.key === activeTabKey) ?? null
+  /** 左树高亮跟着当前标签走；改动标签也落在它对应的文件路径上 */
+  const selectedFile = activeTab?.path ?? null
+
+  function openEditorTab(tab: EditorTab) {
+    setEditorTabs((current) =>
+      current.some((one) => one.key === tab.key) ? current : [...current, tab],
+    )
+    setActiveTabKey(tab.key)
+  }
+
+  function openFile(path: string | null) {
+    if (path === null) {
+      if (activeTab?.kind === 'file') {
+        closeTab(activeTab.key)
+      }
+      return
+    }
+    openEditorTab({ key: `file:${path}`, kind: 'file', path })
+  }
 
   /**
    * 点"这一轮改了哪些文件"里的某一条：中栏切成那一段改动。
    *
-   * 再点一次同一条就关掉，和点树里同一个节点是同一种手感。关掉后落在这个文件本身
-   * （`selectedFile` 一直跟着它），而不是落回上一次打开的那个。
+   * 再点一次同一条就关掉，和点树里同一个节点是同一种手感。关掉后落到相邻标签。
    */
   function openDiff(commitSha: string, path: string) {
-    setDiffView((current) =>
-      current !== null && current.commitSha === commitSha && current.path === path
-        ? null
-        : { commitSha, path },
+    const key = `diff:${commitSha}:${path}`
+    if (activeTabKey === key) {
+      closeTab(key)
+      return
+    }
+    openEditorTab({ key, kind: 'diff', path, commitSha })
+  }
+
+  function closeTab(key: string) {
+    const index = editorTabs.findIndex((tab) => tab.key === key)
+    if (index === -1) {
+      return
+    }
+    const next = editorTabs.filter((tab) => tab.key !== key)
+    setEditorTabs(next)
+    if (activeTabKey === key) {
+      setActiveTabKey(next[Math.min(index, next.length - 1)]?.key ?? null)
+    }
+  }
+
+  function closeOtherTabs(key: string) {
+    const target = editorTabs.find((tab) => tab.key === key)
+    if (target === undefined) {
+      return
+    }
+    setEditorTabs([target])
+    setActiveTabKey(target.key)
+  }
+
+  function closeAllTabs() {
+    setEditorTabs([])
+    setActiveTabKey(null)
+  }
+
+  /** 关之前先看有没有未保存的修改；有就交给确认框，不静默丢。 */
+  function requestCloseTab(key: string) {
+    if (editorTabs.find((tab) => tab.key === key)?.dirty === true) {
+      setClosingTabs({ kind: 'one', key })
+      return
+    }
+    closeTab(key)
+  }
+
+  function requestCloseOtherTabs(key: string) {
+    if (editorTabs.some((tab) => tab.key !== key && tab.dirty === true)) {
+      setClosingTabs({ kind: 'others', key })
+      return
+    }
+    closeOtherTabs(key)
+  }
+
+  function requestCloseAllTabs() {
+    if (editorTabs.some((tab) => tab.dirty === true)) {
+      setClosingTabs({ kind: 'all' })
+      return
+    }
+    closeAllTabs()
+  }
+
+  function confirmClosingTabs() {
+    if (closingTabs === null) {
+      return
+    }
+    if (closingTabs.kind === 'one' && closingTabs.key !== undefined) {
+      closeTab(closingTabs.key)
+    } else if (closingTabs.kind === 'others' && closingTabs.key !== undefined) {
+      closeOtherTabs(closingTabs.key)
+    } else {
+      closeAllTabs()
+    }
+    setClosingTabs(null)
+  }
+
+  /** 拖拽排序：只换顺序，不换当前标签 */
+  function reorderTabs(fromKey: string, toKey: string, position: 'before' | 'after') {
+    if (fromKey === toKey) {
+      return
+    }
+    setEditorTabs((current) => {
+      const fromIndex = current.findIndex((tab) => tab.key === fromKey)
+      if (fromIndex === -1) {
+        return current
+      }
+      const next = current.filter((tab) => tab.key !== fromKey)
+      const targetIndex = next.findIndex((tab) => tab.key === toKey)
+      if (targetIndex === -1) {
+        return current
+      }
+      const at = position === 'after' ? targetIndex + 1 : targetIndex
+      next.splice(at, 0, current[fromIndex])
+      return next
+    })
+  }
+
+  /**
+   * 改名或移动之后，把打开着的标签指到新路径。
+   *
+   * 不跟着搬的话标签停在旧路径上，下次重读或保存会对着一个不存在的文件报错。
+   * 目录被移动时，它下面的文件标签一起搬。
+   */
+  function moveOpenTabs(from: string, to: string) {
+    const moved = (path: string) =>
+      path === from ? to : path.startsWith(`${from}/`) ? `${to}${path.slice(from.length)}` : path
+    setEditorTabs((current) => {
+      const seen = new Set<string>()
+      const next: EditorTab[] = []
+      for (const tab of current) {
+        const path = tab.kind === 'file' ? moved(tab.path) : tab.path
+        const key = tab.kind === 'file' ? `file:${path}` : tab.key
+        // 新路径本来就有标签时留一个，不然同一份文件会出现两个相同身份的标签
+        if (seen.has(key)) {
+          continue
+        }
+        seen.add(key)
+        next.push(path === tab.path && key === tab.key ? tab : { ...tab, path, key })
+      }
+      return next
+    })
+    setActiveTabKey((key) => {
+      if (key === null || !key.startsWith('file:')) {
+        return key
+      }
+      return `file:${moved(key.slice('file:'.length))}`
+    })
+  }
+
+  function markTabDirty(key: string, dirty: boolean) {
+    setEditorTabs((current) =>
+      current.map((tab) => (tab.key === key ? { ...tab, dirty } : tab)),
     )
-    setSelectedFile(path)
   }
   const [tab, setTab] = useState<'session' | 'chat' | 'watch'>('session')
+  /**
+   * 右栏是否收起。收起不是卸载：聊天室和会话流要一直挂着（见右栏那段注释），
+   * 所以这里只把整栏藏进一条窄边，展开后状态还在。
+   */
+  const [rightCollapsed, setRightCollapsed] = useState(false)
   const [mySession, setMySession] = useState<string | null>(null)
   const [theirSession, setTheirSession] = useState<string | null>(null)
+
+  /**
+   * Ctrl/Cmd+A 只在代码区生效。
+   *
+   * 浏览器默认会选整页，连左右两栏和行号一起选上。这里在捕获阶段拦掉：目标不在
+   * data-select-all-scope 里就不让浏览器做默认全选；在代码区里则只选 content 标记
+   * 的那一段（代码列，不含行号）。输入框、文本域和可编辑区域保持系统默认，否则
+   * 连自己刚打的字都选不了。
+   */
+  useEffect(() => {
+    const onSelectAll = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'a') {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof Element &&
+        target.closest('input, textarea, [contenteditable], .cm-editor') !== null
+      ) {
+        return
+      }
+      const scope = target instanceof Element
+        ? target.closest<HTMLElement>('[data-select-all-scope]')
+        : null
+      event.preventDefault()
+      if (scope === null) {
+        return
+      }
+      const content = scope.querySelector<HTMLElement>('[data-select-all-content]') ?? scope
+      const range = document.createRange()
+      range.selectNodeContents(content)
+      const selection = window.getSelection()
+      if (selection === null) {
+        return
+      }
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+    document.addEventListener('keydown', onSelectAll, true)
+    return () => document.removeEventListener('keydown', onSelectAll, true)
+  }, [])
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busy, setBusy] = useState(false)
   /** 「合并」的确认框。同步不需要：它只动自己的树；合并会动到共享的主干 */
@@ -165,8 +356,9 @@ export function WorkspacePage() {
   const workspaceReloadTimer = useRef<number | undefined>(undefined)
 
   /**
-   * 我的工作区在磁盘上变了，让看着磁盘的东西都重看一遍。四个来源都走这里：agent 动
-   * 文件（会话流推上来）、同步、合并、裁决冲突落盘。
+   * 我的工作区在磁盘上变了，让看着磁盘的东西都重看一遍。agent 动文件（会话流推
+   * 上来）、同步、合并、裁决落盘、回滚，最后都汇到这里；其中几处经
+   * {@link rereadWorkspace} 连冲突清单一起重读。
    *
    * 用 trailing（等安静下来才拉）而不是 leading：leading 的话一串连续改动只有第一
    * 次会拉，刚写出来的新文件要等下次有人动才出现。
@@ -193,6 +385,13 @@ export function WorkspacePage() {
    * 文件。各存各的话，切到主干后点一个文件，中栏给你看自己那份，而两边路径长得一样。
    */
   const [trunk, setTrunk] = useState(false)
+
+  // 换项目或换树时把标签清掉：同一个路径在另一棵树上是另一份内容，留着会把旧标签
+  // 指到新树上。
+  useEffect(() => {
+    setEditorTabs([])
+    setActiveTabKey(null)
+  }, [projectId, trunk])
 
   /** 回滚界面开着吗。状态在这一层，因为它要换掉 footer */
   const [rewinding, setRewinding] = useState(false)
@@ -317,7 +516,7 @@ export function WorkspacePage() {
           setConflictTrigger(trigger)
           setNotice({ tone: 'plain', text: `${conflicting.length} 个文件冲突了，在中间裁决` })
           // 撞在冲突上时磁盘也变了：git merge --no-commit 把冲突标记写进了文件。
-          // 中栏不跟着变是因为它只认"人选定了一份内容"；树是"这里有什么"，必须跟上。
+          // 树必须跟上；中栏此时由裁决页顶替，文件标签也吃同一个重读信号。
           rereadWorkspace()
         } else if (typeof behind === 'number') {
           setNotice({ tone: 'plain', text: `你落后主干 ${behind} 个提交，先同步一下` })
@@ -615,12 +814,9 @@ export function WorkspacePage() {
             projectId={projectId}
             rootName={data.rootName}
             selected={selectedFile}
-            // 点树里的文件 = 看它现在的样子，所以顺手关掉中栏那一段改动，
-            // 避免"选的是这个文件、看的是上一个文件的改动"。
-            onSelect={(next) => {
-              setSelectedFile(next)
-              setDiffView(null)
-            }}
+            // 点树里的文件 = 打开（或切到）它的标签
+            onSelect={openFile}
+            onMoved={moveOpenTabs}
             trunk={trunk}
             onTrunk={setTrunk}
 
@@ -672,36 +868,79 @@ export function WorkspacePage() {
                 }))
               }
             />
-          ) : diffView !== null ? (
-            // 看"这一轮对它做了什么"，和下面那支（看它现在是什么样）是同一栏的两种用法。
-            <ProjectDiffView
-              projectId={projectId}
-              commitSha={diffView.commitSha}
-              path={diffView.path}
-              onClose={() => setDiffView(null)}
-            />
           ) : (
-            <CodeView
-              projectId={projectId}
-              path={selectedFile}
-              // 和左边那棵树吃同一个版本号：磁盘变了只有一个来源，分开接迟早会忘，
-              // 而漏掉的那边只是停在旧内容上，不报错。
-              reload={workspaceReload}
-              // 和左边那棵树看同一棵，见 trunk 那段。
-              trunk={trunk}
-            />
+            <>
+              {editorTabs.length > 0 && (
+                <EditorTabs
+                  tabs={editorTabs}
+                  activeKey={activeTabKey}
+                  onActivate={setActiveTabKey}
+                  onClose={requestCloseTab}
+                  onCloseOthers={requestCloseOtherTabs}
+                  onCloseAll={requestCloseAllTabs}
+                  onReorder={reorderTabs}
+                />
+              )}
+              {editorTabs.length === 0 ? (
+                <CodeView
+                  projectId={projectId}
+                  path={null}
+                  reload={workspaceReload}
+                  trunk={trunk}
+                />
+              ) : (
+                editorTabs.map((tab) => (
+                  // 每个标签的内容都挂着，只是不活动的 display:none：切走再切回来，
+                  // 草稿、光标、Markdown 的编辑状态都还在。卸载会把这些一起丢掉。
+                  <div
+                    key={tab.key}
+                    className={
+                      tab.key === activeTabKey
+                        ? 'flex min-h-0 flex-1 flex-col'
+                        : 'hidden'
+                    }
+                  >
+                    {tab.kind === 'diff' ? (
+                      // 看"这一轮对它做了什么"，和文件标签共用同一排标签。
+                      <ProjectDiffView
+                        projectId={projectId}
+                        commitSha={tab.commitSha ?? ''}
+                        path={tab.path}
+                      />
+                    ) : (
+                      <CodeView
+                        projectId={projectId}
+                        path={tab.path}
+                        // 和左边那棵树吃同一个版本号：磁盘变了只有一个来源，分开接迟早会忘，
+                        // 而漏掉的那边只是停在旧内容上，不报错。
+                        reload={workspaceReload}
+                        // 和左边那棵树看同一棵，见 trunk 那段。
+                        trunk={trunk}
+                        onDirtyChange={(dirty) => markTabDirty(tab.key, dirty)}
+                      />
+                    )}
+                  </div>
+                ))
+              )}
+            </>
           )}
         </main>
 
-        <Splitter
-          label="拖动调整会话栏宽度"
-          // 往右拖 = 会话栏变窄，所以把符号翻过来：面板那边只知道"往右是正数"。
-          onResize={(delta) => panes.resize('right', -delta)}
-          onReset={panes.reset}
-        />
+        {!rightCollapsed && (
+          <Splitter
+            label="拖动调整会话栏宽度"
+            // 往右拖 = 会话栏变窄，所以把符号翻过来：面板那边只知道"往右是正数"。
+            onResize={(delta) => panes.resize('right', -delta)}
+            onReset={panes.reset}
+          />
+        )}
 
-        {/* 右：会话 */}
-        <section className="flex shrink-0 flex-col" style={{ width: panes.right }}>
+        {/* 右：会话。收起用 display:none 而不是卸载：聊天室和会话流在里面保持
+            连接，展开后历史、草稿和未读都还在 */}
+        <section
+          className={`shrink-0 flex-col ${rightCollapsed ? 'hidden' : 'flex'}`}
+          style={{ width: panes.right }}
+        >
           <header className="pane-head gap-1 px-3">
             <TabButton active={tab === 'session'} onClick={() => openTab('session')}>
               {/* 名字前那个点是"谁"：全站那两个人的颜色，每处都在回答同一个问题 */}
@@ -738,35 +977,35 @@ export function WorkspacePage() {
               )}
             </TabButton>
 
-            {tab === 'session' && mine.length > 0 && (
-              // 「开新对话」在历史左边，两个一起贴右：ml-auto 落在包裹层上，
-              // 不然两个按钮各带一个 ml-auto，flex 会把空档摊到它们之间。
-              <div className="ml-auto flex items-center gap-1">
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  title="新建会话"
-                  aria-label="新建会话"
-                  className="text-muted-foreground"
-                  onClick={startNewConversation}
-                >
-                  <MessageSquarePlus className="size-4" />
-                </Button>
-                <SessionHistoryDialog
-                  title="我的会话"
-                  sessions={mine}
-                  slots={slots}
-                  selectedId={mySession}
-                  onSelect={choose}
-                  onDiscard={discardSession}
-                  // 列表每 5 秒自刷，但打开时还是补一次：标题是服务端按第一句话算的，
-                  // 刚说完的那句不该等下一 tick。
-                  onOpen={() => all.reload()}
-                />
-              </div>
-            )}
-            {tab === 'watch' && theirs.length > 0 && (
-              <div className="ml-auto flex items-center gap-1">
+            {/* 动作组统一贴右：ml-auto 落在包裹层上，不然几个按钮各带一个
+                ml-auto，flex 会把空档摊到它们之间。收起键始终在最后 */}
+            <div className="ml-auto flex items-center gap-1">
+              {tab === 'session' && mine.length > 0 && (
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    title="新建会话"
+                    aria-label="新建会话"
+                    className="text-muted-foreground"
+                    onClick={startNewConversation}
+                  >
+                    <MessageSquarePlus className="size-4" />
+                  </Button>
+                  <SessionHistoryDialog
+                    title="我的会话"
+                    sessions={mine}
+                    slots={slots}
+                    selectedId={mySession}
+                    onSelect={choose}
+                    onDiscard={discardSession}
+                    // 列表每 5 秒自刷，但打开时还是补一次：标题是服务端按第一句话算的，
+                    // 刚说完的那句不该等下一 tick。
+                    onOpen={() => all.reload()}
+                  />
+                </>
+              )}
+              {tab === 'watch' && theirs.length > 0 && (
                 <SessionHistoryDialog
                   title={`${teammate?.displayName} 的会话`}
                   sessions={theirs}
@@ -776,8 +1015,18 @@ export function WorkspacePage() {
                   // 同上：观战那一栏读的是同一份列表。
                   onOpen={() => all.reload()}
                 />
-              </div>
-            )}
+              )}
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="收起边栏"
+                aria-label="收起边栏"
+                className="text-muted-foreground"
+                onClick={() => setRightCollapsed(true)}
+              >
+                <PanelRightClose className="size-4" />
+              </Button>
+            </div>
           </header>
 
           <div className="min-h-0 flex-1">
@@ -807,7 +1056,7 @@ export function WorkspacePage() {
                 canApprove
                 // 流里提到的文件点一下在中栏打开：这一栏和中栏本来就是"它说它动了
                 // 哪个文件"和"那个文件里写了什么"。
-                onOpenFile={setSelectedFile}
+                onOpenFile={openFile}
                 // "这一轮改了哪些文件"那一行点的是另一个东西：它这一轮改了什么。
                 // 同一文件在两处的两种读法，见 ChangesRow。
                 onOpenDiff={openDiff}
@@ -867,7 +1116,7 @@ export function WorkspacePage() {
                 nameOf={nameOf}
                 emptyHint={watchHint}
                 // 不要把别人的文件路径接到"我的树"上：那个文件在对方的树里，还没
-                // 合并过来；直接 setSelectedFile 会让中栏读我的工作区，然后报"不是
+                // 合并过来；直接当文件标签打开会让中栏读我的工作区，然后报"不是
                 // 一个普通文件"，一句和真实原因无关的话。想看这一轮改动走 onOpenDiff。
                 onOpenFile={(path) =>
                   setNotice({
@@ -881,7 +1130,44 @@ export function WorkspacePage() {
             )}
           </div>
         </section>
+
+        {/* 收起后的窄边：只留一个展开入口，会话栏本身继续挂着 */}
+        {rightCollapsed && (
+          <aside className="flex w-9 shrink-0 flex-col border-l border-border/50">
+            <header className="pane-head justify-center px-0">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                title="展开边栏"
+                aria-label="展开边栏"
+                className="text-muted-foreground"
+                onClick={() => setRightCollapsed(false)}
+              >
+                <PanelRightOpen className="size-4" />
+              </Button>
+            </header>
+          </aside>
+        )}
       </div>
+
+      {closingTabs !== null && (
+        <ConfirmDialog
+          title="有未保存的修改"
+          description={
+            closingTabs.kind === 'one'
+              ? '关闭这个标签会丢掉还没保存的修改。'
+              : closingTabs.kind === 'others'
+                ? '关闭其他标签页会丢掉其中还没保存的修改。'
+                : '关闭所有标签页会丢掉还没保存的修改。'
+          }
+          confirmLabel="仍然关闭"
+          onConfirm={async () => {
+            confirmClosingTabs()
+            return null
+          }}
+          onClose={() => setClosingTabs(null)}
+        />
+      )}
 
       {/* 合并会动到共享主干（对方也看得到，而且会接着验证），先问一句。同步不动
           别人的东西，所以不拦，给它一个 title 说明就够。见

@@ -140,36 +140,19 @@ function CodeShell({ node: _node, children, ...props }: Md<'pre'>) {
  * 样式写细是因为默认 markdown 样式给文章用（大标题、宽松段距），而这里是一段工作
  * 对话：行距、字号、间距都得跟着周围走，否则带列表的回答会显得比它本身重。
  *
- * 三档排版：`chat` 收着，`document` 分级，另有思考过程那档次要内容。
+ * 只有一档排版：工作对话。标题压到和正文一个量级，不按 h1/h2 分级——一段回答里
+ * 的标题是分节，不是文章目录。
  */
-export function Markdown({
-  children,
-  variant = 'chat',
-}: {
-  children: string
-  /**
-   * - `chat`（默认）：工作对话。标题压到和正文一个量级。
-   * - `document`：一份文档。标题真的分级；中栏打开 .md 时用这个。
-   */
-  variant?: 'chat' | 'document'
-}) {
-  const document = variant === 'document'
-
+export function Markdown({ children }: { children: string }) {
   /**
    * 标题。
-   *
-   * 文档档的上间距给在 padding 上而不是 margin 上：外层用 `space-y-*`，那也是
-   * `margin-top`，同属性上的 utility 会把它压过去；在这里写 `mt-6` 是一个不生效
-   * 的类，而"看起来写了、实际没有"最容易骗过下一个人。
    *
    * @param own 元素自己带来的 class。react-markdown 偶尔会塞一个（脚注标题的
    *            `sr-only` 是插件里硬编码的），必须与我们的类拼在一起，见下面对 h1
    *            的说明
    */
-  const heading = (level: 1 | 2 | 3 | 4 | 5 | 6, own?: string) => {
-    const ours = document
-      ? `first:pt-0 ${['pt-6 text-xl', 'pt-5 text-lg', 'pt-4 text-base', 'pt-3', 'pt-3', 'pt-3'][level - 1]} font-medium`
-      : 'font-medium'
+  const heading = (_level: 1 | 2 | 3 | 4 | 5 | 6, own?: string) => {
+    const ours = 'font-medium'
     return own ? `${ours} ${own}` : ours
   }
 
@@ -181,11 +164,7 @@ export function Markdown({
     //
     // 正文块间距 16：段、表、代码块之间要一眼看出是两块；12 时小标题会和下一段
     // 黏在一起。
-    <div
-      className={`${
-        document ? 'space-y-4 text-sm leading-7' : 'space-y-3 text-sm leading-6'
-      } [overflow-wrap:anywhere]`}
-    >
+    <div className="space-y-3 text-sm leading-6 [overflow-wrap:anywhere]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkCjkStrong]}
         components={{

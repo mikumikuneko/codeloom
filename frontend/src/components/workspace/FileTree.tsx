@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
 import { NameInputDialog } from '@/components/NameInputDialog'
 import { ContextMenu, type MenuAction } from '@/components/workspace/ContextMenu'
+import { baseName, parentOf } from '@/lib/path'
 import { errorText, files, projectArchiveUrl, type FileEntry } from '@/lib/api'
 import { isCodeFile } from '@/lib/highlight'
 
@@ -37,6 +38,7 @@ export function FileTree({
   rootName,
   selected,
   onSelect,
+  onMoved,
   trunk = false,
   onTrunk,
 
@@ -51,6 +53,8 @@ export function FileTree({
   rootName: string
   /** 传 null 表示选中的文件没了（刚被删），中栏要清空 */
   onSelect: (path: string | null) => void
+  /** 改名或移动之后，把打开着的标签指到新路径 */
+  onMoved: (from: string, to: string) => void
   selected: string | null
   /**
    * 外面推来的"重新拉一遍"。每变一次拉一次，数本身没有含义。
@@ -66,7 +70,7 @@ export function FileTree({
   const [ownReload, setOwnReload] = useState(0)
   const [menu, setMenu] = useState<MenuTarget | null>(null)
   const [naming, setNaming] = useState<NameTask | null>(null)
-  const [removing, setRemoving] = useState<string | null>(null)
+  const [removing, setRemoving] = useState<MenuTarget | null>(null)
 
   // 两个来源相加而不是取较大者：两者各自只增不减，而每一层只在乎"这个数变了没有"；
   // 取较大者会把其中一个来源的连续两次刷新压成一次。
@@ -125,10 +129,10 @@ export function FileTree({
               parent,
               directory: target.directory,
               from: target.path,
-              initial: nameOf(target.path),
+              initial: baseName(target.path),
             }),
         },
-        { label: '删除', danger: true, onSelect: () => setRemoving(target.path) },
+        { label: '删除', danger: true, onSelect: () => setRemoving(target) },
       )
     }
     return actions
@@ -235,12 +239,17 @@ export function FileTree({
                 if (to !== naming.from) {
                   await files.move(projectId, naming.from, to)
                   forget(naming.from)
+                  onMoved(naming.from, to)
                 }
               } else {
                 await files.create(projectId, to, naming.directory)
               }
               setNaming(null)
               refresh()
+              // 新建文件直接打开：建完还要去树里再找一次，等于把"新建"拆成两步
+              if (naming.from === null && !naming.directory) {
+                onSelect(to)
+              }
               return null
             } catch (e) {
               return errorText(e)
@@ -254,19 +263,26 @@ export function FileTree({
         // 提交的（手工刚建的、agent 这一轮刚写的）删掉就真没了。目录刻意不说
         // "里面有 N 个文件"：那要额外问后端，也会让人把注意力放在"几个"上。
         <ConfirmDialog
-          title={`删除「${nameOf(removing)}」`}
-          description="目录的话，里面的东西会一起没。还没提交过的部分找不回来。"
+          title={`删除「${baseName(removing.path)}」`}
+          description={
+            removing.directory
+              ? '目录里的东西会一起没。还没提交过的部分找不回来。'
+              : '删掉就找不回来了；提交过的还能靠回滚找回。'
+          }
           confirmLabel="删除"
           onClose={() => setRemoving(null)}
           onConfirm={async () => {
             try {
-              await files.remove(projectId, removing)
+              await files.remove(projectId, removing.path)
               // 选中和展开的东西可能就在被删的那一棵里；不清的话中栏会停在
               // 一个已不存在的文件上，显示"读不到这个文件"。
-              if (selected === removing || selected?.startsWith(`${removing}/`)) {
+              if (
+                selected === removing.path ||
+                selected?.startsWith(`${removing.path}/`)
+              ) {
                 onSelect(null)
               }
-              forget(removing)
+              forget(removing.path)
               setRemoving(null)
               refresh()
               return null
@@ -357,15 +373,6 @@ interface NameTask {
   /** 改的是哪一个；新建时为 null */
   from: string | null
   initial: string
-}
-
-function parentOf(path: string): string {
-  const cut = path.lastIndexOf('/')
-  return cut < 0 ? '' : path.slice(0, cut)
-}
-
-function nameOf(path: string): string {
-  return path.slice(path.lastIndexOf('/') + 1)
 }
 
 /** 一层的加载状态：加载中、出错、空是三件不同的事，不能都渲染成空白。 */

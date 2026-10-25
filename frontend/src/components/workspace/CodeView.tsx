@@ -1,30 +1,41 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 
 import { CodeLines } from '@/components/workspace/CodeLines'
-import { Markdown } from '@/components/workspace/Markdown'
-import { errorText, files, type FileContent } from '@/lib/api'
+import { ApiError, errorText, files, type FileContent } from '@/lib/api'
 import { languageOfPath } from '@/lib/highlight'
 
+/** 编辑器连同语言包单独成块：登录页和项目列表不该为它先下一兆。 */
+const CodeEditor = lazy(() =>
+  import('@/components/workspace/CodeEditor').then((module) => ({ default: module.CodeEditor })),
+)
+
 /**
- * 工作区中栏：看一个文件。
+ * 工作区中栏：看和改一个文件。
  *
- * 行号单独一列且不可选中：复制代码的人不希望把行号一起复制走，代码列才是内容。
+ * 代码和文本用 {@link CodeEditor}——行号、语法色、光标、选择和撤销栈都是真的，
+ * 点进去就能改，不再有“编辑模式”那一层。写入自动发生：输入停下、失焦或
+ * Ctrl/Cmd+S 时保存。
  *
- * 只渲染前若干行：后端虽已限 1 MiB，仍可能有两万行，全塞进 DOM 会让滚动卡住；
- * 截到够用的行数并如实说"只显示了前 N 行"，比假死的页面诚实。
+ * 代码和文本共用同一个编辑器。Markdown 也用它，只是多一层所见即所得：同一张
+ * 视图里，光标所在行露源码，其余行按渲染结果铺开，和 Typora 一致——这里不再单独
+ * 维护一份渲染视图。
  *
- * Markdown 默认看渲染，另给一个看源码的口子：README 是写给人读的文档，打开它
- * 就是想读它，所以 .md 默认走 {@link Markdown} 的文档档。表格排歪、嵌套列表没
- * 渲染对时需要看原始文本，所以顶栏有开关；切过去源码照样有颜色。
+ * 保存前把打开时读到的 `baseContent` 交给后端比较：这期间 agent、格式化器或
+ * 另一个人改了文件，就拒绝覆盖并要求重新读取，和 Claude Code 的写前保护一致。
+ *
+ * 截断文件和二进制文件只读：前者拿到的不是全文，写回去会删掉后半段。
  */
 export function CodeView({
   projectId,
   path,
   reload = 0,
   trunk = false,
+  onDirtyChange,
 }: {
   projectId: string
   path: string | null
+  /** 这一份有没有未保存的修改；关闭标签前用它决定要不要确认 */
+  onDirtyChange?: (dirty: boolean) => void
   /**
    * 磁盘上这一份可能变了的信号，由调用方递增。
    *
@@ -39,8 +50,20 @@ export function CodeView({
   const [file, setFile] = useState<FileContent | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  /** Markdown 看源码而不是渲染。默认看渲染：打开 README 时人想读它。 */
-  const [source, setSource] = useState(false)
+  /** 编辑器里的当前文本；加载完成后就是磁盘那份的副本。 */
+  const [draft, setDraft] = useState<string | null>(null)
+  /**
+   * 打开时读到的那一份内容。
+   *
+   * 不能在保存时拿 `file.content`：编辑期间 agent 可能改了磁盘，file 会被重拉成
+   * 新内容；再拿新内容当 base 就等于替它签了字，会把别人的改动静默盖掉。
+   */
+  const [baseContent, setBaseContent] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saveConflict, setSaveConflict] = useState(false)
+  /** 重新读取的触发器：保存被 409 拒了之后用 */
+  const [reloadSeed, setReloadSeed] = useState(0)
   /**
    * 上一次真的拉回来的是哪个路径。
    *
@@ -50,9 +73,32 @@ export function CodeView({
    */
   const loadedPath = useRef<string | null>(null)
 
-  // 换文件就回到默认档：在这一份上选了源码，不代表下一份也想看源码。
+  /** 编辑器内容和打开时那份不一样，就是“有未保存修改”。 */
+  const dirty = draft !== null && baseContent !== null && draft !== baseContent
+
+  // 回调由父层按标签绑定，每次渲染都是新函数；用 ref 让上报只跟 dirty 变，不跟着
+  // 父组件重渲染打转。
+  const notifyDirty = useRef(onDirtyChange)
+  notifyDirty.current = onDirtyChange
   useEffect(() => {
-    setSource(false)
+    notifyDirty.current?.(dirty)
+  }, [dirty])
+
+  // 输入停下 700ms 就保存；没有显式的“保存”按钮。保存失败后先停住，避免每 700ms
+  // 反复撞同一个 409；再改一个字会清掉错误继续试。
+  useEffect(() => {
+    if (draft === null || !dirty || saving || saveError !== null) {
+      return
+    }
+    const timer = window.setTimeout(() => void save(), 700)
+    return () => window.clearTimeout(timer)
+  }, [draft, dirty, saving, saveError])
+
+  // 换文件就把上一份的草稿清掉，别带过去。
+  useEffect(() => {
+    setDraft(null)
+    setBaseContent(null)
+    setSaveError(null)
   }, [path])
 
   useEffect(() => {
@@ -85,7 +131,56 @@ export function CodeView({
     return () => {
       cancelled = true
     }
-  }, [projectId, path, trunk, reload])
+  }, [projectId, path, trunk, reload, reloadSeed])
+
+  // 文件读回来、或磁盘内容重拉回来时，若没有本地改动就跟着更新编辑器和基线；
+  // 有本地改动时保留草稿，保存时由 baseContent 校验兜底。
+  useEffect(() => {
+    if (file === null) {
+      return
+    }
+    if (draft === null || draft === baseContent) {
+      setDraft(file.content)
+      setBaseContent(file.content)
+    }
+  }, [file, draft, baseContent])
+
+  /** 保存被拒后重新读磁盘；本地草稿会丢，按钮上写清楚。 */
+  function rereadFromDisk() {
+    setDraft(null)
+    setBaseContent(null)
+    setSaveError(null)
+    setSaveConflict(false)
+    setReloadSeed((n) => n + 1)
+  }
+
+  /**
+   * 自动保存。没有改动就什么都不写；保存请求在飞时再触发也直接跳过，下一次输入会
+   * 重新排一次。
+   */
+  async function save() {
+    if (file === null || draft === null || baseContent === null || !dirty || saving) {
+      return
+    }
+    setSaving(true)
+    setSaveError(null)
+    setSaveConflict(false)
+    try {
+      await files.save(projectId, file.path, baseContent, draft)
+      setFile({ ...file, content: draft })
+      setBaseContent(draft)
+    } catch (e) {
+      const conflict = e instanceof ApiError && e.status === 409
+      setSaveConflict(conflict)
+      setSaveError(
+        conflict
+          ? `${errorText(e)}\n文件在这期间被改过；先重新读取，再基于新内容修改。`
+          : errorText(e, '保存失败'),
+      )
+    } finally {
+      setSaving(false)
+    }
+  }
 
   if (!path) {
     return <Hint>从左边选一个文件。</Hint>
@@ -99,70 +194,61 @@ export function CodeView({
   if (!file) return null
 
   if (file.binary) {
-    return <Hint>这是个二进制文件（{formatSize(file.sizeBytes)}），看不了。</Hint>
+    return <Hint>这是个二进制文件，看不了。</Hint>
   }
 
-  // 空文件也要说它是空的：一片黑与"读取失败""还没加载完"长得一模一样。
-  if (file.content === '') {
-    return <Hint>空文件。</Hint>
-  }
-
-  /**
-   * 是不是一份 Markdown。
-   *
-   * 判据用 {@link languageOfPath}，与源码视图挑语言高亮是同一个函数；另写一个
-   * "路径是不是 md"会迟早对不上（如加了 `.markdown` 而那边忘了）。
-   */
   const isMarkdown = languageOfPath(file.path) === 'markdown'
+  const shown = draft ?? file.content
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* 和中栏左右两栏的标签同高：三条顶边落在一条线上，见 index.css 的 .pane-head */}
-      <header className="pane-head gap-3 px-4">
-        {/* 路径用等宽：它是机器说的话，而且一个真实路径比"代码"这个标签有用 */}
-        <span className="truncate font-mono text-xs text-muted-foreground">{file.path}</span>
-        {/* 两件事用间距分开，不用中点连成一句：那会把两个独立事实
-            （多大 / 是否截断）裹成一句读不下去的话 */}
-        <span className="ml-auto flex shrink-0 items-center gap-3 text-xs text-loom-faint">
-          {/* 只对 Markdown 出现。文案写"点了会变成什么"，不是"现在是什么"：
-              写着当前状态的按钮看起来像标签，不像能按的东西 */}
-          {isMarkdown && (
-            <button
-              type="button"
-              onClick={() => setSource((was) => !was)}
-              className="rounded px-1.5 py-0.5 transition-colors hover:bg-selected hover:text-foreground"
-            >
-              {source ? '看渲染' : '看源码'}
-            </button>
-          )}
-          <span>{formatSize(file.sizeBytes)}</span>
-          {file.truncated && <span>已截断</span>}
-        </span>
-      </header>
+      {/* 文件级动作只在确实有动作时占一行；代码和 Markdown 默认都没有这一行 */}
+      {file.truncated && (
+        <div className="flex h-8 shrink-0 items-center justify-end gap-3 px-4 text-xs text-loom-faint">
+          <span>已截断</span>
+        </div>
+      )}
 
-      {/* relative 不是装饰，它决定滚动区裁不裁得住绝对定位内容：裁剪按包含块算，
-          不按 DOM 祖先。少了它，内容里任何绝对定位又没被父级关住的元素（如
-          remark-gfm 给脚注标题加的 sr-only）会把包含块落到 `<html>`，逃出滚动区，
-          整页被撑开几千像素，而每一层容器的高度看上去都正常 */}
-      <div className="relative min-h-0 flex-1 overflow-auto px-4 pt-2 pb-8">
-        {isMarkdown && !source ? (
-          // 左对齐、铺满，不居中也不夹宽度：同一栏切到源码是顶格代码，渲染却缩在
-          // 中间的话，两档切换像换了个页面；中栏拖窄时居中还会挤出更难看的边距。
-          <Markdown variant="document">{file.content}</Markdown>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {saveError !== null && (
+          <div className="mx-4 mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+            <p className="whitespace-pre-wrap">{saveError}</p>
+            {saveConflict && (
+              <button
+                type="button"
+                onClick={rereadFromDisk}
+                className="mt-1 underline underline-offset-2 hover:text-foreground"
+              >
+                重新读取（丢弃本地修改）
+              </button>
+            )}
+          </div>
+        )}
+
+        {file.truncated ? (
+          <div className="min-h-0 flex-1 overflow-auto px-4 pt-2 pb-8">
+            <CodeLines key={file.path} content={file.content} path={file.path} />
+          </div>
         ) : (
-          /* key 挂路径：换文件就重建。高亮结果跟着某一份内容走，沿用上一份 token
-             会把上一个文件的行上到这一个文件。 */
-          <CodeLines key={file.path} content={file.content} path={file.path} />
+          <Suspense fallback={<Hint>正在打开编辑器…</Hint>}>
+            <CodeEditor
+              key={file.path}
+              value={shown}
+              path={file.path}
+              livePreview={isMarkdown}
+              onChange={(next) => {
+                setDraft(next)
+                setSaveError(null)
+                setSaveConflict(false)
+              }}
+              onBlur={() => void save()}
+              onSave={() => void save()}
+            />
+          </Suspense>
         )}
       </div>
     </div>
   )
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 export function Hint({ children, tone }: { children: React.ReactNode; tone?: 'error' }) {

@@ -8,6 +8,12 @@ export interface MenuAction {
   danger?: boolean
   /** 在它上面画一条分组线 */
   divided?: boolean
+  /** 右端那串快捷键提示；只是提示，键盘处理在调用方 */
+  hint?: string
+  /** 左侧的小图标；没有就不留空槽 */
+  icon?: React.ReactNode
+  /** 当前不可用。仍然显示，让人知道有这一项，只是现在不能按 */
+  disabled?: boolean
 }
 
 /** 卡片和窗口边之间留的空隙。 */
@@ -69,8 +75,11 @@ export function ContextMenu({
     }
     if (event.key === 'Enter') {
       event.preventDefault()
-      actions[active]?.onSelect()
-      onClose()
+      const action = actions[active]
+      if (action !== undefined && action.disabled !== true) {
+        action.onSelect()
+        onClose()
+      }
     }
   }
 
@@ -92,8 +101,8 @@ export function ContextMenu({
         aria-label={label}
         style={{ left: at.left, top: at.top }}
         onKeyDown={onKeyDown}
-        // 描边和阴影二选一：原来两样都有，现在 1px 中性描边改成阴影的第一层，
-        // 看上去一样但只有一个机制在画；两套一起上迟早走岔。
+        // 描边和阴影只有 shadow-float 一处画（1px 描边是它的第一层）：两套同时上
+        // 迟早走岔。
         className="fixed z-50 min-w-44 rounded-lg bg-popover py-1 shadow-float outline-none"
       >
         {actions.map((action, index) => (
@@ -102,17 +111,29 @@ export function ContextMenu({
             <button
               type="button"
               role="menuitem"
+              disabled={action.disabled}
               onClick={() => {
+                if (action.disabled === true) {
+                  return
+                }
                 action.onSelect()
                 onClose()
               }}
               // 鼠标划过和键盘走同一套 active 状态，免得"鼠标在这、方向键选的是另一个"。
               onPointerEnter={() => setActive(index)}
-              className={`flex w-full items-center px-3 py-1.5 text-left text-sm transition-colors ${
+              className={`flex w-full items-center px-3 py-1.5 text-left text-sm transition-colors disabled:opacity-45 ${
                 index === active ? 'bg-selected' : ''
               } ${action.danger && index === active ? 'text-destructive' : ''}`}
             >
-              {action.label}
+              {action.icon && (
+                <span className="mr-2 flex size-4 shrink-0 items-center justify-center">
+                  {action.icon}
+                </span>
+              )}
+              <span>{action.label}</span>
+              {action.hint && (
+                <span className="ml-auto pl-6 text-xs text-loom-faint">{action.hint}</span>
+              )}
             </button>
           </div>
         ))}

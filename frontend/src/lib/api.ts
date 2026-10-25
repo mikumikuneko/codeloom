@@ -401,6 +401,18 @@ export const files = {
         (trunk ? '&trunk=true' : ''),
     ),
 
+  /**
+   * 把人改过的完整内容写回自己的树。
+   *
+   * `baseContent` 是打开时读到的那一份；磁盘上已经不是它了就说明这期间被别处改过，
+   * 后端回 409，前端要提示重新读取，而不是覆盖。
+   */
+  save: (projectId: string, path: string, baseContent: string, content: string) =>
+    api<void>(`/api/projects/${projectId}/files/content`, {
+      method: 'PUT',
+      body: JSON.stringify({ path, baseContent, content }),
+    }),
+
   // 这三个接口没有 owner 参数，不是遗漏：界面只读写自己那棵树。写接口尤其不能有，
   // 否则等于"我可以删掉对方工作区里的文件"。见
   // `docs/decisions/architecture/2026-09-29-write-endpoints-carry-no-owner.md`。
