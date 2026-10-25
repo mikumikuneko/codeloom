@@ -18,4 +18,14 @@ public final class PageLimits {
 
     private PageLimits() {
     }
+
+    /** 把调用方给的 {@code limit} 夹到 1 到 {@link #MAX} 之间。 */
+    public static int limit(int requested) {
+        return Math.clamp(requested, 1, MAX);
+    }
+
+    /** 负的 offset 当 0：仓储不校验，传下去会变成非法 SQL 偏移。 */
+    public static int offset(int requested) {
+        return Math.max(0, requested);
+    }
 }

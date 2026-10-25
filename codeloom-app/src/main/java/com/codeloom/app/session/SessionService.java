@@ -112,7 +112,7 @@ public class SessionService {
         ModelConfig effective = model.withSystemPrompt(SystemPrompt.TEXT);
 
         Session session = Session.create(SessionId.generate(), project.id(), owner.id(), effective);
-        // 树在拿到项目访问权时已建好（建项目 / 接受邀请），这里只取用，不新建
+        // 树在拿到项目访问权时已建好（建项目 / 接受邀请）；ensure 幂等，缺失时补建
         Workspace workspace = provisioner.ensure(owner.id(), project);
 
         sessions.save(session);

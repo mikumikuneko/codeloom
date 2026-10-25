@@ -10,7 +10,7 @@ import java.util.regex.Pattern;
  * <p>密钥按 provider 存（见 {@link com.codeloom.domain.port.ApiKeyStore}），会话也记
  * provider；地址是这一家的属性，住在 {@link Providers} 表里，因此同一个服务只有一种地址。
  *
- * <p>只校验形状，不要求必须在预设表里：自定义 provider 迟早要来，id 可由界面生成；
+ * <p>只校验形状，不要求必须在预设表里：id 由调用方生成，预设表只负责预设地址；
  * "认不认识这一家"由取地址那一步回答（见 {@link Providers#find}），取不到就没有地址可用。
  *
  * @param value 形如 {@code deepseek} 的小写短标识；见

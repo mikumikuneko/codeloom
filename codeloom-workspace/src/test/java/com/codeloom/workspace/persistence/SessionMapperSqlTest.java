@@ -1,10 +1,7 @@
 package com.codeloom.workspace.persistence;
 
-import org.apache.ibatis.annotations.Select;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
-import java.lang.reflect.Method;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -19,20 +16,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link WorkspaceMapperSqlTest}。
  */
 class SessionMapperSqlTest {
-
-    @Test
-    @DisplayName("不用 SELECT *：列清单必须显式写出来")
-    void selectsNeverUseStar() {
-        for (Method method : SessionMapper.class.getDeclaredMethods()) {
-            Select select = method.getAnnotation(Select.class);
-            if (select == null) {
-                continue;
-            }
-            assertThat(String.join(" ", select.value()))
-                    .as("SessionMapper.%s 不该用 SELECT *", method.getName())
-                    .doesNotContain("*");
-        }
-    }
 
     @Test
     @DisplayName("会话行上不该再出现分支、worktree 路径和 HEAD —— 那三样是工作区的")

@@ -28,16 +28,4 @@ public record FileChange(String path, int added, int deleted, boolean binary, bo
             throw new IllegalArgumentException("增删行数不能为负，收到 " + added + "/" + deleted);
         }
     }
-
-    /**
-     * 改动已有的文件（不是新建）。绝大多数调用点要的是这个。
-     *
-     * @param path    路径
-     * @param added   新增行数
-     * @param deleted 删除行数
-     * @param binary  是否为二进制文件
-     */
-    public FileChange(String path, int added, int deleted, boolean binary) {
-        this(path, added, deleted, binary, false);
-    }
 }

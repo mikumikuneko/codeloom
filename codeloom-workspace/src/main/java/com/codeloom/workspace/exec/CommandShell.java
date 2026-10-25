@@ -155,7 +155,8 @@ public final class CommandShell {
      *
      * <p>不走 {@code bash -c "COMMAND"}：Windows 上 JVM 到 MSYS 的参数往返会吃掉引号、
      * 反斜杠和多字节字符（实测 {@code printf '%s\n' "x y"} 输出成了 {@code x}），
-     * 对任意文本都不成立。落成脚本文件后，命令行上只剩一个纯 ASCII 路径。
+     * 对任意文本都不成立。落成脚本文件后，命令行上只剩一个独立的路径参数，不经过 shell
+     * 的字符串解析（路径本身是什么字符都行）。
      * Linux/macOS 也走同一条路径，不为平台多一个分支。理由见
      * {@code docs/decisions/architecture/2026-09-24-commands-are-whole-lines-through-bash.md}。
      *

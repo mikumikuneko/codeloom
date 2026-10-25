@@ -6,6 +6,7 @@ import com.codeloom.domain.port.ExecutionLease;
 import com.codeloom.domain.port.LeaseToken;
 import com.codeloom.domain.port.MergeResult;
 import com.codeloom.domain.port.Workspace;
+import com.codeloom.app.workspace.WorkspaceLookup;
 import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.session.Session;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
@@ -108,8 +109,6 @@ public class SessionSyncService {
      * 不是库里的那一行。
      */
     private Workspace workspaceOf(Session session) {
-        return workspaces.find(session.workspaceId()).orElseThrow(() -> new IllegalStateException(
-                "会话 " + session.id() + " 的工作区目录不在磁盘上。"
-                        + "它本该在建会话时就建好 —— 现在找不到，只可能是被手工删掉了。"));
+        return WorkspaceLookup.requireOnDisk(workspaces, session.workspaceId());
     }
 }

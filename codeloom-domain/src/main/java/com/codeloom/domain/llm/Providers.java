@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
  *
  * <p>界面只让用户填 key，请求地址从这里取。地址只有这一处是这张表最重要的性质：会话和
  * 密钥都记 {@link ProviderId}，所以改地址不会让任何密钥失联。它只是便利、不是限制：
- * 自定义 provider 以后走同一条链路，只是"地址从哪儿来"多一个分支。
+ * 自定义 provider 走同一条链路，区别只在"地址从哪儿来"多一个分支。
  *
  * <p>请求地址不发给前端：{@code GET /api/providers} 只回 id、显示名和官网；
  * {@link Preset#officialUrl()} 是给人点过去的网址，不是发请求的地址。

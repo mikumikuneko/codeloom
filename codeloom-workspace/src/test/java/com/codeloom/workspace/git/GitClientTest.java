@@ -74,6 +74,24 @@ class GitClientTest {
         }
 
         @Test
+        @DisplayName("按提交看一个文件时带整份上下文 —— 改动之前的行也在")
+        void showsTheWholeFileAroundTheChange() throws IOException {
+            String original = String.join("\n", java.util.stream.IntStream.rangeClosed(1, 20)
+                    .mapToObj(i -> "line " + i)
+                    .toList()) + "\n";
+            Files.writeString(repo.resolve("a.txt"), original, StandardCharsets.UTF_8);
+            commit("base");
+            Files.writeString(repo.resolve("a.txt"), original.replace("line 20", "changed"),
+                    StandardCharsets.UTF_8);
+            String sha = commit("改最后一行");
+
+            FileDiff diff = git.diffOfFile(repo, sha, "a.txt", 100_000);
+
+            // 默认的三行上下文只会从第 17 行开始；整份文件必须从第 1 行就在
+            assertThat(diff.text()).contains(" line 1").contains("+changed");
+        }
+
+        @Test
         @DisplayName("【安全约束】本地配置里的外部 diff 程序不会被执行")
         void externalDiffConfiguredInTheRepoIsIgnored() throws IOException {
             Files.writeString(repo.resolve("a.txt"), "第一行\n", StandardCharsets.UTF_8);

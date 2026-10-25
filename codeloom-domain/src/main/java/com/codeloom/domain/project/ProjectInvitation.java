@@ -50,8 +50,8 @@ public record ProjectInvitation(String token,
      *
      * <p>它是一道构造期不变量：长度不对的凭据当场失败，而不是变成一张"看着像链接、却匹配
      * 不上任何一行"的邀请。长度要紧是因为库里是 {@code CHAR(43)}：短了会静默截断，表现为
-     * "部分链接能用、部分不能用"。这个数在 {@code docs/sql/schema.sql} 与测试夹具里各有
-     * 一份，改的时候三处一起改。
+     * "部分链接能用、部分不能用"。这个数在 {@code docs/sql/schema.sql} 与这里各有一份，
+     * 改的时候两处一起改。
      */
     public static final int TOKEN_LENGTH = 43;
 
@@ -106,14 +106,17 @@ public record ProjectInvitation(String token,
             throw new IllegalArgumentException("邀请的有效期必须是正数，收到 " + ttl);
         }
         // 两列都是 DATETIME(3)：生成时就截到毫秒，否则返回的邀请和之后查出来的时间不相等；
-        // 与事件、聊天记录同一条规矩（见 MyBatisEventStore、MyBatisChatMessageRepository）
+        // 与事件、聊天记录同一条规矩（见 MyBatisEventStore、MyBatisChatMessageRepository）。
+        // expiresAt 也要截：ttl 带亚毫秒时（调用方可以传任意 Duration），只截 issuedAt
+        // 会让过期时间落库后短一截，返回的邀请与查回来的不相等
         Instant issuedAt = now.truncatedTo(ChronoUnit.MILLIS);
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
         // 无填充的 URL 安全编码：它要放进 URL 路径里，+、/、= 三个字符
         // 分别会在路径、查询串、以及某些客户端上出问题，一个都不留
         String token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        return new ProjectInvitation(token, projectId, createdBy, issuedAt, issuedAt.plus(ttl),
+        Instant expiresAt = issuedAt.plus(ttl).truncatedTo(ChronoUnit.MILLIS);
+        return new ProjectInvitation(token, projectId, createdBy, issuedAt, expiresAt,
                 null, null, null);
     }
 

@@ -624,7 +624,9 @@ public final class GitClient {
      * 正是这一轮的现状；这里是事后问，两个参数的写法在根提交上明确失败，而不是给出
      * "从起点到现在"的错误正文。
      *
-     * <p>允许截断，所以不走 {@link #runWhole}；{@link FileDiff#truncated()} 如实报告。
+     * <p>带整份文件的上下文，不只用改动附近那三行：中栏点开"这一轮的改动"时，人要
+     * 看的是这个文件完整的样子，而不是几段需要再点开的片段。允许截断，所以不走
+     * {@link #runWhole}；{@link FileDiff#truncated()} 如实报告。
      *
      * @param directory 工作区
      * @param commitSha 提交
@@ -634,16 +636,18 @@ public final class GitClient {
      * @throws GitCommandException 提交取不出，或进程被超时终止
      */
     public FileDiff diffOfFile(Path directory, String commitSha, String gitPath, int maxChars) {
+        // 1,000,000 行足够覆盖正常文件，同时给 git 一个有限的上界；真正的输出上限
+        // 仍由调用方传进来的 maxChars 兜着
         List<String> command = buildCommand(directory, null, List.of(
                 "-c", "core.quotepath=false",
-                "diff", "--no-ext-diff", "--no-textconv",
+                "diff", "--no-ext-diff", "--no-textconv", "--unified=1000000",
                 commitSha + "^", commitSha, "--", gitPath));
         // 不能走 execute：它使用类级大上限，会静默丢掉调用方给的 maxChars，
         // 使 truncated 永远为假
         ProcessOutcome outcome = ProcessRunner.run(command, directory, environment(), timeout,
                 maxChars, outputCharset, CancellationToken.none());
         if (outcome.termination() != CommandTermination.COMPLETED) {
-            throw new GitCommandException(command, outcome,
+            throw new GitCommandTimeoutException(command, outcome,
                     "取这段 diff 超过 " + timeout + " 没有结束，已强制终止进程树");
         }
         if (outcome.exitCode() != 0) {

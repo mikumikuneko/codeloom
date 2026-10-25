@@ -25,9 +25,7 @@ class ProjectTest {
 
     private static Project project(UserId... members) {
         // 房主取第一个：这样"房主在不在成员里"就和调用方给的那串直接对应上。
-        // 一个都不给时先塞一个占位的 —— 要验的是"成员为空会被拒"，
-        // 不是"这个辅助方法下标越界"
-        UserId owner = members.length == 0 ? ALICE : members[0];
+        UserId owner = members[0];
         return new Project(ProjectId.generate(), owner, "codeloom", "D:/repos/demo", Set.of(members));
     }
 

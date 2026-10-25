@@ -15,8 +15,7 @@ import java.util.concurrent.TimeUnit;
  * 把 {@link RedisEventBus} 接到 Redis 的订阅端，并定义派发线程：容器负责连接、重连和频道订阅，
  * 派发线程按顺序把消息交给本实例的订阅者。
  *
- * <p>本实例发出的消息也会经 Redis 回到自己这里，这是刻意保留的：{@link RedisEventBus}
- * 的不重复投递与顺序都依赖所有订阅者走同一条 Redis 交付路径，所以这里不能过滤自己发出的消息。
+ * <p>本实例发出的消息也会经 Redis 回到自己这里；不能过滤，理由见 {@link RedisEventBus}。
  *
  * <p>容器是 Spring Data Redis 的 {@link RedisMessageListenerContainer}。它实现
  * {@link org.springframework.context.SmartLifecycle}，交给 Spring 管理才能在启动时连接、
@@ -60,7 +59,7 @@ public class BusConfig {
         // 代价：一个卡住的订阅者会拖慢其他人的推送。
         container.setTaskExecutor(busDispatchExecutor);
 
-        // 订阅同一个频道，本实例发出的消息也会回到自己这里；不重复投递依赖这一趟。
+        // 订阅同一个频道；本实例发出的消息也会回来一趟（见 RedisEventBus）。
         container.addMessageListener(bus, new ChannelTopic(RedisEventBus.CHANNEL));
 
         // 中断信号也挂在这个容器上，因此“按 Esc 打断”的消息与事件推送共用这一个线程。

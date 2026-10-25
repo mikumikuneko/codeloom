@@ -17,11 +17,6 @@ package com.codeloom.domain.event;
 public record AssistantMessage(String text, String model, String reasoning)
         implements PersistentEvent {
 
-    /** 不关心模型名和思考过程的场合（测试、旧数据）。模型名与思考过程都传 null。 */
-    public AssistantMessage(String text) {
-        this(text, null, null);
-    }
-
     /**
      * 测试与便捷用的重载：思考过程固定为 null。产品路径总是显式传第三个参数 —— "有没有思考"
      * 是那次调用的事实，不能靠重载去猜。

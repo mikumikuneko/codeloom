@@ -15,7 +15,7 @@ GET /api/projects/{projectId}/diff?commitSha=SHA&path=PROJECT_PATH
 → { text, truncated }
 ```
 
-后端跑 `git diff SHA^ SHA -- GIT_PATH`，正文有字符上限，**超了就截断并如实标记**，不报错 —— 一份被截断的 diff 仍然有用，而"打不开"没有任何用。
+后端跑 `git diff SHA^ SHA --unified=1000000 -- GIT_PATH`，带上整份文件上下文；正文有字符上限，**超了就截断并如实标记**，不报错 —— 一份被截断的 diff 仍然有用，而"打不开"没有任何用。中栏打开时把整份铺开并先落到第一处改动；会话流里的内联 diff 仍只露前面一段，避免一屏都是代码。
 
 **指针本来就在事件里**：`WorkspaceChanges.commitSha` 的注释写着「事后要复核"当时到底改了什么"时，从它入手」。所以这件事不需要新记任何东西，缺的只是"拿着它去要一次"。
 

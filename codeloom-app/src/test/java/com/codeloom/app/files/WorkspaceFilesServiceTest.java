@@ -1,7 +1,7 @@
 package com.codeloom.app.files;
 
 import com.codeloom.app.project.ProjectLayout;
-import com.codeloom.agent.tool.WorkspacePathGuard;
+import com.codeloom.domain.workspace.WorkspacePathGuard;
 import com.codeloom.app.support.TestSessions;
 import com.codeloom.domain.port.Workspace;
 import com.codeloom.domain.port.WorkspaceManager;
@@ -231,6 +231,28 @@ class WorkspaceFilesServiceTest {
         assertThatThrownBy(() -> service.read(session.ownerId(), session.projectId(), "src"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("不是一个普通文件");
+    }
+
+    @Test
+    @DisplayName("【编辑】保存写回磁盘，并沿用原文件的 CRLF 行尾")
+    void savesAndPreservesLineEndings() throws IOException {
+        Files.writeString(projectRoot.resolve("a.txt"), "a\r\nb\r\n");
+
+        service.save(session.ownerId(), session.projectId(), "a.txt", "a\nb\n", "a\nB\n");
+
+        assertThat(Files.readString(projectRoot.resolve("a.txt"))).isEqualTo("a\r\nB\r\n");
+    }
+
+    @Test
+    @DisplayName("【编辑·保护】打开之后文件被别处改过 —— 拒绝覆盖，要求重新读取")
+    void saveRefusesWhenTheFileChangedSinceItWasRead() throws IOException {
+        Files.writeString(projectRoot.resolve("a.txt"), "agent 刚写的内容");
+
+        assertThatThrownBy(() -> service.save(session.ownerId(), session.projectId(),
+                "a.txt", "我打开时看到的内容", "我的修改"))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .hasMessageContaining("已被别处修改");
+        assertThat(Files.readString(projectRoot.resolve("a.txt"))).isEqualTo("agent 刚写的内容");
     }
 
     @Test

@@ -6,7 +6,6 @@ import com.codeloom.domain.event.SessionRewound;
 import com.codeloom.domain.event.StoredEvent;
 import com.codeloom.domain.event.ToolCallRequested;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -52,7 +51,8 @@ final class ReadPathTracker implements Derived {
 
     /**
      * 一次调用参数里的文件路径；参数不合法或没有 path 时当作这次没读过。
-     * 键名与工具 schema 共用 {@link ToolNames#PATH_ARG}，避免改名后静默漏记。
+     * 键名必须与三个文件工具 schema 里的 {@code "path"} 保持同步：这里是常量，那边是
+     * 字面量，改一边不会让另一边编译失败。
      *
      * @param argumentsJson 工具调用的原始参数
      * @return 工作区相对路径；取不到就是空

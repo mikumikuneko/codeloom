@@ -2,7 +2,6 @@ package com.codeloom.agent.model;
 
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * 按模型名查能力描述。上下文窗口直接决定压缩阈值，不同模型差异很大，因此用内置表；
@@ -32,9 +31,6 @@ public final class ModelCapabilitiesResolver {
             "deepseek-reasoner", new KnownModel(1_000_000, 384_000),
             "deepseek-v4-pro", new KnownModel(1_000_000, 384_000));
 
-    /** 不支持工具调用的模型名单；当前为空，表示已知模型都支持。 */
-    private static final Set<String> WITHOUT_TOOL_SUPPORT = Set.of();
-
     private ModelCapabilitiesResolver() {
     }
 
@@ -49,7 +45,7 @@ public final class ModelCapabilitiesResolver {
         String key = modelId.toLowerCase(Locale.ROOT);
         KnownModel known = KNOWN.get(key);
         return new ModelCapabilities(
-                !WITHOUT_TOOL_SUPPORT.contains(key),
+                true,
                 known == null ? ModelCapabilities.DEFAULT_CONTEXT_WINDOW : known.contextWindow(),
                 known == null ? ModelCapabilities.DEFAULT_MAX_OUTPUT_TOKENS : known.maxOutputTokens());
     }

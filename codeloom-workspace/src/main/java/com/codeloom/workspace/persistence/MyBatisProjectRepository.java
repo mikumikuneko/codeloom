@@ -108,7 +108,8 @@ public class MyBatisProjectRepository implements ProjectRepository {
     }
 
     /**
-     * 项目行与成员拼成聚合，三个读方法共用。
+     * 项目行与成员拼成聚合，两个读方法共用；{@code lockAndFind} 需要自己加锁查成员，
+     * 不走这里。
      *
      * <p>成员缺失时传空集，让 {@link Project} 的构造器抛出"项目至少要有一名成员"；
      * 那说明写入路径漏了，不在这里静默兜底。

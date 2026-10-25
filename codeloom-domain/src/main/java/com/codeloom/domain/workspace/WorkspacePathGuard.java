@@ -1,4 +1,4 @@
-package com.codeloom.agent.tool;
+package com.codeloom.domain.workspace;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -7,8 +7,10 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 
 /**
- * 路径守卫：把模型给的路径解析到工作区内部，越界一律拒绝。工具参数全部来自模型输出，
- * 没有这道守卫，读文件和改文件工具会变成任意文件读写。
+ * 路径守卫：把调用方给的路径解析到工作区内部，越界一律拒绝。
+ *
+ * <p>调用方包括模型工具参数、文件接口和冲突落盘：这些路径都来自外部内容，没有这道
+ * 守卫，读写就会变成任意文件访问。工具、应用层和工作区实现共用这一份，别各写一遍。
  *
  * <p>拒绝绝对路径；先 {@code normalize()} 再做前缀检查（顺序反了可被 {@code ..} 绕过）；
  * 路径已存在时再用 {@code toRealPath()} 复核，防止符号链接指向外部。

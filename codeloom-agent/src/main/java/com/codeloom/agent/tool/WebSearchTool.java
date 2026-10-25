@@ -231,11 +231,7 @@ public final class WebSearchTool implements Tool {
         if (flat.length() <= limit) {
             return flat;
         }
-        int end = limit;
-        if (Character.isHighSurrogate(flat.charAt(end - 1))) {
-            end--;
-        }
-        return flat.substring(0, end) + "…";
+        return TextLimits.head(flat, limit) + "…";
     }
 
     private record Merged(List<WebAccess.Hit> hits, boolean truncated) {

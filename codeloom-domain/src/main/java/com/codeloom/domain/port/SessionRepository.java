@@ -11,9 +11,8 @@ import java.util.Optional;
 /**
  * 会话仓储。实现在 {@code codeloom-workspace}。
  *
- * <p>会话归 workspace 而不是 agent：会话最关键的字段（worktree 路径、分支名、head
- * commit）本身就是工作区的东西，而会话状态和工作区状态必须在同一次事务里更新（打完
- * commit 要同时记下 head_commit），所以放在同一个模块里。这也保住了「agent 是纯逻辑
+ * <p>会话归 workspace 而不是 agent：会话状态和工作区状态必须在同一次事务里更新
+ * （打完 commit 要同时记下 HEAD），所以放在同一个模块里。这也保住了「agent 是纯逻辑
  * 模块、不碰数据库」，于是它能被纯单测覆盖。
  */
 public interface SessionRepository {

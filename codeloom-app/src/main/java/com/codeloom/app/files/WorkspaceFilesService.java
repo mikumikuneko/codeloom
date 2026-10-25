@@ -1,7 +1,8 @@
 package com.codeloom.app.files;
 
-import com.codeloom.agent.tool.WorkspacePathGuard;
 import com.codeloom.app.project.ProjectLayout;
+import com.codeloom.app.workspace.WorkspaceLookup;
+import com.codeloom.domain.workspace.WorkspacePathGuard;
 import com.codeloom.domain.port.Workspace;
 import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.project.Project;
@@ -21,6 +22,7 @@ import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
@@ -89,7 +91,8 @@ public class WorkspaceFilesService {
      * @param project      项目
      * @param relativePath 相对项目根的路径；空表示项目根目录
      * @return 该层条目，目录在前，其余按名字不区分大小写排序
-     * @throws IllegalArgumentException 路径越界，或那个路径不是目录
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
+     * @throws IllegalArgumentException 那个路径不是目录
      * @throws UncheckedIOException     读取目录失败
      */
     public List<FileEntryView> list(UserId owner, ProjectId project, String relativePath) {
@@ -124,7 +127,8 @@ public class WorkspaceFilesService {
      * @param project      项目
      * @param relativePath 相对主干项目根的路径；空表示项目根目录
      * @return 该层条目
-     * @throws IllegalArgumentException 路径越界，或那个路径不是目录
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
+     * @throws IllegalArgumentException 那个路径不是目录
      * @throws UncheckedIOException     读取目录失败
      */
     public List<FileEntryView> listTrunk(Project project, String relativePath) {
@@ -141,7 +145,8 @@ public class WorkspaceFilesService {
      * @param project      项目
      * @param relativePath 相对主干项目根的路径
      * @return 文件内容
-     * @throws IllegalArgumentException 路径越界，或那个路径不是普通文件
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
+     * @throws IllegalArgumentException 那个路径不是普通文件
      * @throws UncheckedIOException     读取文件失败
      */
     public FileContentView readTrunk(Project project, String relativePath) {
@@ -162,7 +167,8 @@ public class WorkspaceFilesService {
      * @param project      项目
      * @param relativePath 相对项目根的路径，必填
      * @return 文件内容；二进制文件带 {@code binary} 标志且内容为空
-     * @throws IllegalArgumentException 路径越界，或那个路径不是普通文件
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
+     * @throws IllegalArgumentException 那个路径不是普通文件
      * @throws UncheckedIOException     读取文件失败
      */
     public FileContentView read(UserId owner, ProjectId project, String relativePath) {
@@ -195,6 +201,82 @@ public class WorkspaceFilesService {
     // ------------------------------------------------------------------
 
     /**
+     * 用手改过的完整内容覆盖一个文本文件。
+     *
+     * <p>打开时读到的 {@code baseContent} 必须仍是磁盘上的内容；不一致就拒绝，而不是
+     * 把 agent、格式化器或另一个人刚写的改动盖掉。这和 Claude Code 的写文件保护是同一
+     * 条规则：先读、再改；读完之后文件变了，就重新读一遍再写。行尾先归一再比较，因为
+     * 浏览器 textarea 会把 CRLF 统一成 LF，但磁盘上那份仍可能是 CRLF。
+     *
+     * <p>只允许改普通文本文件：二进制、被 1 MiB 上限截断的文件都不接受编辑，后者
+     * 拿到的本来就不是全文，写回去会把后半段删掉。
+     *
+     * @param owner        树的所有者
+     * @param project      项目
+     * @param relativePath 相对项目根的路径
+     * @param baseContent  打开时读到的完整内容
+     * @param content      要写入的新内容
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
+     * @throws IllegalArgumentException 缺少打开时的内容
+     * @throws ResponseStatusException  404：文件不存在；409：文件已被别处修改；
+     *                                  413：文件或新内容过大；415：二进制文件
+     * @throws UncheckedIOException     写入失败
+     */
+    public void save(UserId owner, ProjectId project, String relativePath,
+                     String baseContent, String content) {
+        Path target = insideOwnTree(owner, project, relativePath);
+        if (!Files.isRegularFile(target)) {
+            throw notFound("没有这个文件：" + display(relativePath));
+        }
+        if (baseContent == null) {
+            throw new IllegalArgumentException("缺少打开时的内容，无法确认文件没有被改过");
+        }
+
+        long size = sizeOf(target);
+        if (size > MAX_READ_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                    "文件太大，不能在这里编辑：" + display(relativePath));
+        }
+        byte[] head = readHead(target, size);
+        if (looksBinary(head)) {
+            throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "二进制文件不能在这里编辑：" + display(relativePath));
+        }
+
+        String current;
+        try {
+            current = decodeText(Files.readAllBytes(target), false);
+        } catch (IOException e) {
+            throw new UncheckedIOException("读取文件失败：" + display(relativePath), e);
+        }
+        if (!normalizeNewlines(current).equals(normalizeNewlines(baseContent))) {
+            // 与 Claude Code 的提示同一句事实：不是“保存失败”，是“先重新读一遍”
+            throw conflict("文件已被别处修改，先重新读取再保存：" + display(relativePath));
+        }
+
+        String normalized = normalizeNewlines(content == null ? "" : content);
+        if (normalized.getBytes(StandardCharsets.UTF_8).length > MAX_READ_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                    "内容太大，不能在这里保存：" + display(relativePath));
+        }
+        // 保留原文件的行尾：浏览器把所有换行都变成 LF，直接写回去会让整份文件看起来
+        // 全变了；Windows 项目尤其明显
+        String toWrite = current.contains("\r\n")
+                ? normalized.replace("\n", "\r\n")
+                : normalized;
+        try {
+            Files.writeString(target, toWrite, StandardCharsets.UTF_8,
+                    StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+        } catch (IOException e) {
+            throw new UncheckedIOException("保存失败：" + display(relativePath), e);
+        }
+    }
+
+    private static String normalizeNewlines(String text) {
+        return text.replace("\r\n", "\n");
+    }
+
+    /**
      * 新建一个空文件或空目录。
      *
      * <p>这棵树就是普通工作目录，agent 也以同样方式往里写。新建的文件在下一个
@@ -205,7 +287,7 @@ public class WorkspaceFilesService {
      * @param project      项目
      * @param relativePath 相对项目根的路径
      * @param directory    true 建目录，false 建空文件
-     * @throws IllegalArgumentException 路径越界
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
      * @throws ResponseStatusException  409：上一级目录不存在，或目标已存在。
      *                                  存在即失败，绝不覆盖
      * @throws UncheckedIOException     创建失败
@@ -245,7 +327,7 @@ public class WorkspaceFilesService {
      * @param project 项目
      * @param from    源路径
      * @param to      目标路径
-     * @throws IllegalArgumentException 路径越界
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
      * @throws ResponseStatusException  404：源不存在；409：目标已存在、上一级目录不存在，
      *                                  或把目录挪进它自己里面
      * @throws UncheckedIOException     移动失败
@@ -284,7 +366,7 @@ public class WorkspaceFilesService {
      * @param owner        树的所有者
      * @param project      项目
      * @param relativePath 相对项目根的路径
-     * @throws IllegalArgumentException 路径越界
+     * @throws WorkspacePathGuard.PathEscapeException 路径越界
      * @throws ResponseStatusException  404：目标已经不存在
      * @throws UncheckedIOException     删除失败
      */
@@ -330,13 +412,8 @@ public class WorkspaceFilesService {
      */
     private Path projectRootOf(UserId owner, ProjectId project) {
         WorkspaceId workspaceId = WorkspaceId.of(owner, project);
-        return workspaces.find(workspaceId)
-                // 要项目根，不是工作区根：界面展示的是项目里有什么。见 ProjectLayout。
-                .map(ProjectLayout::rootOf)
-                .orElseThrow(() -> new IllegalStateException(
-                        "工作区 " + workspaceId + " 的目录不在磁盘上。"
-                                + "它本该在你第一次打开这个项目时就建好 —— 现在找不到，"
-                                + "只可能是被手工删掉了。"));
+        // 要项目根，不是工作区根：界面展示的是项目里有什么。见 ProjectLayout。
+        return ProjectLayout.rootOf(WorkspaceLookup.requireOnDisk(workspaces, workspaceId));
     }
 
     /** 越界一律抛 {@link WorkspacePathGuard.PathEscapeException}，由控制器翻成 400。 */
@@ -406,17 +483,39 @@ public class WorkspaceFilesService {
      * 字节转文本。
      *
      * <p>固定按 UTF-8 解，和 agent 的 {@code read_file} 同一个假设：前端显示的与模型
-     * 看到的必须是同一份。截断时把尾巴退到最后一个换行，避免多字节字符被从中间切开
-     * 而在末尾留下 U+FFFD。
+     * 看到的必须是同一份。截断时把尾巴退到最后一个换行；没有换行可退时退到最后一个
+     * 完整字符，避免多字节字符被从中间切开而在末尾留下 U+FFFD。
      */
     private static String decodeText(byte[] bytes, boolean truncated) {
+        int end = bytes.length;
         if (truncated) {
             int lastNewline = lastIndexOf(bytes);
-            if (lastNewline > 0) {
-                bytes = Arrays.copyOf(bytes, lastNewline + 1);
-            }
+            end = lastNewline > 0 ? lastNewline + 1 : utf8Boundary(bytes);
+            bytes = Arrays.copyOf(bytes, end);
         }
         return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 没有换行可退时，退到最后一个完整字符的边界。
+     *
+     * <p>截断上限是字节数，正好落在多字节字符中间时，硬解会得到 U+FFFD；退删掉这半个
+     * 字符即可。
+     */
+    private static int utf8Boundary(byte[] bytes) {
+        int end = bytes.length;
+        // 从尾部往回跳过至多 3 个续字节（10xxxxxx）
+        int continuation = 0;
+        while (end > 0 && continuation < 3 && (bytes[end - 1] & 0xC0) == 0x80) {
+            end--;
+            continuation++;
+        }
+        if (end == 0) {
+            return 0;
+        }
+        int lead = bytes[end - 1] & 0xFF;
+        int needed = lead < 0x80 ? 0 : lead >= 0xF0 ? 3 : lead >= 0xE0 ? 2 : lead >= 0xC0 ? 1 : 0;
+        return needed > continuation ? end - 1 : end;
     }
 
     private static int lastIndexOf(byte[] bytes) {

@@ -13,8 +13,8 @@ import com.codeloom.domain.user.UserId;
  *
  * <p>领域记录不携带列名和数据库形状（枚举、嵌套的模型配置），所以需要这个只负责搬行的
  * 类型。它不含分支、worktree 路径和 HEAD，那些属于 {@link WorkspaceRow}；也不含
- * {@code fencing_token}，那是并发控制的落点。列清单里没有它，写入时漏掉是看得见的，
- * 而一旦带上就会把号写回旧值。
+ * {@code fencing_token}，那是 workspace 行上的并发控制落点。列清单里没有它，写入时
+ * 漏掉是看得见的。
  */
 public record SessionRow(String id,
                          String projectId,

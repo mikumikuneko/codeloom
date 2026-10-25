@@ -76,8 +76,8 @@ public interface ProjectInvitationMapper {
     /**
      * 这个项目下还没被接受的邀请，新的在前。
      *
-     * <p>只过滤"已接受"，不过滤过期和撤销：那两种仍要在界面上显示为已失效并给出原因。
-     * 已接受的邀请已经兑现成成员身份，不再返回。
+     * <p>只过滤"已接受"，不过滤过期和撤销；可用性由调用方再判（见
+     * {@code InvitationService.pending}）。已接受的邀请已经兑现成成员身份，不再返回。
      *
      * @param projectId 项目 id
      * @return 待处理邀请，按创建时间倒序

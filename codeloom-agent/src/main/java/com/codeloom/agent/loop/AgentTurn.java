@@ -14,7 +14,7 @@ import com.codeloom.agent.tool.ToolOutcome;
 import com.codeloom.agent.tool.ReadLedger;
 import com.codeloom.agent.tool.ToolRegistry;
 import com.codeloom.agent.tool.ToolSurface;
-import com.codeloom.agent.tool.WorkspacePathGuard;
+import com.codeloom.domain.workspace.WorkspacePathGuard;
 import com.codeloom.domain.event.AssistantMessage;
 import com.codeloom.domain.event.LlmRetryScheduled;
 import com.codeloom.domain.event.PersistentEvent;
@@ -223,7 +223,7 @@ public final class AgentTurn {
         // 读过哪些文件是投影维护的派生事实，不必每轮重扫事件流。
         for (String path : input.projection().readPaths()) {
             try {
-                // 投影只有路径、没有版本，因此记为“版本未知”（见 ReadLedger“重启之后”）。
+                // 投影只有路径、没有版本，因此记为“版本未知”（见 ReadLedger 的 reconstructed）。
                 reads.markReconstructed(WorkspacePathGuard.resolve(input.worktree(), path));
             } catch (RuntimeException e) {
                 // 单个路径解析不了只跳过它：跳过一次，不跳过错
@@ -289,8 +289,8 @@ public final class AgentTurn {
             usage = usage.plus(result.usage());
             bench.rememberCall(result.usage());
 
-            // 只调工具、不说话的一轮也要落库，因为要保存它的思考；带 tool_calls 的消息缺了
-            // reasoning_content，下一次请求会返回 400（见 LlmMessage#assistant）。
+            // 有正文或有思考才落库：带 tool_calls 的消息缺了 reasoning_content，下一次请求
+            // 会返回 400（见 LlmMessage#assistant）；只调工具且无思考的一轮不产出消息。
             if (!result.text().isEmpty() || result.hasReasoning()) {
                 // 记录产出这条消息时的模型名；一轮内模型可能被切换。
                 bench.append(new AssistantMessage(result.text(), model,
@@ -614,7 +614,7 @@ public final class AgentTurn {
             bench.markMutated();
         }
 
-        // 工具只回报领域事实（目前只有任务清单），事件由这一层在结果之后写入。
+        // 工具只回报领域事实（见 ToolOutcome#todoUpdate），事件由这一层在结果之后写入。
         if (outcome.todoUpdate() != null) {
             bench.append(outcome.todoUpdate());
         }

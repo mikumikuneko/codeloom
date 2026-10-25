@@ -92,8 +92,9 @@ public final class ModelCatalog {
         return List.copyOf(ids);
     }
 
-    private static String stripTrailingSlash(String baseUrl) {
-        return baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+    static String stripTrailingSlash(String baseUrl) {
+        String trimmed = baseUrl.strip();
+        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
     }
 
     /** 只用于消息里那半句"谁说的"，读不出来就返回原串。 */

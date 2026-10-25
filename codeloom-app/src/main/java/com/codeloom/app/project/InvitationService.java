@@ -238,12 +238,13 @@ public class InvitationService {
         if (viewerId == null) {
             return Viewer.GUEST;
         }
-        // 发链接的人必然是成员，所以先问"是不是他发的"：两种身份都成立时，
-        // 对他更有用的是"这是你自己发的"
-        if (invitation.createdBy().equals(viewerId)) {
-            return Viewer.INVITER;
+        // 先确认现在还是成员：发链接的人可能已经退出，而只要项目里还有别人，邀请就
+        // 不会被删。已经不是成员的人不能因为"是他发的"拿到 INVITER。
+        if (!project.hasMember(viewerId)) {
+            return Viewer.GUEST;
         }
-        return project.hasMember(viewerId) ? Viewer.MEMBER : Viewer.GUEST;
+        // 两种身份都成立时，对他更有用的是"这是你自己发的"
+        return invitation.createdBy().equals(viewerId) ? Viewer.INVITER : Viewer.MEMBER;
     }
 
     // ------------------------------------------------------------------
@@ -262,8 +263,7 @@ public class InvitationService {
     /**
      * 拿着链接的人相对于它的身份。
      *
-     * <p>{@code INVITER} 蕴含 {@code MEMBER}（发链接的人必然在项目里），所以先判断
-     * "是不是他发的"。
+     * <p>{@code INVITER} 蕴含 {@code MEMBER}（此刻仍在项目里，且链接是他发的）。
      */
     public enum Viewer {
         /** 还没登录，或登录着但不在项目里；这张链接能让他进来 */

@@ -30,7 +30,7 @@ public record ToolSurface(Shape shape, String label, String subjectKey) {
         WEB,
         /** 跑命令：显示命令本身和退出码。 */
         EXECUTE,
-        /** 不碰工作区、只产出结构化的事实（目前只有任务清单）。 */
+        /** 不碰工作区、只产出结构化的领域事实（见 {@code ToolOutcome#todoUpdate}）。 */
         PLAN,
         /** 没声明形状的兜底：显示工具名和原始参数。 */
         OTHER

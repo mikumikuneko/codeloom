@@ -1,6 +1,6 @@
 package com.codeloom.app.files;
 
-import com.codeloom.agent.tool.WorkspacePathGuard;
+import com.codeloom.domain.workspace.WorkspacePathGuard;
 import com.codeloom.app.auth.CurrentUser;
 import com.codeloom.app.auth.ProjectAccess;
 import com.codeloom.domain.project.Project;
@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -58,7 +59,7 @@ public class WorkspaceFilesController {
      * @param projectId 项目
      * @param path      相对项目根的路径；省略就是项目根目录
      * @param owner     看谁的树；不传就是自己的，必须是这个项目的成员
-     * @param trunk     为 true 时看主干；和 {@code owner} 互斥
+     * @param trunk     为 true 时看主干；此时 {@code owner} 被忽略
      * @return 该层条目，目录在前，其余按名字不区分大小写排序
      * @throws IllegalArgumentException 路径越界，或那个路径不是目录
      */
@@ -84,7 +85,7 @@ public class WorkspaceFilesController {
      * @param projectId 项目
      * @param path      相对项目根的路径，必填
      * @param owner     看谁的树；不传就是自己的
-     * @param trunk     为 true 时读主干上的文件；和 {@code owner} 互斥
+     * @param trunk     为 true 时读主干上的文件；此时 {@code owner} 被忽略
      * @return 文件内容
      * @throws IllegalArgumentException 路径越界，或那个路径不是普通文件
      */
@@ -101,6 +102,31 @@ public class WorkspaceFilesController {
         }
         UserId whose = whoseTree(me, project, owner);
         return guarded(() -> files.read(whose, project.id(), path));
+    }
+
+    /**
+     * 保存一个文本文件的新内容。
+     *
+     * <p>写接口没有 {@code owner}，只能写自己那棵树。请求里带打开时读到的
+     * {@code baseContent}：磁盘上那份已经变了就回 409，让前端先重新读取，绝不静默
+     * 覆盖 agent 或另一个人刚写的改动。规则与 Claude Code 的“写前先读”一致。
+     *
+     * @param principal 当前身份
+     * @param projectId 项目
+     * @param request   路径、打开时的内容和新内容
+     * @throws IllegalArgumentException 路径越界，或缺少打开时的内容
+     * @throws org.springframework.web.server.ResponseStatusException 404：文件不存在；
+     *         409：文件已被别处修改；413：文件或新内容过大；415：二进制文件
+     */
+    @PutMapping("/api/projects/{projectId}/files/content")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void save(Principal principal,
+                     @PathVariable String projectId,
+                     @RequestBody SaveRequest request) {
+        User me = currentUser.require(principal);
+        Project project = access.requireMember(me.id(), ProjectId.of(projectId));
+        guarded(() -> files.save(me.id(), project.id(), request.path(),
+                request.baseContent(), request.content()));
     }
 
     /**
@@ -171,6 +197,16 @@ public class WorkspaceFilesController {
     }
 
     /**
+     * 保存请求。
+     *
+     * @param path        相对项目根的路径
+     * @param baseContent 打开时读到的完整内容，用来发现“这期间被别处改过”
+     * @param content     要写入的新内容
+     */
+    public record SaveRequest(String path, String baseContent, String content) {
+    }
+
+    /**
      * 新建请求。
      *
      * @param path      相对项目根的路径
@@ -196,15 +232,12 @@ public class WorkspaceFilesController {
      * <p>别人必须是项目成员，否则 404：“不存在的人”和“不是这个项目的人”在客户端看来
      * 必须一样，否则拿一批 id 就能枚举出用户。
      */
-    private static UserId whoseTree(User me, Project project, String owner) {
+    private UserId whoseTree(User me, Project project, String owner) {
         if (owner == null || owner.isBlank()) {
             return me.id();
         }
         UserId whose = UserId.of(owner);
-        if (!project.hasMember(whose)) {
-            throw new org.springframework.web.server.ResponseStatusException(
-                    org.springframework.http.HttpStatus.NOT_FOUND, "项目不存在");
-        }
+        access.requireMembership(project, whose);
         return whose;
     }
 

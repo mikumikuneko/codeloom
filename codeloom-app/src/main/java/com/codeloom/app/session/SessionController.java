@@ -40,9 +40,10 @@ import java.util.List;
 /**
  * 会话接口：建、查、列、发消息、中断、换模型、审批、留言、读事件、丢弃、回滚。
  *
- * <p>{@code POST /messages} 是阻塞的，等到这一轮跑完才返回；模型调用和工具执行本身都有
- * 超时，因此不引入任务队列。进度不从该响应看：同时挂着的 SSE
- * {@code GET /api/sessions/{id}/stream} 实时输出，这个响应只给最终结论。
+ * <p>{@code POST /messages} 在没有一轮在跑时阻塞到这一轮结束，然后返回最终结论；已有
+ * 一轮在跑时只进内存排队并立刻返回 202。模型调用和工具执行本身都有超时，不引入持久
+ * 任务队列。进度不从该响应看：同时挂着的 SSE {@code GET /api/sessions/{id}/stream}
+ * 实时输出。
  */
 @RestController
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -109,7 +110,7 @@ public class SessionController {
                                   @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
         Project project = access.requireMember(me.id(), ProjectId.of(projectId));
-        return sessions.listFor(project, Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
+        return sessions.listFor(project, PageLimits.limit(limit), PageLimits.offset(offset));
     }
 
     /**
@@ -300,7 +301,7 @@ public class SessionController {
         Session session = access.requireVisible(me.id(), SessionId.of(sessionId));
         // 上限保护服务端，防止一次拉回无限多；下限也保护语义：limit=0 会被误读成"没有事件"。
         // 与别的列表共用 PageLimits，同一个 ?limit= 在各端点含义一致
-        int bounded = Math.clamp(limit, 1, PageLimits.MAX);
+        int bounded = PageLimits.limit(limit);
         return eventStore.readAfter(session.id(), afterSeq, bounded).stream()
                 .map(stored -> envelopeJson(EventEnvelope.of(stored)))
                 .toList();

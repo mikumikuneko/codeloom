@@ -6,6 +6,7 @@ import com.codeloom.domain.event.TodoListUpdated;
  * 一次工具执行的结果，是执行层返回值，不是要落库的领域事件
  * （后者是 {@code com.codeloom.domain.event.ToolResult}）。
  *
+ * @param success      这次调用是否成功；取消与执行错误都是 false
  * @param output       给模型看的文本；失败时也必须有内容
  * @param truncated    是否发生截断；截断未说明会让模型误以为输出完整
  * @param exitCode     命令类工具的退出码；纯内存工具为 null
@@ -81,7 +82,7 @@ public record ToolOutcome(boolean success,
     }
 
     /**
-     * 成功并产出一条领域事实（目前只有任务清单）；不算改动工作区。
+     * 成功并产出一条领域事实；不算改动工作区。
      *
      * @param update 领域事实
      * @param output 给模型看的文本

@@ -23,7 +23,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -100,10 +99,7 @@ public class MergeService {
             if (result.status() == MergeResult.Status.CONFLICT) {
                 // 冲突时不验证：主干停在合并中途，构建只会报冲突标记的语法错误。
                 // 冲突路径翻成项目路径再交给客户端，裁决用的都是项目里的名字
-                throw new ConflictPendingException(result.conflictingPaths().stream()
-                        .map(ProjectLayout::toProjectPath)
-                        .filter(Objects::nonNull)
-                        .toList());
+                throw new ConflictPendingException(ProjectMerger.projectPaths(result.conflictingPaths()));
             }
             return MergeOutcome.of(result.status().name(), result.headCommit(),
                     verify(session, project, token, result.headCommit()), List.of());

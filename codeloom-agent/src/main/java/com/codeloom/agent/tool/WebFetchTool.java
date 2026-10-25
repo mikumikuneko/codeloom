@@ -66,7 +66,7 @@ public final class WebFetchTool implements Tool {
         // 网页正文没有天然上界，超出后无法分页取回，必须截断并说明。
         boolean truncated = content.length() > ToolLimits.MAX_OUTPUT_CHARS;
         if (truncated) {
-            content = head(content, ToolLimits.MAX_OUTPUT_CHARS);
+            content = TextLimits.head(content, ToolLimits.MAX_OUTPUT_CHARS);
         }
 
         StringBuilder out = new StringBuilder(UNTRUSTED_NOTICE).append("\n\n");
@@ -102,11 +102,4 @@ public final class WebFetchTool implements Tool {
      * @param limit 字符上限
      * @return 截断后的文本
      */
-    private static String head(String text, int limit) {
-        int end = limit;
-        if (end > 0 && Character.isHighSurrogate(text.charAt(end - 1))) {
-            end--;
-        }
-        return text.substring(0, end);
-    }
 }

@@ -7,6 +7,7 @@ import java.util.Objects;
  * 对话里的一条消息，provider 无关的中间表示（IR）。协议差异（字段名、content 形状）
  * 由适配器处理，agent 循环只与这个类型打交道。
  *
+ * @param role       这条消息是谁说的
  * @param content    正文；{@link LlmRole#TOOL} 消息里是工具执行结果
  * @param toolCalls  仅 {@link LlmRole#ASSISTANT}：模型发起的工具调用
  * @param toolCallId 仅 {@link LlmRole#TOOL}：回应的是哪一次调用

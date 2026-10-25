@@ -282,6 +282,11 @@ class InvitationApiTest {
         assertThat(member.post("/api/invitations/" + forGuest + "/accept", "{}").statusCode())
                 .isEqualTo(200);
         assertThat(viewerOf(member, forGuest)).isEqualTo("MEMBER");
+
+        // 发起人退出后邀请还在（项目里还有别人），但他已经不是成员：不能再算 INVITER
+        assertThat(owner.delete("/api/projects/" + projectId.value() + "/members/me").statusCode())
+                .isEqualTo(204);
+        assertThat(viewerOf(owner, forGuest)).isEqualTo("GUEST");
     }
 
     /** 拿着这张链接的人是谁（预览里那一栏）。 */

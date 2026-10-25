@@ -249,10 +249,6 @@ public class ContextCompactor {
             if (estimated < fullThreshold) {
                 return clearOldResults(session, history, token);
             }
-            if (!shouldCompact(history, session)) {
-                consecutiveFailures.remove(session.id());
-                return Optional.empty();
-            }
         }
         if (consecutiveFailures.getOrDefault(session.id(), 0) >= MAX_CONSECUTIVE_FAILURES) {
             return Optional.empty();
@@ -281,10 +277,6 @@ public class ContextCompactor {
                     session.id(), consecutiveFailures.get(session.id()), e);
             return Optional.empty();
         }
-    }
-
-    private boolean shouldCompact(List<StoredEvent> history, Session session) {
-        return estimatedTokens(history, session) >= fullThreshold(session);
     }
 
     /**

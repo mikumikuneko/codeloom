@@ -41,20 +41,33 @@ public class ProjectArchive {
      *
      * @param project 要导出的项目
      * @return 临时文件及下载名；调用方负责 {@link #discard}
-     * @throws UncheckedIOException 临时文件创建或导出失败
+     * @throws UncheckedIOException 临时文件创建失败；git 导出失败时原样抛出
+     *                              {@code GitCommandException}
      */
     public Archived of(Project project) {
         String stem = safeStem(project.name());
+        Path staging = null;
         try {
             // 系统临时目录 + 随机名字：内容没有秘密，但也没有理由放在可预测的位置
-            Path staging = Files.createTempDirectory("codeloom-archive-");
+            staging = Files.createTempDirectory("codeloom-archive-");
             Path zip = staging.resolve(stem + ".zip");
             // 只导项目根子树：仓库里还有 untitled 这一层，"下载这个项目"不该多出它
             workspaces.archive(Path.of(project.repoPath()),
                     WorkspaceManager.MAIN_BRANCH + ":" + ProjectLayout.DIRECTORY, zip);
             return new Archived(zip, stem + "-main.zip");
         } catch (IOException e) {
+            discardQuietly(staging);
             throw new UncheckedIOException("导不出这个项目：" + project.id(), e);
+        } catch (RuntimeException e) {
+            // 流还没开始，控制器拿不到 Archived，不会有人替这里清理
+            discardQuietly(staging);
+            throw e;
+        }
+    }
+
+    private static void discardQuietly(Path staging) {
+        if (staging != null) {
+            Directories.deleteRecursively(staging);
         }
     }
 

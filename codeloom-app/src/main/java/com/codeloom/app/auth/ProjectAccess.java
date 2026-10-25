@@ -48,6 +48,22 @@ public class ProjectAccess {
     }
 
     /**
+     * 确认某个人是这个项目的成员；不是就按项目不存在回答。
+     *
+     * <p>给已经拿到 {@link Project} 的调用方用（例如“看谁的树”那个参数）：
+     * 规则和 {@link #requireMember} 是同一句，别在别处再写一遍。
+     *
+     * @param project 项目
+     * @param userId  要确认的人
+     * @throws ResponseStatusException 404：这个人不是成员
+     */
+    public void requireMembership(Project project, UserId userId) {
+        if (!project.hasMember(userId)) {
+            throw notFound("项目不存在");
+        }
+    }
+
+    /**
      * 取一条会话，并确认这个人看得见它（是它所属项目的成员）。
      *
      * @param userId    当前用户

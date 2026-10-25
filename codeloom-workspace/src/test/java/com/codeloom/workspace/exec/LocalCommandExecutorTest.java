@@ -253,7 +253,7 @@ class LocalCommandExecutorTest {
     @DisplayName("【引号能活到子进程手里】带空格的参数原样到达 —— 走脚本文件换来的")
     void quotedArgumentsArriveIntact() {
         // 直接走 bash -c 时引号会在 JVM 到 MSYS 的路上被吃掉（实测输出 "x" 而不是
-        // "x y"）；落成脚本后，命令行上只有一个纯 ASCII 路径
+        // "x y"）；落成脚本后，命令行上只有一个独立的路径参数
         CommandResult result = executor().execute(
                 workspace, "printf '%s\\n' \"x y\"",
                 Duration.ofSeconds(30), 10_000, CancellationToken.none());

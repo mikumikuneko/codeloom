@@ -87,18 +87,19 @@ public interface EventMapper {
     EventRow findLastOfType(@Param("sessionId") String sessionId, @Param("type") String type);
 
     /**
-     * 最后一次开启一轮的事件：用户发言、别的 agent 的留言或平台指令。
+     * 最后一次开启一轮的事件：用户发言、别的 agent 的留言，或批准后继续跑。
      *
-     * <p>这三种之外的事件都是轮内产物。用量事件只有在轮真正收尾时才写，拿它和最后一条
-     * 开启事件比先后，就能判断最后一轮有没有读数；只看最后一条用量事件会把上一轮的
-     * 读数当成这一轮的。
+     * <p>这三种之外的事件都是轮内产物；平台指令尤其不是开轮——它由 {@code AgentTurn}
+     * 在轮内注入（输出被截断、验证失败时）。用量事件只有在轮真正收尾时才写，拿它和
+     * 最后一条开启事件比先后，就能判断最后一轮有没有读数；只看最后一条用量事件会把
+     * 上一轮的读数当成这一轮的。
      *
      * @param sessionId 会话
      * @return 最后一条开启事件；没有时为 null
      */
     @Select("SELECT " + EventRow.COLUMNS
             + " FROM `event` WHERE session_id = #{sessionId}"
-            + " AND `type` IN ('USER_MESSAGE', 'AGENT_NOTE_DELIVERED', 'PLATFORM_INSTRUCTION')"
+            + " AND `type` IN ('USER_MESSAGE', 'AGENT_NOTE_DELIVERED', 'TOOL_APPROVAL_RESOLVED')"
             + " ORDER BY id DESC LIMIT 1")
     EventRow findLastTurnStart(@Param("sessionId") String sessionId);
 

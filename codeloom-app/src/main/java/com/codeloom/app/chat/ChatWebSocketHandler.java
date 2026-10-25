@@ -141,8 +141,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             return;
         }
 
-        // 这里不重新查成员身份：连接是长命的，但“移出成员”这个功能还不存在。
-        // 将来加入它时，必须同时踢掉该用户已建立的连接，而不是在每条消息上加一次查库。
+        // 这里不重新查成员身份：连接建立时已经查过，长连接不该为每条消息多一次查库。
+        // 代价是成员被移除后连接仍然有效；真要支持移除，必须同时踢掉已建立的连接，
+        // 而不是在每条消息上加一次查库。
         ChatInbound inbound;
         try {
             inbound = mapper.readValue(message.getPayload(), ChatInbound.class);

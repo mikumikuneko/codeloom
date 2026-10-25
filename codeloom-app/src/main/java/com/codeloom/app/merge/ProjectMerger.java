@@ -5,6 +5,7 @@ import com.codeloom.app.session.CommitIdentities;
 import com.codeloom.domain.port.MergeResult;
 import com.codeloom.domain.port.ProjectRepository;
 import com.codeloom.domain.port.Workspace;
+import com.codeloom.app.workspace.WorkspaceLookup;
 import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.project.Project;
 import com.codeloom.domain.session.Session;
@@ -111,7 +112,7 @@ public class ProjectMerger {
     }
 
     /** 一串 git 路径转为项目路径，丢掉项目外面的那些（见 ProjectLayout.toProjectPath）。 */
-    private static List<String> projectPaths(List<String> gitPaths) {
+    static List<String> projectPaths(List<String> gitPaths) {
         return gitPaths.stream().map(ProjectLayout::toProjectPath).filter(Objects::nonNull).toList();
     }
 
@@ -234,9 +235,7 @@ public class ProjectMerger {
      */
     private Workspace workspaceOf(Session session) {
         // 问磁盘（WorkspaceManager），不是库里的行；两者都叫 find
-        return workspaces.find(session.workspaceId())
-                .orElseThrow(() -> new IllegalStateException(
-                        "会话 " + session.id() + " 的工作区目录不在磁盘上"));
+        return WorkspaceLookup.requireOnDisk(workspaces, session.workspaceId());
     }
 
     /**

@@ -21,8 +21,8 @@ import java.util.Objects;
  *                       被引用事件的正文可能很长，这里只回答"指的是哪一步"。发送时抄下来
  *                       一起存：那条事件属于对方的 agent 流，聊天室看不到它，且会随会话
  *                       清理而变样甚至消失。由引用方前端在按下"引用"时渲染，服务端原样
- *                       落库、原样推送，不生成也不校验。目前引用界面不存在，前端永远发
- *                       null；字段与"同生共死"的校验都还在，以上是设计意图。
+ *                       落库、原样推送，不生成也不校验；它与 {@code anchorEventSeq} 必须
+ *                       同时有或同时无（构造器校验）。
  * @param createdAt      消息创建时间
  */
 public record ChatMessage(ChatMessageId id,

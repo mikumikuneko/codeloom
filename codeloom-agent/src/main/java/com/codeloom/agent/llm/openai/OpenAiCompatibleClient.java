@@ -163,7 +163,7 @@ public final class OpenAiCompatibleClient implements LlmClient {
         }
         // 思考过程原样回灌：思维链模式下带 tool_calls 的 assistant 消息必须携带
         // reasoning_content，否则返回 400。字段名在请求方向只出现在这一处；没有就不发，不发空串。
-        // 响应方向的解析见 {@link OpenAiStreamAccumulator}。
+        // 响应方向的解析见 OpenAiStreamAccumulator。
         // 是否发送还取决于来源模型，见 reasoningToSend。
         String reasoning = reasoningToSend(message, targetModel);
         if (reasoning != null) {
@@ -349,7 +349,6 @@ public final class OpenAiCompatibleClient implements LlmClient {
     }
 
     private static String stripTrailingSlash(String url) {
-        String trimmed = url.strip();
-        return trimmed.endsWith("/") ? trimmed.substring(0, trimmed.length() - 1) : trimmed;
+        return ModelCatalog.stripTrailingSlash(url);
     }
 }

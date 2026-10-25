@@ -138,7 +138,7 @@ public class ProjectController {
                                   @RequestParam(defaultValue = "0") int offset,
                                   @RequestParam(defaultValue = PageLimits.DEFAULT_PARAM) int limit) {
         User me = currentUser.require(principal);
-        return projects.listFor(me.id(), Math.clamp(limit, 1, PageLimits.MAX), Math.max(0, offset));
+        return projects.listFor(me.id(), PageLimits.limit(limit), PageLimits.offset(offset));
     }
 
     /**

@@ -4,7 +4,9 @@ import com.codeloom.domain.user.UserId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -27,5 +29,17 @@ class ProjectInvitationTest {
         Instant truncated = Instant.parse("2026-09-25T10:00:00.123Z");
         assertThat(invitation.createdAt()).isEqualTo(truncated);
         assertThat(invitation.expiresAt()).isEqualTo(truncated.plus(ProjectInvitation.DEFAULT_TTL));
+    }
+
+    @Test
+    @DisplayName("有效期带亚毫秒时，过期时间也截到毫秒")
+    void expiresAtIsTruncatedToMillis() {
+        Instant now = Instant.parse("2026-09-25T10:00:00Z");
+        Duration ttl = ProjectInvitation.DEFAULT_TTL.plusNanos(500_000);
+
+        ProjectInvitation invitation = ProjectInvitation.issue(PROJECT, OWNER, now, ttl);
+
+        assertThat(invitation.expiresAt())
+                .isEqualTo(now.plus(ttl).truncatedTo(ChronoUnit.MILLIS));
     }
 }

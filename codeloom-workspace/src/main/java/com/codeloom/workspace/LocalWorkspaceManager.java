@@ -7,6 +7,7 @@ import com.codeloom.domain.port.WorkspaceManager;
 import com.codeloom.domain.workspace.FileChange;
 import com.codeloom.domain.workspace.FileDiff;
 import com.codeloom.domain.workspace.WorkspaceId;
+import com.codeloom.domain.workspace.WorkspacePathGuard;
 import com.codeloom.workspace.git.GitClient;
 
 import java.io.IOException;
@@ -230,10 +231,13 @@ public final class LocalWorkspaceManager implements WorkspaceManager {
         Path root = requireDirectory(worktree);
 
         // 应用层已保证 path 是 git 报出的冲突文件；这里防的是路径逃出仓库 ——
-        // 这是本类唯一一处把内容写到磁盘上的操作，不靠上游检查推断安全
-        Path target = root.resolve(path).normalize();
-        if (!target.startsWith(root)) {
-            throw new IllegalArgumentException("路径越出了仓库：" + path);
+        // 这是本类唯一一处把内容写到磁盘上的操作，不靠上游检查推断安全。
+        // 和工具侧共用同一个守卫（相对路径、normalize、已存在时复核真实路径）。
+        Path target;
+        try {
+            target = WorkspacePathGuard.resolve(root, path);
+        } catch (WorkspacePathGuard.PathEscapeException e) {
+            throw new IllegalArgumentException(e.getMessage(), e);
         }
         try {
             Files.writeString(target, content, StandardCharsets.UTF_8);

@@ -6,7 +6,6 @@ import com.codeloom.agent.llm.TokenUsage;
  * 单轮 token 熔断：超限时由循环注入收尾指令让模型自己收束，而不是掐断连接。
  *
  * <p>只有单轮这一层：BYOK 下费用属于用户，不存在平台累计限额；本层管的是单轮自旋。
- * 单会话与当日预算曾存在，但其输入恒为 {@code TokenUsage.UNKNOWN}，比较恒为假，已删除。
  *
  * @param perTurnLimit 单轮上限
  */

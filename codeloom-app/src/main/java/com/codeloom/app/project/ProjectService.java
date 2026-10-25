@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * 项目的用例：建、查、列、退出。
@@ -206,15 +207,12 @@ public class ProjectService {
      */
     private List<SessionId> sessionIdsOf(ProjectId projectId, UserId owner) {
         List<SessionId> ids = new ArrayList<>();
-        for (int offset = 0; ; offset += SESSION_PAGE) {
-            List<Session> page = sessions.findByProject(projectId, SESSION_PAGE, offset);
-            page.stream()
-                    .filter(session -> session.ownerId().equals(owner))
-                    .forEach(session -> ids.add(session.id()));
-            if (page.size() < SESSION_PAGE) {
-                return ids;
+        forEachSession(projectId, session -> {
+            if (session.ownerId().equals(owner)) {
+                ids.add(session.id());
             }
-        }
+        });
+        return ids;
     }
 
     /**
@@ -225,11 +223,22 @@ public class ProjectService {
      */
     private Map<WorkspaceId, Session> oneSessionPerTree(ProjectId projectId) {
         Map<WorkspaceId, Session> perTree = new LinkedHashMap<>();
+        forEachSession(projectId, session -> perTree.putIfAbsent(session.workspaceId(), session));
+        return perTree;
+    }
+
+    /**
+     * 按页遍历这个项目里的会话。
+     *
+     * <p>必须翻到底：一个人的会话可以多到占满第一页。两个调用方只是收集方式不同，
+     * 翻页骨架只有这一份。
+     */
+    private void forEachSession(ProjectId projectId, Consumer<Session> action) {
         for (int offset = 0; ; offset += SESSION_PAGE) {
             List<Session> page = sessions.findByProject(projectId, SESSION_PAGE, offset);
-            page.forEach(session -> perTree.putIfAbsent(session.workspaceId(), session));
+            page.forEach(action);
             if (page.size() < SESSION_PAGE) {
-                return perTree;
+                return;
             }
         }
     }

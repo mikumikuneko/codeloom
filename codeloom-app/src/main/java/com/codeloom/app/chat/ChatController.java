@@ -59,7 +59,7 @@ public class ChatController {
         ProjectId project = ProjectId.of(projectId);
         access.requireMember(me.id(), project);
 
-        int bounded = Math.clamp(limit, 1, PageLimits.MAX);
+        int bounded = PageLimits.limit(limit);
         // after 与 recent 两条路在仓储里都已统一成时间正序。
         return (afterId == null
                 ? messages.findRecent(project, bounded)

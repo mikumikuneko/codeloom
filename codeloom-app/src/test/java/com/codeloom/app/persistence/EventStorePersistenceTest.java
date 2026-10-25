@@ -4,6 +4,7 @@ import com.codeloom.app.support.AbstractPersistenceTest;
 import com.codeloom.app.support.TestSessions;
 import com.codeloom.domain.event.AssistantMessage;
 import com.codeloom.domain.event.StoredEvent;
+import com.codeloom.domain.event.ToolApprovalResolved;
 import com.codeloom.domain.event.ToolCallRequested;
 import com.codeloom.domain.event.ToolResult;
 import com.codeloom.domain.event.TurnTokensUsed;
@@ -101,6 +102,14 @@ class EventStorePersistenceTest extends AbstractPersistenceTest {
         // 取消的轮次只会留下开轮消息，不会写用量事件；不能把上一轮的读数当成这一轮的。
         // 这是刻意的降级：调用方退回读整条流自己往前找，而不是拿过期的数糊弄。
         events.append(session.id(), new UserMessage("第二轮"), acquire(session));
+        assertThat(events.lastContextTokens(session.id())).isEmpty();
+
+        // 批准挂起的调用也算开轮：批准会写 ToolApprovalResolved，然后继续跑。
+        // 不把它算进去的话，续跑期间会拿上一轮的读数冒充这一轮。
+        events.append(session.id(), List.of(new UserMessage("第三轮"), settledWith(55_000)),
+                acquire(session));
+        events.append(session.id(),
+                new ToolApprovalResolved("call_1", true, UserId.of("u-1"), null), acquire(session));
         assertThat(events.lastContextTokens(session.id())).isEmpty();
 
         // 服务商没报用量的正常收尾同样问不出来

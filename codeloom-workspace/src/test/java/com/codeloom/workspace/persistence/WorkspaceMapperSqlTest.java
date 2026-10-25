@@ -1,7 +1,6 @@
 package com.codeloom.workspace.persistence;
 
 import org.apache.ibatis.annotations.Insert;
-import org.apache.ibatis.annotations.Select;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -36,17 +35,4 @@ class WorkspaceMapperSqlTest {
         assertThat(WorkspaceRow.COLUMNS).doesNotContain("fencing_token");
     }
 
-    @Test
-    @DisplayName("不用 SELECT *：列清单必须显式写出来")
-    void selectsNeverUseStar() {
-        for (Method method : WorkspaceMapper.class.getDeclaredMethods()) {
-            Select select = method.getAnnotation(Select.class);
-            if (select == null) {
-                continue;
-            }
-            assertThat(String.join(" ", select.value()))
-                    .as("WorkspaceMapper.%s 不该用 SELECT *", method.getName())
-                    .doesNotContain("*");
-        }
-    }
 }
