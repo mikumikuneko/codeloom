@@ -276,16 +276,16 @@ function ProviderForm({
 
       {preset.supportsReasoningEffort && (
         <div className="space-y-1.5">
-          <Label htmlFor="provider-reasoning">思考强度</Label>
+          <Label htmlFor="provider-reasoning">推理等级</Label>
           <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
             <SelectTrigger id="provider-reasoning">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="none">关闭思考</SelectItem>
-              <SelectItem value="low">低</SelectItem>
-              <SelectItem value="high">高</SelectItem>
-              <SelectItem value="max">最高</SelectItem>
+              <SelectItem value="none">Off</SelectItem>
+              <SelectItem value="low">Low</SelectItem>
+              <SelectItem value="high">High</SelectItem>
+              <SelectItem value="max">Max</SelectItem>
             </SelectContent>
           </Select>
         </div>
