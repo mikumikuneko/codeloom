@@ -104,19 +104,47 @@ export function ComposerBox({
    *
    * 先归零再量：不归零量到的是上一次的高度，删字之后框缩不回去。量到上限就不再长，
    * 再多由 textarea 自己滚。
+   *
+   * 高度不只由文字决定：聊天室切到别的标签时外层是 display: none，这时 scrollHeight
+   * 恒为 0，照着写就把框压没了；切回来 text 没变，这个 effect 也不会重跑。拖窄右栏
+   * 同样会改变换行数。所以除了文字，还要盯着尺寸本身：从 0 恢复可见、或宽度变了，
+   * 就重新量一次。只比宽度，因为高度正是这里在改的东西，盯它会自己触发自己。
    */
   useEffect(() => {
     const element = box.current
     if (!element) {
       return
     }
-    element.style.height = 'auto'
-    element.style.height = `${Math.min(element.scrollHeight, MAX_HEIGHT_PX)}px`
+
+    let lastWidth = element.clientWidth
+
+    const fit = () => {
+      // display: none 时量不到内容高度；等它真有尺寸再说
+      if (element.scrollHeight === 0) {
+        return
+      }
+      element.style.height = 'auto'
+      element.style.height = `${Math.min(element.scrollHeight, MAX_HEIGHT_PX)}px`
+    }
+
+    fit()
+
+    const observer = new ResizeObserver(() => {
+      if (element.clientWidth === lastWidth) {
+        return
+      }
+      lastWidth = element.clientWidth
+      fit()
+    })
+    observer.observe(element)
+
     if (caretAfter.current !== null) {
       element.selectionStart = caretAfter.current
       element.selectionEnd = caretAfter.current
       caretAfter.current = null
     }
+
+    return () => observer.disconnect()
   }, [text])
 
   async function submit() {
