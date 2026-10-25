@@ -780,7 +780,11 @@ function TurnTail({
   return (
     // 改动那一格排最后：它展开的文件列表很宽（一条长路径就能撑开整行），排中间的
     // 话一展开就把后面的东西挤到下一行，"这一轮用了多久"会跳位置
-    <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-border/40 pt-2">
+    //
+    // items-start 而不是 items-baseline：第一个子项是 <details>，它的 summary 又是
+    // 个 flex 容器（items-center），对外拿不出文字基线，只有合成的底边基线，「用时」
+    // 会被压低两像素。顶部对齐同时也让里面那张明细展开时，剩下两格停在第一行。
+    <div className="flex flex-wrap items-start gap-x-4 gap-y-1 border-t border-border/40 pt-2">
       <UsageRow
         input={item.input}
         output={item.output}
